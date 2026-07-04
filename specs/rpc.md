@@ -180,10 +180,12 @@ are not connectable from containers):
 - `ASH_RPC_HOST`
 - `ASH_RPC_PORT`
 
-Host runtime binds TCP listener on loopback and projects container-facing
+Host runtime binds TCP listener on a container-reachable interface and projects container-facing
 transport hints into per-runtime sandbox env via integration hooks:
 - default host alias: `host.docker.internal`
 - override alias: `ASH_RPC_DOCKER_HOST_ALIAS` (host runtime env)
+- default bind host: `0.0.0.0`
+- override bind host: `ASH_RPC_TCP_BIND_HOST` (host runtime env)
 
 `active_rpc_server` MUST NOT mutate process-global `ASH_RPC_HOST/ASH_RPC_PORT`.
 Transport hints are runtime-scoped and injected into sandbox command env only.

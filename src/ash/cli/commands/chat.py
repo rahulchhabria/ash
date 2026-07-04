@@ -19,6 +19,12 @@ from ash.cli.console import console, error
 
 logger = logging.getLogger(__name__)
 
+PROVIDER_ENV_VARS = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "pioneer": "PIONEER_API_KEY",
+}
+
 
 def _resolve_model_alias(model_alias: str | None) -> str:
     """Resolve model alias with CLI/env/default precedence."""
@@ -49,7 +55,7 @@ def _validate_model_credentials(ash_config: AshConfig, alias: str) -> None:
     api_key = ash_config.resolve_api_key(alias)
     if api_key is None:
         provider = model_config.provider
-        env_var = "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY"
+        env_var = PROVIDER_ENV_VARS.get(provider, "OPENAI_API_KEY")
         error(
             f"No API key for provider '{provider}'. Set {env_var} or api_key in config"
         )

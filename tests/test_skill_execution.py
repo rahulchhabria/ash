@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from ash.agents.types import AgentContext
+from ash.agents.types import AgentContext, ChildActivated
 from ash.config.models import AshConfig, SkillConfig
 from ash.skills.types import SkillDefinition
 from ash.tools.base import ToolContext
@@ -84,6 +84,22 @@ class TestSkillAgent:
 
         assert "call `complete`" in prompt
         assert "control returns to the parent agent" in prompt
+
+    def test_system_prompt_enforces_exact_output_contracts(self):
+        """Skill wrapper should preserve exact-output instructions like [NO_REPLY]."""
+        skill = SkillDefinition(
+            name="test",
+            description="Test",
+            instructions="Return [NO_REPLY] when there is nothing to send.",
+        )
+        agent = SkillAgent(skill)
+        context = AgentContext()
+
+        prompt = agent.build_system_prompt(context)
+
+        assert "treat that as mandatory and return it exactly" in prompt
+        assert "stay silent for a no-op result" in prompt
+        assert "helpful” footnotes" in prompt
 
     def test_augmenter_lines_appended_to_system_prompt(self):
         """Instruction augmenter lines should appear in system prompt."""
@@ -317,6 +333,25 @@ class TestUseSkillToolErrorHandling:
         assert result.is_error
         assert "blocked by security policy" in result.content
 
+    @pytest.mark.asyncio
+    async def test_511_api_key_allowed_by_exception(self, tool, registry):
+        skill = SkillDefinition(
+            name="test",
+            description="Test",
+            instructions="x",
+            env=["511_API_KEY", "SERVICE_URL"],
+        )
+        registry.has.return_value = True
+        registry.get.return_value = skill
+        tool._config.skills = {
+            "test": SkillConfig(
+                **{"511_API_KEY": "secret", "SERVICE_URL": "https://example.com"}
+            )
+        }  # type: ignore[arg-type]
+
+        with pytest.raises(ChildActivated):
+            await tool.execute({"skill": "test", "message": "do"})
+
 
 class TestUseSkillToolExecution:
     """Tests for UseSkillTool execution behavior (ChildActivated path)."""
@@ -359,6 +394,57 @@ class TestUseSkillToolExecution:
         messages = frame.session.get_messages_for_llm()
         assert len(messages) >= 1
         assert messages[0].role == "user"
+
+    @pytest.mark.asyncio
+    async def test_google_email_model_override_applies_only_to_email_messages(self):
+        skill = SkillDefinition(
+            name="google",
+            description="Google skill",
+            instructions="Use Google.",
+        )
+        registry = MagicMock()
+        registry.has.return_value = True
+        registry.get.return_value = skill
+        executor = MagicMock()
+        config = _mock_config(
+            skills={"google": SkillConfig(email_model="school_email_pioneer")},
+            agents={},
+            skill_defaults=SimpleNamespace(allow_chat_ids=[]),
+        )
+        config.get_model.return_value.model = "job_school_email"
+        tool = UseSkillTool(registry, executor, config)
+
+        with pytest.raises(ChildActivated) as exc_info:
+            await tool.execute({"skill": "google", "message": "summarize my inbox"})
+
+        frame = exc_info.value.child_frame
+        assert frame.model_alias == "school_email_pioneer"
+        assert frame.model == "job_school_email"
+
+    @pytest.mark.asyncio
+    async def test_google_email_model_override_ignores_calendar_messages(self):
+        skill = SkillDefinition(
+            name="google",
+            description="Google skill",
+            instructions="Use Google.",
+        )
+        registry = MagicMock()
+        registry.has.return_value = True
+        registry.get.return_value = skill
+        executor = MagicMock()
+        config = _mock_config(
+            skills={"google": SkillConfig(email_model="school_email_pioneer")},
+            agents={},
+            skill_defaults=SimpleNamespace(allow_chat_ids=[]),
+        )
+        tool = UseSkillTool(registry, executor, config)
+
+        with pytest.raises(ChildActivated) as exc_info:
+            await tool.execute({"skill": "google", "message": "show my calendar"})
+
+        frame = exc_info.value.child_frame
+        assert frame.model_alias is None
+        assert frame.model is None
 
     @pytest.mark.asyncio
     async def test_child_frame_has_system_prompt(self, tool):

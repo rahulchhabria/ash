@@ -29,8 +29,8 @@ Every tool has three parts:
 Enable web search, then run a prompt that requires tools:
 
 ```toml title="~/.ash/config.toml"
-[brave_search]
-api_key = "BSA..."  # Required for web_search
+[parallel_search]
+api_key = "..."  # Required for web_search
 ```
 
 ```bash
@@ -56,7 +56,7 @@ See [Sandbox](/systems/sandbox/) for isolation and security controls.
 
 ### Web Search (`web_search`)
 
-Searches the web via Brave Search.
+Searches the web via Parallel Search.
 
 Use for:
 
@@ -124,8 +124,8 @@ Most tool behavior is controlled by subsystem config.
 workspace = "~/.ash/workspace"
 
 # Enable web search tool
-[brave_search]
-api_key = "BSA..."
+[parallel_search]
+api_key = "..."
 
 # Browser tool is available when browser subsystem is enabled
 [browser]
@@ -151,14 +151,14 @@ If Ash can answer from existing context, it may skip tools. Ask for source-backe
 ### `web_search` fails
 
 ```bash
-# Confirm Brave key exists in config
+# Confirm Parallel key exists in config
 uv run ash config show
 
 # Run environment diagnostics
 uv run ash doctor
 ```
 
-Common fix: add a valid `[brave_search].api_key`.
+Common fix: add a valid `[parallel_search].api_key`.
 
 ### `bash` or file tools fail
 

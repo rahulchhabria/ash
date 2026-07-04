@@ -108,12 +108,12 @@ model = "codex"  # Use coding model for skill creation
 # allowed_users = ["123456789"]
 
 # =============================================================================
-# Optional: Web Search (Brave)
+# Optional: Web Search (Parallel)
 # =============================================================================
-# Get API key at: https://brave.com/search/api/
+# Get API key at: https://platform.parallel.ai/
 
-# [brave_search]
-# api_key = ""  # or set BRAVE_SEARCH_API_KEY env var
+# [parallel_search]
+# api_key = ""  # or set PARALLEL_API_KEY env var
 
 # =============================================================================
 # Optional: External Capability Provider (skill-owned)

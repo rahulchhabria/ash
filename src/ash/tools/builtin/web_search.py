@@ -1,4 +1,4 @@
-"""Web search tool using Brave Search API, executed in sandbox."""
+"""Web search tool using Parallel Search API, executed in sandbox."""
 
 import json
 import logging
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
+PARALLEL_SEARCH_URL = "https://api.parallel.ai/v1/search"
 
 
 def _extract_domains(response: SearchResponse) -> list[str]:
@@ -41,7 +41,8 @@ def _extract_domains(response: SearchResponse) -> list[str]:
 # Outputs JSON for reliable parsing and accurate result counting
 # Supports: query, count, freshness, country, search_type
 SEARCH_SCRIPT = '''
-import json, os, sys, urllib.request, urllib.parse, time
+import json, os, sys, urllib.request, time
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 # Parse arguments: query count freshness country search_type
@@ -51,33 +52,63 @@ freshness = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] != "none" else None
 country = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] != "none" else None
 search_type = sys.argv[5] if len(sys.argv) > 5 else "web"
 
-api_key = os.environ.get("BRAVE_API_KEY", "")
+api_key = os.environ.get("PARALLEL_API_KEY", "")
 if not api_key:
-    print(json.dumps({"error": "BRAVE_API_KEY not set", "code": 500}))
+    print(json.dumps({"error": "PARALLEL_API_KEY not set", "code": 500}))
     sys.exit(1)
 
-# Build URL with parameters
-q = urllib.parse.quote(query)
-if search_type == "news":
-    base_url = "https://api.search.brave.com/res/v1/news/search"
-else:
-    base_url = "https://api.search.brave.com/res/v1/web/search"
+def after_date_for_freshness(value):
+    days = {
+        "pd": 1,
+        "pw": 7,
+        "pm": 31,
+        "py": 366,
+    }.get(value)
+    if not days:
+        return None
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    return cutoff.date().isoformat()
 
-url = f"{base_url}?q={q}&count={count}"
-if freshness:
-    url += f"&freshness={freshness}"
+def search_query_for_objective(value):
+    query = " ".join(value.split())
+    if len(query) <= 200:
+        return query
+    return query[:200].rsplit(" ", 1)[0] or query[:200]
+
+objective = query
+if search_type == "news":
+    objective = f"{query}. Focus on recent news coverage and announcements."
+
+advanced_settings = {
+    "max_results": count,
+}
+source_policy = {}
+if freshness_date := after_date_for_freshness(freshness):
+    source_policy["after_date"] = freshness_date
+if source_policy:
+    advanced_settings["source_policy"] = source_policy
 if country:
-    url += f"&country={urllib.parse.quote(country)}"
+    advanced_settings["location"] = country.lower()
+
+payload = {
+    "objective": objective,
+    "search_queries": [search_query_for_objective(query)],
+    "mode": "advanced",
+    "advanced_settings": advanced_settings,
+}
 
 start_time = time.time()
 
 try:
     req = urllib.request.Request(
-        url,
+        "https://api.parallel.ai/v1/search",
+        data=json.dumps(payload).encode("utf-8"),
         headers={
             "Accept": "application/json",
-            "X-Subscription-Token": api_key,
-        }
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+        },
+        method="POST",
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
         if resp.status != 200:
@@ -123,18 +154,15 @@ def extract_site_name(url_str):
     except Exception:
         return None
 
-# Handle both web and news result formats
-if search_type == "news":
-    raw_results = data.get("results", [])
-else:
-    raw_results = data.get("web", {}).get("results", [])
+raw_results = data.get("results", [])
 
 results = []
 
 for r in raw_results:
     title = r.get("title", "No title")
     result_url = r.get("url", "")
-    desc = r.get("description", "")
+    excerpts = r.get("excerpts") or []
+    desc = "\\n\\n".join(excerpts) if excerpts else r.get("description", "")
 
     # Truncate at word boundary
     if desc:
@@ -145,7 +173,7 @@ for r in raw_results:
         "url": result_url,
         "description": desc,
         "site_name": extract_site_name(result_url),
-        "published_date": r.get("page_age") or r.get("age"),  # Brave API fields
+        "published_date": r.get("publish_date"),
     })
 
 output = {
@@ -161,7 +189,7 @@ print(json.dumps(output))
 
 
 class WebSearchTool(Tool):
-    """Search the web using Brave Search API.
+    """Search the web using Parallel Search API.
 
     All requests execute inside the Docker sandbox for network control.
     Requires network_mode: bridge in sandbox configuration.
@@ -185,7 +213,7 @@ class WebSearchTool(Tool):
         """Initialize web search tool.
 
         Args:
-            api_key: Brave Search API key.
+            api_key: Parallel Search API key.
             executor: Shared sandbox executor (preferred).
             sandbox_config: Sandbox configuration (used if executor not provided).
             workspace_path: Path to workspace (for sandbox config).
@@ -214,7 +242,7 @@ class WebSearchTool(Tool):
             )
             self._executor = SandboxExecutor(
                 config=manager_config,
-                environment={"BRAVE_API_KEY": api_key},
+                environment={"PARALLEL_API_KEY": api_key},
             )
 
     @property
@@ -224,7 +252,7 @@ class WebSearchTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Search the web for current information. "
+            "Search the web for current information using the Parallel Search API. "
             "Use this to find recent news, documentation, articles, or any "
             "information that may not be in your training data. Prefer this "
             "for discovery before `web_fetch`/`browser`. "
@@ -334,7 +362,7 @@ class WebSearchTool(Tool):
                 command,
                 timeout=30,
                 reuse_container=True,
-                environment={"BRAVE_API_KEY": self._api_key},
+                environment={"PARALLEL_API_KEY": self._api_key},
             )
 
             if result.timed_out:
@@ -354,7 +382,7 @@ class WebSearchTool(Tool):
             response = await with_retry(
                 do_search,
                 config=self._retry_config,
-                operation_name="Brave Search",
+                operation_name="Parallel Search",
             )
 
             if self._cache and not response.cached:

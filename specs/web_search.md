@@ -1,6 +1,6 @@
 # Web Search
 
-> Search the web via Brave Search API with caching, retry, and structured output
+> Search the web via Parallel Search API with caching, retry, and structured output
 
 Files: src/ash/tools/builtin/web_search.py, src/ash/tools/builtin/search_types.py,
        src/ash/tools/builtin/search_cache.py, src/ash/tools/retry.py
@@ -35,7 +35,7 @@ Files: src/ash/tools/builtin/web_search.py, src/ash/tools/builtin/search_types.p
 ### MAY
 
 - Support output_format parameter (json, text)
-- Include additional Brave API fields (favicon, thumbnail)
+- Include additional Parallel API fields (warnings, usage)
 - Provide cache statistics via metadata
 - Support additional search providers
 
@@ -92,8 +92,8 @@ class WebSearchTool(Tool):
 ## Configuration
 
 ```toml
-[brave_search]
-api_key = "..."  # or BRAVE_API_KEY env var
+[parallel_search]
+api_key = "..."  # or PARALLEL_API_KEY env var
 
 [sandbox]
 network_mode = "bridge"  # Required for web_search
@@ -116,7 +116,7 @@ network_mode = "bridge"  # Required for web_search
 | Condition | Response |
 |-----------|----------|
 | network_mode: none | ToolResult.error("Web search requires network_mode: bridge") |
-| Missing API key | ToolResult.error("Brave Search API key not configured") |
+| Missing API key | ToolResult.error("Parallel Search API key not configured") |
 | HTTP 401 | ToolResult.error("Invalid API key") |
 | HTTP 429 after retries | ToolResult.error("Rate limit exceeded after 3 attempts") |
 | Timeout after retries | ToolResult.error("Search request timed out after 3 attempts") |

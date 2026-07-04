@@ -30,6 +30,7 @@ class _FakeManager:
         self.removed: list[str] = []
         self.start_should_fail = False
         self.exec_should_fail = False
+        self.exec_fail_once_stale = False
         self.expected_image_id: str | None = "sha256:latest"
         self._containers: dict[str, _FakeContainer] = {}
         self._by_name: dict[str, str] = {}
@@ -85,6 +86,9 @@ class _FakeManager:
             environment,
             kwargs,
         )
+        if self.exec_fail_once_stale:
+            self.exec_fail_once_stale = False
+            raise RuntimeError("No such container: stale-id")
         if self.exec_should_fail:
             raise RuntimeError("exec failed")
         return 0, "ok", ""
@@ -268,4 +272,20 @@ async def test_reuse_container_prunes_rpc_mount_mismatch_then_recreates(
     result = await executor.execute("echo hi", reuse_container=True)
     assert result.success is True
     assert "stale" in manager.removed
+    assert manager.created == ["c1"]
+
+
+async def test_reuse_container_retries_once_when_exec_hits_stale_container(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _patch_runtime_paths(monkeypatch, tmp_path)
+    manager = _FakeManager()
+    manager.exec_fail_once_stale = True
+    executor = SandboxExecutor()
+    executor._manager = manager
+    executor._initialized = True
+
+    result = await executor.execute("echo hi", reuse_container=True)
+
+    assert result.success is True
     assert manager.created == ["c1"]

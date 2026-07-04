@@ -280,7 +280,10 @@ class UseAgentTool(Tool):
         if result.is_error:
             return ToolResult.error(result.content)
 
-        return ToolResult.success(format_agent_result(result.content, agent_name))
+        return ToolResult.success(
+            format_agent_result(result.content, agent_name),
+            **result.metadata,
+        )
 
     async def _execute_interactive(
         self,
@@ -341,6 +344,7 @@ class UseAgentTool(Tool):
             session=child_session,
             system_prompt=system_prompt,
             context=agent_context,
+            model_alias=model_alias,
             model=resolved_model,
             environment=environment,
             max_iterations=agent_config.max_iterations,

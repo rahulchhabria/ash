@@ -20,6 +20,7 @@ from ash.capabilities import (
 )
 from ash.capabilities.types import CapabilityOperation
 from ash.chats import ChatStateManager
+from ash.config.paths import get_ash_home
 
 
 @dataclass
@@ -412,6 +413,51 @@ async def test_invoke_requires_explicit_account_when_multiple_are_linked() -> No
         account_ref="acct_work",
     )
     assert result.output["account_ref"] == "acct_work"
+
+
+@pytest.mark.asyncio
+async def test_create_capability_manager_restores_gog_accounts_from_state(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ASH_HOME", str(tmp_path))
+    get_ash_home.cache_clear()
+    state_dir = tmp_path / "gogcli"
+    state_dir.mkdir(parents=True)
+    (state_dir / "state.json").write_text(
+        """
+{
+  "accounts": {
+    "user-1:gog.email:default": {
+      "account_email": "parent@example.com",
+      "account_name": "Parent",
+      "created_at": 1773525614,
+      "google_sub": "google-sub-1",
+      "provider": "telegram",
+      "updated_at": 1773525614,
+      "vault_ref": "vault:v1:gog.credentials:abc123"
+    }
+  }
+}
+""".strip()
+        + "\n"
+    )
+    provider = _RecordingProvider(namespace="gog")
+
+    try:
+        manager = await create_capability_manager(providers=[provider])
+        result = await manager.invoke(
+            capability_id="gog.email",
+            operation="list_messages",
+            input_data={"folder": "inbox"},
+            user_id="user-1",
+            chat_type="private",
+            account_ref="default",
+        )
+    finally:
+        get_ash_home.cache_clear()
+
+    assert result.output["account_ref"] == "default"
+    assert provider.invoke_calls[-1]["context"].user_id == "user-1"
 
 
 @pytest.mark.asyncio

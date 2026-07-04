@@ -1,9 +1,10 @@
 """Observability module for Sentry integration."""
 
+import importlib
 import logging
 from typing import TYPE_CHECKING
 
-__all__ = ["init_sentry"]
+__all__ = ["init_sentry", "set_sentry_conversation_id"]
 
 if TYPE_CHECKING:
     from ash.config import SentryConfig
@@ -43,6 +44,7 @@ def init_sentry(config: "SentryConfig", server_mode: bool = False) -> bool:
         LoggingIntegration(
             level=logging.INFO,  # Capture INFO+ as breadcrumbs
             event_level=logging.ERROR,  # Create events for ERROR+
+            sentry_logs_level=logging.DEBUG,  # Send all emitted app logs to Sentry Logs
         ),
     ]
 
@@ -59,10 +61,24 @@ def init_sentry(config: "SentryConfig", server_mode: bool = False) -> bool:
         release=config.release,
         traces_sample_rate=config.traces_sample_rate,
         profiles_sample_rate=config.profiles_sample_rate,
+        stream_gen_ai_spans=config.stream_gen_ai_spans,
         send_default_pii=config.send_default_pii,
         debug=config.debug,
+        enable_logs=True,
         integrations=integrations,
     )
 
     logger.info("sentry_initialized", extra={"sentry.environment": config.environment})
     return True
+
+
+def set_sentry_conversation_id(conversation_id: str | None) -> None:
+    """Set the active Sentry AI conversation ID when the SDK is available."""
+    if not SENTRY_AVAILABLE or not conversation_id:
+        return
+
+    try:
+        sentry_ai = importlib.import_module("sentry_sdk.ai")
+        sentry_ai.set_conversation_id(conversation_id)
+    except Exception:
+        logger.debug("sentry_conversation_id_skipped", exc_info=True)

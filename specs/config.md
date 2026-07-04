@@ -42,7 +42,7 @@ class AshConfig(BaseModel):
     memory: MemoryConfig
     server: ServerConfig
     telegram: TelegramConfig | None
-    brave_search: BraveSearchConfig | None
+    parallel_search: ParallelSearchConfig | None
     embeddings: EmbeddingsConfig | None
     anthropic: ProviderConfig | None
     openai: ProviderConfig | None
@@ -110,8 +110,8 @@ workspace_access = "rw"
 bot_token = "..."  # or TELEGRAM_BOT_TOKEN env
 allowed_users = ["123456789"]
 
-[brave_search]
-api_key = "..."  # or BRAVE_SEARCH_API_KEY env
+[parallel_search]
+api_key = "..."  # or PARALLEL_API_KEY env
 
 [embeddings]
 provider = "openai"

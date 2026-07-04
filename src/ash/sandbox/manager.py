@@ -325,6 +325,9 @@ class SandboxManager:
         else:
             container_config["network_disabled"] = False
             container_config["network_mode"] = self._config.network_mode
+            # Ensure sandbox clients can always resolve the host RPC alias on Linux.
+            # Spec-ref: specs/rpc.md (default alias host.docker.internal)
+            container_config["extra_hosts"] = {"host.docker.internal": "host-gateway"}
             if self._config.dns_servers:
                 container_config["dns"] = self._config.dns_servers
 

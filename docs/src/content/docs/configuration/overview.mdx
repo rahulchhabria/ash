@@ -82,6 +82,9 @@ max_concurrent = 2
 [openai]
 api_key = "sk-..."
 
+[pioneer]
+api_key = "pio-..."
+
 [models.default]
 provider = "openai"
 model = "gpt-5.2"
@@ -93,9 +96,10 @@ model = "gpt-5.2"
 |----------|---------|
 | `ASH_HOME` | Base directory for Ash state (`config.toml`, logs, sessions, auth) |
 | `OPENAI_API_KEY` | OpenAI API key (for `provider = "openai"`) |
+| `PIONEER_API_KEY` | Pioneer API key (for `provider = "pioneer"`) |
 | `ANTHROPIC_API_KEY` | Anthropic API key |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token |
-| `BRAVE_SEARCH_API_KEY` | Brave Search API key |
+| `PARALLEL_API_KEY` | Parallel Search API key |
 | `KERNEL_API_KEY` | Kernel API key (when `[browser].provider = "kernel"`) |
 | `SENTRY_DSN` | Sentry DSN |
 
@@ -105,7 +109,7 @@ model = "gpt-5.2"
 |---------|---------|
 | `workspace`, `timezone` | Global behavior |
 | `[models.*]` | Named model aliases (must include `default`) |
-| `[openai]`, `[anthropic]` | Provider API key config |
+| `[openai]`, `[anthropic]`, `[pioneer]` | Provider API key config |
 | `[telegram]` | Telegram provider settings |
 | `[sandbox]` | Sandbox runtime and mount settings |
 | `[memory]` | Memory retention and extraction tuning |
@@ -117,7 +121,7 @@ model = "gpt-5.2"
 | `[agents.*]` | Per-agent overrides |
 | `[skills]` / `[[skills.sources]]` / `[skills.<name>]` | Skill source and per-skill settings |
 | `[env]` | Environment variables injected into runtime |
-| `[brave_search]`, `[sentry]`, `[server]` | Optional subsystem config |
+| `[parallel_search]`, `[sentry]`, `[server]` | Optional subsystem config |
 
 <Aside type="tip">
   Keep at least one working model alias in `[models.default]` and run `uv run ash config validate` after edits.

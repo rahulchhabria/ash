@@ -70,6 +70,13 @@ class SendMessageTool(Tool):
                         "a browser screenshot artifact path)."
                     ),
                 },
+                "document_path": {
+                    "type": "string",
+                    "description": (
+                        "Optional local file path to a document to send directly "
+                        "(for example, a generated markdown report)."
+                    ),
+                },
             },
             "required": [],
         }
@@ -84,8 +91,9 @@ class SendMessageTool(Tool):
 
         message = input_data.get("message", "").strip()
         image_path = str(input_data.get("image_path") or "").strip() or None
-        if not message and not image_path:
-            return ToolResult.error("Message or image_path is required")
+        document_path = str(input_data.get("document_path") or "").strip() or None
+        if not message and not image_path and not document_path:
+            return ToolResult.error("Message, image_path, or document_path is required")
 
         if not context.chat_id:
             return ToolResult.error("No chat context available")
@@ -102,6 +110,7 @@ class SendMessageTool(Tool):
                     chat_id=context.chat_id,
                     text=message,
                     image_path=image_path,
+                    document_path=document_path,
                     reply_to_message_id=reply_to,
                 )
             )

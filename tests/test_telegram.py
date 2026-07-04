@@ -530,6 +530,24 @@ class TestToolTracker:
         assert sent.image_path == "/workspace/screenshot.png"
         assert sent.text == "screenshot attached"
 
+    async def test_tool_complete_sends_document_from_metadata(
+        self, tracker, mock_provider
+    ):
+        await tracker.on_tool_complete(
+            "use_agent",
+            {"agent": "research"},
+            ToolResult.success(
+                "done",
+                document_path="/workspace/report.md",
+                document_caption="Research report attached.",
+            ),
+        )
+
+        mock_provider.send.assert_called()
+        sent = mock_provider.send.call_args[0][0]
+        assert sent.document_path == "/workspace/report.md"
+        assert sent.text == "Research report attached."
+
     def test_display_truncation_uses_rendered_markdown_v2_length(self, tracker):
         tracker.progress_messages = ["." * 3000, "." * 3000]
         display = tracker._build_display_message()
