@@ -129,10 +129,8 @@ def register_todo_methods(
             raise ValueError("must specify exactly one of reminder_at or reminder_cron")
 
         timezone = params.get("timezone", "UTC")
-        if linked and schedule_store.get_entry(linked):
-            previous_schedule = schedule_store.get_entry(linked)
-            if previous_schedule is None:
-                raise ValueError("linked reminder disappeared during update")
+        previous_schedule = schedule_store.get_entry(linked) if linked else None
+        if linked and previous_schedule is not None:
             previous_snapshot = _clone_schedule_entry(previous_schedule)
             try:
                 updated_schedule = schedule_store.update_entry(
@@ -144,10 +142,9 @@ def register_todo_methods(
                 )
                 if updated_schedule is None:
                     raise ValueError("failed to update linked reminder")
-                schedule_entry_id = linked
                 updated_todo, replayed = await manager.link_reminder(
                     todo_id=todo_id,
-                    schedule_entry_id=schedule_entry_id,
+                    schedule_entry_id=linked,
                     user_id=user_id,
                     chat_id=chat_id,
                     expected_revision=expected_revision,
@@ -159,7 +156,12 @@ def register_todo_methods(
                 raise
         else:
             provider = params.get("provider")
-            reminder_chat_id = chat_id or todo.chat_id
+            # chat_id from caller context is a provider ID (suitable for routing).
+            # todo.chat_id is a graph UUID after resolution — reverse-resolve it.
+            reminder_chat_id = chat_id
+            if not reminder_chat_id and todo.chat_id:
+                chat_node = manager.graph.chats.get(todo.chat_id)
+                reminder_chat_id = chat_node.provider_id if chat_node else None
             if not provider or not reminder_chat_id:
                 raise ValueError("provider and chat_id are required for reminders")
             schedule_entry_id = uuid.uuid4().hex[:8]

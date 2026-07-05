@@ -121,8 +121,9 @@ async def test_scheduling_integration_owns_lifecycle_and_rpc(monkeypatch) -> Non
 
     rpc_calls: dict[str, Any] = {}
 
-    def _register_schedule(server_obj, store_obj) -> None:
+    def _register_schedule(server_obj, store_obj, parse_time_with_llm=None) -> None:
         rpc_calls["args"] = (server_obj, store_obj)
+        rpc_calls["parse_time_with_llm"] = parse_time_with_llm
 
     async def _sender(
         _chat_id: str, _message: str, *, reply_to: str | None = None
@@ -154,6 +155,7 @@ async def test_scheduling_integration_owns_lifecycle_and_rpc(monkeypatch) -> Non
     integration.register_rpc_methods(server, context)
     assert rpc_calls["args"][0] is server
     assert rpc_calls["args"][1] is integration.store
+    assert callable(rpc_calls["parse_time_with_llm"])
 
     await integration.on_startup(context)
     await integration.on_shutdown(context)
@@ -161,43 +163,21 @@ async def test_scheduling_integration_owns_lifecycle_and_rpc(monkeypatch) -> Non
     assert _FakeWatcher.stopped is True
 
 
-@pytest.mark.asyncio
-async def test_scheduling_integration_owns_prompt_routing_guidance() -> None:
+def test_scheduling_integration_uses_skill_not_prompt_context() -> None:
     context = _context()
     integration = SchedulingIntegration(Path("graph"))
 
-    session = SessionState(
-        session_id="s-1",
-        provider="telegram",
-        chat_id="c-1",
-        user_id="u-1",
-    )
-    prompt_context = integration.augment_prompt_context(
-        PromptContext(),
-        session,
-        context,
-    )
-    routing = prompt_context.extra_context.get("tool_routing_rules")
-    principles = prompt_context.extra_context.get("core_principles_rules")
-    assert isinstance(routing, list)
-    assert isinstance(principles, list)
-    assert any("ash-sb schedule create" in line for line in routing)
-    assert any("continuous monitoring workflows" in line for line in principles)
+    # Scheduling guidance lives in the bundled skill, not in prompt context.
+    # Confirm augment_prompt_context is NOT overridden (only inherited no-op).
+    from ash.integrations.runtime import IntegrationContributor
 
-    # Scheduled-task execution context should not receive scheduling setup guidance.
-    scheduled_session = SessionState(
-        session_id="s-2",
-        provider="telegram",
-        chat_id="c-1",
-        user_id="u-1",
-    )
-    scheduled_session.context.is_scheduled_task = True
-    scheduled_prompt = integration.augment_prompt_context(
-        PromptContext(),
-        scheduled_session,
-        context,
-    )
-    assert scheduled_prompt.extra_context == {}
+    assert "augment_prompt_context" not in SchedulingIntegration.__dict__
+    assert hasattr(IntegrationContributor, "augment_prompt_context")
+
+    # augment_skill_instructions returns empty for non-schedule skills.
+    assert integration.augment_skill_instructions("todo", context) == []
+    # Returns empty for the schedule skill (no conditional extras currently).
+    assert integration.augment_skill_instructions("schedule", context) == []
 
 
 @pytest.mark.asyncio
@@ -297,29 +277,29 @@ async def test_todo_integration_registers_todo_rpc_methods(monkeypatch) -> None:
     assert calls["args"][2] is not None
 
 
-@pytest.mark.asyncio
-async def test_todo_integration_owns_prompt_routing_guidance(monkeypatch) -> None:
+def test_todo_integration_augments_skill_instructions_when_scheduling_enabled() -> None:
     context = _context()
-    integration = TodoIntegration(graph_dir=Path("graph"))
+    integration = TodoIntegration(graph_dir=Path("graph"), schedule_enabled=True)
 
-    monkeypatch.setattr(
-        "ash.integrations.todo.create_todo_manager",
-        lambda *args, **kwargs: asyncio.sleep(0, result=cast(Any, object())),
-    )
+    lines = integration.augment_skill_instructions("todo", context)
+    assert len(lines) > 0
+    assert any("remind" in line.lower() for line in lines)
 
-    await integration.setup(context)
-    session = SessionState(
-        session_id="s-1",
-        provider="telegram",
-        chat_id="c-1",
-        user_id="u-1",
-    )
-    prompt_context = integration.augment_prompt_context(
-        PromptContext(), session, context
-    )
-    routing = prompt_context.extra_context.get("tool_routing_rules")
-    assert isinstance(routing, list)
-    assert any("ash-sb todo add" in line for line in routing)
+
+def test_todo_integration_no_skill_instructions_when_scheduling_disabled() -> None:
+    context = _context()
+    integration = TodoIntegration(graph_dir=Path("graph"), schedule_enabled=False)
+
+    lines = integration.augment_skill_instructions("todo", context)
+    assert lines == []
+
+
+def test_todo_integration_no_skill_instructions_for_wrong_skill() -> None:
+    context = _context()
+    integration = TodoIntegration(graph_dir=Path("graph"), schedule_enabled=True)
+
+    lines = integration.augment_skill_instructions("research", context)
+    assert lines == []
 
 
 @pytest.mark.asyncio
@@ -392,9 +372,11 @@ async def test_capabilities_integration_registers_configured_provider(
             namespace: str,
             command: list[str] | str,
             timeout_seconds: float = 30.0,
+            env: dict[str, str] | None = None,
         ) -> None:
             _ = command
             _ = timeout_seconds
+            _ = env
             self.namespace = namespace
 
         async def definitions(self) -> list[CapabilityDefinition]:
@@ -464,9 +446,9 @@ async def test_capabilities_integration_passes_providers_to_manager_factory(
     integration = CapabilitiesIntegration()
     await integration.setup(context)
 
-    assert captured["providers"] == [provider]
+    assert captured["providers"] is None
     assert getattr(context.components, "capability_manager", None) is not None
-    assert captured.get("late_registers") is None
+    assert captured.get("late_registers") == [provider]
 
 
 @pytest.mark.asyncio
@@ -490,6 +472,34 @@ async def test_capabilities_integration_registers_providers_on_existing_manager(
     integration = CapabilitiesIntegration()
     await integration.setup(context)
     assert manager.providers == [provider]
+
+
+@pytest.mark.asyncio
+async def test_capabilities_integration_continues_when_provider_registration_fails(
+    monkeypatch,
+) -> None:
+    context = _context()
+    provider = object()
+    context.components.capability_providers = [provider]
+    calls: dict[str, Any] = {}
+
+    class _FakeManager:
+        async def register_provider(self, registered_provider: Any) -> None:
+            calls["provider"] = registered_provider
+            raise RuntimeError("provider failed")
+
+    async def _create_manager(*, providers=None):
+        calls["providers"] = providers
+        return _FakeManager()
+
+    monkeypatch.setattr("ash.capabilities.create_capability_manager", _create_manager)
+
+    integration = CapabilitiesIntegration()
+    await integration.setup(context)
+
+    assert calls["providers"] is None
+    assert calls["provider"] is provider
+    assert getattr(context.components, "capability_manager", None) is not None
 
 
 @pytest.mark.asyncio

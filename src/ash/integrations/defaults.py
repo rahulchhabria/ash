@@ -8,6 +8,9 @@ from typing import TYPE_CHECKING
 
 from ash.integrations.browser import BrowserIntegration
 from ash.integrations.capabilities import CapabilitiesIntegration
+from ash.integrations.close_game_alert import CloseGameAlertIntegration
+from ash.integrations.deepagents import DeepAgentsIntegration
+from ash.integrations.email_forward_summary import EmailForwardSummaryIntegration
 from ash.integrations.image import ImageIntegration
 from ash.integrations.memory import MemoryIntegration
 from ash.integrations.runtime import IntegrationMode
@@ -43,10 +46,13 @@ def _create_chat_integrations(
     if include_browser:
         contributors.append(BrowserIntegration())
     contributors.append(CapabilitiesIntegration())
+    contributors.append(DeepAgentsIntegration())
     if include_todo:
         contributors.append(TodoIntegration(graph_dir=graph_dir))
     if include_memory:
         contributors.append(MemoryIntegration())
+    contributors.append(EmailForwardSummaryIntegration())
+    contributors.append(CloseGameAlertIntegration())
     return DefaultIntegrations(contributors=contributors)
 
 
@@ -65,10 +71,13 @@ def _create_eval_integrations(
     if include_browser:
         contributors.append(BrowserIntegration())
     contributors.append(CapabilitiesIntegration())
+    contributors.append(DeepAgentsIntegration())
     if include_todo:
         contributors.append(TodoIntegration(graph_dir=graph_dir, schedule_enabled=True))
     if include_memory:
         contributors.append(MemoryIntegration())
+    contributors.append(EmailForwardSummaryIntegration())
+    contributors.append(CloseGameAlertIntegration())
     return DefaultIntegrations(contributors=contributors, scheduling=scheduling)
 
 
@@ -104,10 +113,13 @@ def _create_serve_integrations(
     if include_browser:
         contributors.append(BrowserIntegration())
     contributors.append(CapabilitiesIntegration())
+    contributors.append(DeepAgentsIntegration())
     if include_todo:
         contributors.append(TodoIntegration(graph_dir=graph_dir, schedule_enabled=True))
     if include_memory:
         contributors.append(MemoryIntegration())
+    contributors.append(EmailForwardSummaryIntegration())
+    contributors.append(CloseGameAlertIntegration())
     contributors.append(scheduling)
     return DefaultIntegrations(contributors=contributors, scheduling=scheduling)
 

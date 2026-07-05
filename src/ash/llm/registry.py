@@ -10,11 +10,12 @@ from ash.llm.anthropic import AnthropicProvider
 from ash.llm.base import LLMProvider
 from ash.llm.openai import OpenAIProvider
 from ash.llm.openai_oauth import OpenAIOAuthProvider
+from ash.llm.pioneer import PioneerProvider
 
 if TYPE_CHECKING:
     from ash.auth.storage import AuthStorage
 
-ProviderName = Literal["anthropic", "openai", "openai-oauth"]
+ProviderName = Literal["anthropic", "openai", "openai-oauth", "pioneer"]
 
 
 def create_llm_provider(
@@ -46,6 +47,8 @@ def create_llm_provider(
         return AnthropicProvider(api_key=key)
     if provider == "openai":
         return OpenAIProvider(api_key=key)
+    if provider == "pioneer":
+        return PioneerProvider(api_key=key)
     if provider == "openai-oauth":
         if not access_token or not account_id:
             raise ValueError(

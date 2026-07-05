@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from ash.agents.types import ChildActivated
-from ash.context_token import get_default_context_token_service
+from ash.context_token import issue_host_context_token
 from ash.core.compaction import CompactionSettings, compact_messages, should_compact
 from ash.core.context import ContextGatherer
 from ash.core.prompt import (
@@ -124,7 +124,7 @@ def _build_routing_env(
 
     # Host-signed context token for sandbox->host RPC trust boundaries.
     try:
-        context_token = get_default_context_token_service().issue(
+        context_token = issue_host_context_token(
             effective_user_id=(effective_user_id or "unknown"),
             chat_id=session.chat_id,
             chat_type=session.context.chat_type,
@@ -567,6 +567,7 @@ class Agent:
         setup: _MessageSetup,
         session_manager: Any = None,
         tool_overrides: dict[str, Any] | None = None,
+        current_user_message: str | None = None,
     ) -> ToolContext:
         """Build a ToolContext for tool execution, with reply anchor initialized.
 
@@ -587,13 +588,17 @@ class Agent:
         )
         env = self._apply_sandbox_env_hooks(env, session, setup.effective_user_id)
 
+        metadata = session.context.to_dict()
+        if current_user_message is not None:
+            metadata["current_user_message"] = current_user_message
+
         tool_context = ToolContext(
             session_id=session.session_id,
             user_id=setup.effective_user_id,
             chat_id=session.chat_id,
             thread_id=session.context.thread_id,
             provider=session.provider,
-            metadata=session.context.to_dict(),
+            metadata=metadata,
             env=env,
             session_manager=session_manager,
             tool_overrides=tool_overrides or {},
@@ -675,6 +680,7 @@ class Agent:
                 provider=session.provider,
                 metadata=session.context.to_dict(),
             ),
+            model_alias=None,
             model=self._config.model,
             iteration=iterations,
             max_iterations=self._config.max_tool_iterations,
@@ -783,7 +789,20 @@ class Agent:
                 await on_tool_start(tool_use.name, tool_use.input)
 
             # Create per-tool context with the tool_use_id for subagent logging
-            per_tool_context = replace(tool_context, tool_use_id=tool_use.id)
+            per_tool_env = dict(tool_context.env)
+            per_tool_env.update(
+                _build_routing_env(
+                    session,
+                    tool_context.user_id,
+                    timezone=self._timezone,
+                    mount_prefix=self._mount_prefix,
+                )
+            )
+            per_tool_context = replace(
+                tool_context,
+                tool_use_id=tool_use.id,
+                env=per_tool_env,
+            )
 
             result = await self._tools.execute(
                 tool_use.name,
@@ -903,6 +922,7 @@ class Agent:
         tool_overrides: dict[str, Any] | None = None,
     ) -> AgentResponse:
         from ash.logging import log_context
+        from ash.observability import set_sentry_conversation_id
 
         setup = await self._prepare_message_context(user_message, session, user_id)
         session.add_user_message(user_message)
@@ -921,6 +941,7 @@ class Agent:
             chat_type=session.context.chat_type,
             source_username=session.context.username,
         ):
+            set_sentry_conversation_id(session.session_id)
             while iterations < self._config.max_tool_iterations:
                 iterations += 1
 
@@ -967,7 +988,11 @@ class Agent:
                     )
 
                 tool_context = self._build_tool_context(
-                    session, setup, session_manager, tool_overrides
+                    session,
+                    setup,
+                    session_manager,
+                    tool_overrides,
+                    current_user_message=user_message,
                 )
 
                 try:
@@ -1041,6 +1066,7 @@ class Agent:
         tool_overrides: dict[str, Any] | None = None,
     ) -> AsyncIterator[str]:
         from ash.logging import log_context
+        from ash.observability import set_sentry_conversation_id
 
         setup = await self._prepare_message_context(user_message, session, user_id)
         session.add_user_message(user_message)
@@ -1058,6 +1084,7 @@ class Agent:
             chat_type=session.context.chat_type,
             source_username=session.context.username,
         ):
+            set_sentry_conversation_id(session.session_id)
             while iterations < self._config.max_tool_iterations:
                 iterations += 1
 
@@ -1116,7 +1143,11 @@ class Agent:
                     return
 
                 tool_context = self._build_tool_context(
-                    session, setup, session_manager, tool_overrides
+                    session,
+                    setup,
+                    session_manager,
+                    tool_overrides,
+                    current_user_message=user_message,
                 )
 
                 try:
@@ -1172,7 +1203,18 @@ async def create_agent(
     from ash.sandbox.packages import build_setup_command, collect_skill_packages
     from ash.skills import SkillRegistry
     from ash.tools.base import build_sandbox_manager_config
-    from ash.tools.builtin import BashTool, WebFetchTool, WebSearchTool
+    from ash.tools.builtin import (
+        AshTriageDeepAgentsTool,
+        BashTool,
+        DeepAgentsStatusTool,
+        DeepResearchTool,
+        ForgetMemoryTool,
+        ListMemoriesTool,
+        RememberTool,
+        SearchMemoriesTool,
+        WebFetchTool,
+        WebSearchTool,
+    )
     from ash.tools.builtin.agents import UseAgentTool
     from ash.tools.builtin.files import ReadFileTool, WriteFileTool
     from ash.tools.builtin.search_cache import SearchCache
@@ -1212,13 +1254,15 @@ async def create_agent(
 
     tool_registry.register(InterruptTool())
     tool_registry.register(CompleteTool())
+    tool_registry.register(DeepAgentsStatusTool())
+    tool_registry.register(AshTriageDeepAgentsTool())
 
-    if config.brave_search and config.brave_search.api_key:
+    if config.parallel_search and config.parallel_search.api_key:
         search_cache = SearchCache(maxsize=100, ttl=900)
         fetch_cache = SearchCache(maxsize=50, ttl=1800)
         tool_registry.register(
             WebSearchTool(
-                api_key=config.brave_search.api_key.get_secret_value(),
+                api_key=config.parallel_search.api_key.get_secret_value(),
                 executor=shared_executor,
                 cache=search_cache,
             )
@@ -1252,11 +1296,20 @@ async def create_agent(
         except Exception:
             logger.warning("memory_query_planner_disabled", exc_info=True)
 
+    # Register first-class memory tools when the store is available.
+    if graph_store is not None:
+        tool_registry.register(RememberTool(store=graph_store, extractor=memory_extractor))
+        tool_registry.register(ListMemoriesTool(store=graph_store))
+        tool_registry.register(SearchMemoriesTool(store=graph_store))
+        tool_registry.register(ForgetMemoryTool(store=graph_store))
+        logger.debug("memory_tools_registered")
+
     tool_executor = ToolExecutor(tool_registry)
+    tool_registry.register(DeepResearchTool(tool_executor=tool_executor))
     logger.info("tools_registered", extra={"count": len(tool_registry)})
 
     agent_registry = AgentRegistry()
-    register_builtin_agents(agent_registry)
+    register_builtin_agents(agent_registry, config=config)
     logger.info("agents_registered", extra={"count": len(agent_registry)})
 
     runtime = RuntimeInfo.from_environment(

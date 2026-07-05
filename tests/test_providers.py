@@ -1,13 +1,20 @@
 """Tests for provider implementations."""
 
 from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
 
+from ash.agents.types import AgentContext, StackFrame, TurnAction, TurnResult
 from ash.providers.base import IncomingMessage, OutgoingMessage
+from ash.providers.telegram.formatting import rendered_text_length
 from ash.providers.telegram.handlers import TelegramMessageHandler
 from ash.providers.telegram.provider import TelegramProvider
+from ash.sessions import SessionManager
+from ash.sessions.types import generate_id
 
 
 class TestTelegramProvider:
@@ -20,6 +27,7 @@ class TestTelegramProvider:
             mock_bot = MagicMock()
             mock_bot.send_message = AsyncMock()
             mock_bot.send_photo = AsyncMock()
+            mock_bot.send_document = AsyncMock()
             mock_bot.send_chat_action = AsyncMock()
             mock_bot.edit_message_text = AsyncMock()
             mock_bot.delete_message = AsyncMock()
@@ -71,6 +79,22 @@ class TestTelegramProvider:
         fs_input.assert_called_once_with(image_path)
         provider._bot.send_photo.assert_awaited_once()
 
+    async def test_send_document_uses_send_document(self, provider):
+        document_path = "artifacts/report.md"
+        provider._bot.send_document.return_value = MagicMock(message_id=654)
+        with patch("ash.providers.telegram.provider.FSInputFile") as fs_input:
+            msg_id = await provider.send(
+                OutgoingMessage(
+                    chat_id="123",
+                    text="Research report attached",
+                    document_path=document_path,
+                )
+            )
+
+        assert msg_id == "654"
+        fs_input.assert_called_once_with(document_path)
+        provider._bot.send_document.assert_awaited_once()
+
     async def test_send_ignores_non_numeric_reply_to_message_id(self, provider):
         provider._bot.send_message.return_value = MagicMock(message_id=123)
         msg_id = await provider.send(
@@ -84,6 +108,72 @@ class TestTelegramProvider:
         assert msg_id == "123"
         call_kwargs = provider._bot.send_message.call_args.kwargs
         assert call_kwargs["reply_to_message_id"] is None
+
+    async def test_send_defaults_to_markdown_v2_and_escapes_text(self, provider):
+        provider._bot.send_message.return_value = MagicMock(message_id=456)
+        text = (
+            "source: https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.json"
+        )
+
+        msg_id = await provider.send(OutgoingMessage(chat_id="123", text=text))
+
+        assert msg_id == "456"
+        call_kwargs = provider._bot.send_message.call_args.kwargs
+        assert call_kwargs["parse_mode"] == ParseMode.MARKDOWN_V2
+        assert (
+            call_kwargs["text"]
+            == "source: https://cdn\\.nba\\.com/static/json/staticData/scheduleLeagueV2\\_1\\.json"
+        )
+
+    async def test_send_parse_error_falls_back_to_plain_text_unescaped(self, provider):
+        text = (
+            "source: https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.json"
+        )
+        provider._bot.send_message.side_effect = [
+            TelegramBadRequest(cast(Any, MagicMock()), "can't parse entities"),
+            MagicMock(message_id=789),
+        ]
+
+        msg_id = await provider.send(OutgoingMessage(chat_id="123", text=text))
+
+        assert msg_id == "789"
+        first_call = provider._bot.send_message.call_args_list[0].kwargs
+        second_call = provider._bot.send_message.call_args_list[1].kwargs
+        assert first_call["parse_mode"] == ParseMode.MARKDOWN_V2
+        assert first_call["text"] != text
+        assert second_call["parse_mode"] is None
+        assert second_call["text"] == text
+
+    async def test_send_splits_by_rendered_markdown_v2_length(self, provider):
+        provider._bot.send_message.return_value = MagicMock(message_id=999)
+        text = "." * 3900
+
+        await provider.send(OutgoingMessage(chat_id="123", text=text))
+
+        assert provider._bot.send_message.call_count > 1
+        for call in provider._bot.send_message.call_args_list:
+            kwargs = call.kwargs
+            assert kwargs["parse_mode"] == ParseMode.MARKDOWN_V2
+            assert len(kwargs["text"]) <= 4000
+
+    async def test_send_image_caption_uses_rendered_length_limit(self, provider):
+        provider._bot.send_photo.return_value = MagicMock(message_id=321)
+        provider._bot.send_message.return_value = MagicMock(message_id=322)
+        caption = "." * 900
+
+        with patch("ash.providers.telegram.provider.FSInputFile"):
+            await provider.send(
+                OutgoingMessage(
+                    chat_id="123",
+                    text=caption,
+                    image_path="artifacts/screen.png",
+                )
+            )
+
+        photo_kwargs = provider._bot.send_photo.call_args.kwargs
+        assert photo_kwargs["parse_mode"] == ParseMode.MARKDOWN_V2
+        assert rendered_text_length(photo_kwargs["caption"], None) <= 1024
+        assert provider._bot.send_message.call_count == 1
 
 
 class TestTelegramMessageHandler:
@@ -170,6 +260,94 @@ class TestTelegramMessageHandler:
 
         mock_provider.send_typing.assert_called_once_with("456")
 
+    async def test_run_orchestration_loop_suppresses_skill_no_reply(
+        self, mock_provider, mock_agent, tmp_path
+    ):
+        from ash.core.session import SessionState
+
+        handler = TelegramMessageHandler(
+            provider=mock_provider,
+            agent=mock_agent,
+            streaming=False,
+            agent_executor=MagicMock(),
+        )
+        mock_agent.run_message_postprocess_hooks = AsyncMock()
+
+        message = IncomingMessage(
+            id="1",
+            chat_id="456",
+            user_id="789",
+            text="run the sfday skill",
+            username="testuser",
+            display_name="Test User",
+        )
+        session_key = "telegram_456_789"
+        session_manager = SessionManager(
+            provider="telegram",
+            chat_id="456",
+            user_id="789",
+            sessions_path=tmp_path,
+        )
+        handler._session_handler._session_managers[session_manager.session_key] = (
+            session_manager
+        )
+
+        main_frame = StackFrame(
+            frame_id=generate_id(),
+            agent_name="main",
+            agent_type="main",
+            session=SessionState(
+                session_id="telegram_456_789_1",
+                provider="telegram",
+                chat_id="456",
+                user_id="789",
+            ),
+            system_prompt="main prompt",
+            context=AgentContext(
+                session_id=session_manager.session_key,
+                user_id="789",
+                chat_id="456",
+                provider="telegram",
+            ),
+        )
+        child_frame = StackFrame(
+            frame_id=generate_id(),
+            agent_name="skill:sfday-telegram-alert",
+            agent_type="skill",
+            session=SessionState(
+                session_id="agent-skill:sfday-telegram-alert-telegram_456_789",
+                provider="telegram",
+                chat_id="456",
+                user_id="789",
+            ),
+            system_prompt="skill prompt",
+            context=AgentContext(
+                session_id=session_manager.session_key,
+                user_id="789",
+                chat_id="456",
+                provider="telegram",
+            ),
+            is_skill_agent=True,
+            parent_tool_use_id="tool-1",
+        )
+        stack = handler._stack_manager.get_or_create(session_key)
+        stack.push(main_frame)
+        stack.push(child_frame)
+
+        handler._agent_executor.execute_turn = AsyncMock(
+            return_value=TurnResult(action=TurnAction.COMPLETE, text="[NO_REPLY]")
+        )
+
+        response_external_id = await handler._run_orchestration_loop(
+            message,
+            session_key,
+        )
+
+        assert response_external_id is None
+        assert handler._stack_manager.has_active(session_key) is False
+        mock_provider.send.assert_not_called()
+        mock_agent.run_message_postprocess_hooks.assert_awaited_once()
+
     async def test_handle_message_streaming(
         self, handler, mock_provider, mock_agent, incoming_message
     ):
@@ -226,6 +404,7 @@ class TestTelegramMessageHandler:
             provider="telegram",
             chat_id="456",
             user_id="789",
+            thread_id="1",
             sessions_path=tmp_path,
         )
         handler._session_handler._session_managers[session_manager.session_key] = (
@@ -462,28 +641,23 @@ class TestTelegramMessageHandler:
         self, handler, mock_provider, mock_agent, incoming_message, tmp_path
     ):
         """Test that duplicate messages are not processed twice."""
-        from ash.sessions import SessionManager
+        with patch("ash.sessions.manager.get_sessions_path", return_value=tmp_path):
+            # Resolve the exact manager instance the handler will use.
+            session_manager = handler._session_handler.get_session_manager(
+                "456", "789", "1"
+            )
 
-        # Set up session manager to use temp path
-        session_manager = SessionManager(
-            provider="telegram",
-            chat_id="456",
-            user_id="789",
-            sessions_path=tmp_path,
-        )
-        handler._session_handler._session_managers[session_manager.session_key] = (
-            session_manager
-        )
+            # Pre-seed the session with a message having the same external_id
+            await session_manager.ensure_session()
+            await session_manager.add_user_message(
+                content="Previous message",
+                token_count=10,
+                metadata={"external_id": "1"},  # Same ID as incoming_message
+            )
+            incoming_message.metadata["thread_id"] = "1"
+            assert await handler._session_handler.is_duplicate_message(incoming_message)
 
-        # Pre-seed the session with a message having the same external_id
-        await session_manager.ensure_session()
-        await session_manager.add_user_message(
-            content="Previous message",
-            token_count=10,
-            metadata={"external_id": "1"},  # Same ID as incoming_message
-        )
-
-        await handler.handle_message(incoming_message)
+            await handler.handle_message(incoming_message)
 
         # Agent should NOT have been called (duplicate detected)
         mock_agent.process_message_streaming.assert_not_called()
@@ -491,6 +665,150 @@ class TestTelegramMessageHandler:
 
         # No response should have been sent (silent drop)
         mock_provider.send.assert_not_called()
+
+    async def test_handle_message_completes_capability_callback_without_agent(
+        self, mock_provider, mock_agent, tmp_path
+    ) -> None:
+        """Localhost OAuth callbacks should be completed host-side."""
+        from ash.providers.base import IncomingMessage
+
+        capability_manager = MagicMock()
+        capability_manager.auth_complete_callback = AsyncMock(
+            return_value={
+                "ok": True,
+                "capability": "gog.calendar",
+                "account_hint": "default",
+            }
+        )
+        capability_manager.list_auth_flows = AsyncMock(return_value=[])
+
+        use_skill_tool = MagicMock()
+        use_skill_tool._capability_manager = capability_manager
+        tool_registry = MagicMock()
+        tool_registry.has.side_effect = lambda name: name == "use_skill"
+        tool_registry.get.return_value = use_skill_tool
+
+        handler = TelegramMessageHandler(
+            provider=mock_provider,
+            agent=mock_agent,
+            streaming=True,
+            tool_registry=tool_registry,
+        )
+        cast(Any, handler._session_handler).persist_messages = AsyncMock()
+
+        callback_message = IncomingMessage(
+            id="oauth-1",
+            chat_id="456",
+            user_id="789",
+            text=(
+                "http://localhost/?state=abc&iss=https://accounts.google.com"
+                "&code=4/abc123&scope=https://www.googleapis.com/auth/calendar"
+            ),
+            username="testuser",
+            display_name="Test User",
+        )
+
+        await handler.handle_message(callback_message)
+
+        capability_manager.auth_complete_callback.assert_awaited_once()
+        capability_manager.list_auth_flows.assert_awaited_once_with(user_id="789")
+        mock_agent.process_message.assert_not_called()
+        mock_agent.process_message_streaming.assert_not_called()
+        mock_provider.send.assert_awaited()
+        sent_text = mock_provider.send.call_args.args[0].text
+        assert "Google Calendar connected" in sent_text
+        assert "setup is complete" in sent_text
+
+    async def test_handle_message_reports_capability_auth_error_without_agent(
+        self, mock_provider, mock_agent
+    ) -> None:
+        """Capability auth errors should return deterministic retry text."""
+        from ash.providers.base import IncomingMessage
+
+        class CapabilityAuthError(Exception):
+            def __init__(self, code: str) -> None:
+                super().__init__(code)
+                self.code = code
+
+        capability_manager = MagicMock()
+        capability_manager.auth_complete_callback = AsyncMock(
+            side_effect=CapabilityAuthError("capability_auth_state_mismatch")
+        )
+
+        use_skill_tool = MagicMock()
+        use_skill_tool._capability_manager = capability_manager
+        tool_registry = MagicMock()
+        tool_registry.has.side_effect = lambda name: name == "use_skill"
+        tool_registry.get.return_value = use_skill_tool
+
+        handler = TelegramMessageHandler(
+            provider=mock_provider,
+            agent=mock_agent,
+            streaming=True,
+            tool_registry=tool_registry,
+        )
+
+        callback_message = IncomingMessage(
+            id="oauth-2",
+            chat_id="456",
+            user_id="789",
+            text="http://localhost/?state=bad&code=4/def456",
+            username="testuser",
+            display_name="Test User",
+        )
+
+        await handler.handle_message(callback_message)
+
+        capability_manager.auth_complete_callback.assert_awaited_once()
+        mock_agent.process_message.assert_not_called()
+        mock_agent.process_message_streaming.assert_not_called()
+        mock_provider.send.assert_awaited()
+        sent_text = mock_provider.send.call_args.args[0].text
+        assert "capability_auth_state_mismatch" in sent_text
+        assert "latest auth URL" in sent_text
+
+    async def test_handle_message_reports_callback_internal_error_without_agent(
+        self, mock_provider, mock_agent
+    ) -> None:
+        """Unexpected callback failures should still produce deterministic feedback."""
+        from ash.providers.base import IncomingMessage
+
+        capability_manager = MagicMock()
+        capability_manager.auth_complete_callback = AsyncMock(
+            side_effect=RuntimeError("boom")
+        )
+
+        use_skill_tool = MagicMock()
+        use_skill_tool._capability_manager = capability_manager
+        tool_registry = MagicMock()
+        tool_registry.has.side_effect = lambda name: name == "use_skill"
+        tool_registry.get.return_value = use_skill_tool
+
+        handler = TelegramMessageHandler(
+            provider=mock_provider,
+            agent=mock_agent,
+            streaming=True,
+            tool_registry=tool_registry,
+        )
+
+        callback_message = IncomingMessage(
+            id="oauth-3",
+            chat_id="456",
+            user_id="789",
+            text="http://localhost/?state=bad&code=4/ghi789",
+            username="testuser",
+            display_name="Test User",
+        )
+
+        await handler.handle_message(callback_message)
+
+        capability_manager.auth_complete_callback.assert_awaited_once()
+        mock_agent.process_message.assert_not_called()
+        mock_agent.process_message_streaming.assert_not_called()
+        mock_provider.send.assert_awaited()
+        sent_text = mock_provider.send.call_args.args[0].text
+        assert "internal error" in sent_text
+        assert "resend the callback URL" in sent_text
 
     async def test_handle_callback_query_resumes_checkpoint(
         self, mock_provider, mock_agent, tmp_path

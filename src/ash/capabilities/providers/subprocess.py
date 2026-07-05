@@ -11,12 +11,17 @@ import json
 import os
 import secrets
 import shlex
+import shutil
+import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from ash.capabilities.providers.base import (
     CapabilityAuthBeginResult,
+    CapabilityAuthCompleteInput,
     CapabilityAuthCompleteResult,
+    CapabilityAuthPollResult,
     CapabilityCallContext,
     CapabilityProvider,
 )
@@ -25,10 +30,22 @@ from ash.context_token import (
     ENV_SECRET,
     ContextTokenService,
     get_default_context_token_service,
+    issue_host_context_token,
 )
 
 _BRIDGE_PROTOCOL_VERSION = 1
-_BRIDGE_CONTEXT_TOKEN_TTL_SECONDS = 300
+_BRIDGE_CONTEXT_TOKEN_TTL_SECONDS = 900
+_BRIDGE_BASE_ENV_KEYS = (
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "PATH",
+    "PYTHONPATH",
+    "TMP",
+    "TEMP",
+    "TMPDIR",
+    "USER",
+)
 
 
 class SubprocessCapabilityProvider(CapabilityProvider):
@@ -41,16 +58,18 @@ class SubprocessCapabilityProvider(CapabilityProvider):
         command: list[str] | str,
         timeout_seconds: float = 30.0,
         context_token_service: ContextTokenService | None = None,
+        env: dict[str, str] | None = None,
     ) -> None:
         normalized_namespace = str(namespace).strip()
         if not normalized_namespace:
             raise ValueError("provider namespace is required")
         self._namespace = normalized_namespace
-        self._command = _normalize_command(command)
+        self._command = _resolve_command(_normalize_command(command))
         self._timeout_seconds = max(1.0, float(timeout_seconds))
         self._context_token_service = (
             context_token_service or get_default_context_token_service()
         )
+        self._extra_env: dict[str, str] = dict(env) if env else {}
 
     @property
     def namespace(self) -> str:
@@ -86,10 +105,66 @@ class SubprocessCapabilityProvider(CapabilityProvider):
             code="capability_invalid_output",
             message="bridge auth_begin must return auth_url",
         )
+        flow_type = str(result.get("flow_type") or "authorization_code").strip()
+        raw_user_code = result.get("user_code")
+        user_code = str(raw_user_code).strip() if raw_user_code is not None else None
+        raw_poll_interval = result.get("poll_interval_seconds")
+        poll_interval: int | None = None
+        if raw_poll_interval is not None:
+            try:
+                poll_interval = int(raw_poll_interval)
+            except (TypeError, ValueError):
+                pass
         return CapabilityAuthBeginResult(
             auth_url=auth_url,
             expires_at=_parse_optional_datetime(result.get("expires_at")),
             flow_state=_as_object(result.get("flow_state"), default={}),
+            flow_type=flow_type,
+            user_code=user_code,
+            poll_interval_seconds=poll_interval,
+            expected_callback_state=_optional_text(
+                result.get("expected_callback_state")
+            ),
+        )
+
+    async def auth_poll(
+        self,
+        *,
+        capability_id: str,
+        flow_state: dict[str, Any],
+        context: CapabilityCallContext,
+    ) -> CapabilityAuthPollResult:
+        result = await self._call_bridge(
+            "auth_poll",
+            {
+                "capability_id": capability_id,
+                "flow_state": dict(flow_state),
+                "context_token": self._issue_context_token(context),
+            },
+        )
+        status = _required_text(
+            value=result.get("status"),
+            code="capability_invalid_output",
+            message="bridge auth_poll must return status",
+        )
+        raw_retry = result.get("retry_after_seconds")
+        retry_after: int | None = None
+        if raw_retry is not None:
+            try:
+                retry_after = int(raw_retry)
+            except (TypeError, ValueError):
+                pass
+        account_ref = result.get("account_ref")
+        if account_ref is not None:
+            account_ref = str(account_ref).strip() or None
+        return CapabilityAuthPollResult(
+            status=status,
+            retry_after_seconds=retry_after,
+            account_ref=account_ref,
+            credential_material=_as_object(
+                result.get("credential_material"), default={}
+            ),
+            metadata=_as_object(result.get("metadata"), default={}),
         )
 
     async def auth_complete(
@@ -97,8 +172,7 @@ class SubprocessCapabilityProvider(CapabilityProvider):
         *,
         capability_id: str,
         flow_state: dict[str, Any],
-        callback_url: str | None,
-        code: str | None,
+        completion: CapabilityAuthCompleteInput,
         context: CapabilityCallContext,
     ) -> CapabilityAuthCompleteResult:
         result = await self._call_bridge(
@@ -106,8 +180,9 @@ class SubprocessCapabilityProvider(CapabilityProvider):
             {
                 "capability_id": capability_id,
                 "flow_state": dict(flow_state),
-                "callback_url": callback_url,
-                "code": code,
+                "authorization_code": completion.authorization_code,
+                "raw_callback_url": completion.raw_callback_url,
+                "state": completion.state,
                 "context_token": self._issue_context_token(context),
             },
         )
@@ -169,7 +244,7 @@ class SubprocessCapabilityProvider(CapabilityProvider):
 
     def _issue_context_token(self, context: CapabilityCallContext) -> str:
         try:
-            return self._context_token_service.issue(
+            return issue_host_context_token(
                 effective_user_id=context.user_id,
                 chat_id=context.chat_id,
                 chat_type=context.chat_type,
@@ -179,6 +254,7 @@ class SubprocessCapabilityProvider(CapabilityProvider):
                 source_username=context.source_username,
                 source_display_name=context.source_display_name,
                 ttl_seconds=_BRIDGE_CONTEXT_TOKEN_TTL_SECONDS,
+                context_token_service=self._context_token_service,
             )
         except ValueError as e:
             raise _capability_error(
@@ -187,13 +263,19 @@ class SubprocessCapabilityProvider(CapabilityProvider):
             ) from None
 
     async def _execute_command(self, payload: dict[str, Any]) -> dict[str, Any]:
-        proc = await asyncio.create_subprocess_exec(
-            *self._command,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=self._bridge_environment(),
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *self._command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=self._bridge_environment(),
+            )
+        except FileNotFoundError:
+            raise _capability_error(
+                "capability_backend_unavailable",
+                f"bridge command not found: {self._command[0]}",
+            ) from None
         input_bytes = json.dumps(payload, ensure_ascii=True).encode("utf-8")
         try:
             stdout, stderr = await asyncio.wait_for(
@@ -234,7 +316,16 @@ class SubprocessCapabilityProvider(CapabilityProvider):
         return parsed
 
     def _bridge_environment(self) -> dict[str, str]:
-        env = dict(os.environ)
+        env: dict[str, str] = {}
+        for key in _BRIDGE_BASE_ENV_KEYS:
+            value = os.environ.get(key)
+            if value is not None:
+                env[key] = value
+        for key, value in os.environ.items():
+            if key.startswith("GOGCLI_"):
+                env[key] = value
+        if self._extra_env:
+            env.update(self._extra_env)
         env[ENV_SECRET] = self._context_token_service.export_verifier_secret()
         return env
 
@@ -309,6 +400,29 @@ def _normalize_command(command: list[str] | str) -> list[str]:
         raise ValueError("provider command must be a string or list of strings")
     if not parts:
         raise ValueError("provider command is required")
+    return parts
+
+
+def _resolve_command(parts: list[str]) -> list[str]:
+    executable = parts[0]
+    if Path(executable).is_absolute() or os.path.sep in executable:
+        return parts
+
+    # Prefer the active Python runtime's script directory first so bridge
+    # resolution is stable across service managers with reduced PATH.
+    python_bin_dir = Path(sys.executable).resolve().parent
+    candidates = [python_bin_dir / executable]
+    virtual_env = str(os.environ.get("VIRTUAL_ENV") or "").strip()
+    if virtual_env:
+        candidates.append(Path(virtual_env).resolve() / "bin" / executable)
+    for candidate in candidates:
+        if candidate.exists() and os.access(candidate, os.X_OK):
+            return [str(candidate), *parts[1:]]
+
+    found = shutil.which(executable)
+    if found:
+        return [found, *parts[1:]]
+
     return parts
 
 
@@ -414,6 +528,13 @@ def _required_text(*, value: Any, code: str, message: str) -> str:
     if not text:
         raise _capability_error(code, message)
     return text
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _capability_error(code: str, message: str) -> Exception:

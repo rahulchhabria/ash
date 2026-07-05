@@ -16,6 +16,7 @@ from evals.judge import (
     LLMJudge,
     check_disallowed_tool_result_substrings,
     check_forbidden_tools,
+    check_skill_handoff_completion,
     check_tool_input_assertions,
 )
 from evals.types import (
@@ -118,7 +119,13 @@ def load_eval_suite(path: Path) -> EvalSuite:
         Parsed EvalSuite.
     """
     with path.open() as f:
-        data = yaml.safe_load(f)
+        data = yaml.safe_load(f) or {}
+
+    if not isinstance(data, dict):
+        raise ValueError(f"Eval suite YAML must be a mapping: {path}")
+
+    data.setdefault("schema_version", "2.0")
+    data.setdefault("name", path.stem.replace("_", " ").title())
 
     return EvalSuite.model_validate(data)
 
@@ -326,6 +333,14 @@ async def run_eval_case(
                 tool_calls=effective_tool_calls,
                 judge_result=input_assertion_result,
             )
+        skill_handoff_result = check_skill_handoff_completion(effective_tool_calls)
+        if skill_handoff_result:
+            return EvalResult(
+                case=case,
+                response_text=rendered_response_text,
+                tool_calls=effective_tool_calls,
+                judge_result=skill_handoff_result,
+            )
 
         # Judge the response with LLM
         judge = LLMJudge(judge_llm, config)
@@ -453,6 +468,9 @@ def build_session_state(
     username = config.username or default_session.username
     display_name = config.display_name or default_session.display_name
     chat_type = config.chat_type or default_session.chat_type
+    if not chat_type and provider == "eval":
+        # Eval chat context should default to private for provenance-aware filters.
+        chat_type = "private"
     chat_title = config.chat_title or default_session.chat_title
 
     if username:
@@ -806,6 +824,7 @@ async def run_yaml_eval_case(
                 expected_tools=case.expected_tools,
                 forbidden_tools=case.forbidden_tools,
                 disallowed_tool_result_substrings=case.disallowed_tool_result_substrings,
+                tool_input_assertions=case.tool_input_assertions,
             )
 
             result = await _execute_and_judge(
@@ -925,6 +944,14 @@ async def _execute_and_judge(
                 response_text=rendered_response_text,
                 tool_calls=effective_tool_calls,
                 judge_result=input_assertion_result,
+            )
+        skill_handoff_result = check_skill_handoff_completion(effective_tool_calls)
+        if skill_handoff_result:
+            return EvalResult(
+                case=case,
+                response_text=rendered_response_text,
+                tool_calls=effective_tool_calls,
+                judge_result=skill_handoff_result,
             )
 
         # LLM judge
@@ -1047,25 +1074,40 @@ def extract_tool_calls_from_session(session_json: str) -> list[dict[str, Any]]:
     import json
 
     data = json.loads(session_json)
-    tool_calls: list[dict[str, Any]] = []
+    ordered_calls: list[dict[str, Any]] = []
+    tool_results_by_id: dict[str, tuple[str, bool]] = {}
 
     for message in data.get("messages", []):
-        if message.get("role") != "assistant":
-            continue
-
         content = message.get("content", [])
         if isinstance(content, str):
             continue
 
         for block in content:
             if block.get("type") == "tool_use":
-                tool_calls.append(
+                ordered_calls.append(
                     {
                         "name": block.get("name", ""),
                         "input": block.get("input", {}),
                         "id": block.get("id", ""),
                     }
                 )
+            elif block.get("type") == "tool_result":
+                tool_use_id = block.get("tool_use_id")
+                if tool_use_id:
+                    tool_results_by_id[str(tool_use_id)] = (
+                        str(block.get("content", "")),
+                        bool(block.get("is_error", False)),
+                    )
+
+    tool_calls: list[dict[str, Any]] = []
+    for call in ordered_calls:
+        call_id = str(call.get("id", ""))
+        merged = dict(call)
+        if call_id in tool_results_by_id:
+            result, is_error = tool_results_by_id[call_id]
+            merged["result"] = result
+            merged["is_error"] = is_error
+        tool_calls.append(merged)
 
     return tool_calls
 
@@ -1101,46 +1143,3 @@ def extract_phase_tool_calls(
             phases.append([])
 
     return phases
-
-
-def check_phase_constraints(
-    case: EvalCase,
-    phase_tool_calls: list[list[dict[str, Any]]],
-) -> list[tuple[int, str]]:
-    """Check if phase constraints are violated.
-
-    Args:
-        case: The eval case with optional phase_constraints.
-        phase_tool_calls: Tool calls per phase from extract_phase_tool_calls.
-
-    Returns:
-        List of (phase_index, violation_message) tuples.
-    """
-    violations: list[tuple[int, str]] = []
-    if not case.phase_constraints:
-        return violations
-
-    phase_names = list(case.phase_constraints.keys())
-    for i, phase_name in enumerate(phase_names):
-        if i >= len(phase_tool_calls):
-            break
-
-        constraint = case.phase_constraints[phase_name]
-        tools = phase_tool_calls[i]
-        used = {tc["name"] for tc in tools}
-
-        # Check forbidden tools
-        forbidden_used = used & set(constraint.forbidden_tools)
-        if forbidden_used:
-            violations.append(
-                (i, f"Phase '{phase_name}' used forbidden tools: {forbidden_used}")
-            )
-
-        # Check expected tools
-        missing = set(constraint.expected_tools) - used
-        if missing:
-            violations.append(
-                (i, f"Phase '{phase_name}' missing expected tools: {missing}")
-            )
-
-    return violations

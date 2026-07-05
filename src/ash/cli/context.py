@@ -108,26 +108,20 @@ model = "codex"  # Use coding model for skill creation
 # allowed_users = ["123456789"]
 
 # =============================================================================
-# Optional: Web Search (Brave)
+# Optional: Web Search (Parallel)
 # =============================================================================
-# Get API key at: https://brave.com/search/api/
+# Get API key at: https://platform.parallel.ai/
 
-# [brave_search]
-# api_key = ""  # or set BRAVE_SEARCH_API_KEY env var
+# [parallel_search]
+# api_key = ""  # or set PARALLEL_API_KEY env var
 
 # =============================================================================
 # Optional: External Capability Provider (skill-owned)
 # =============================================================================
-# Configure bundled gog skill + provider wiring in one place:
+# Configure bundled google skill (provider bridge is auto-wired):
 #
-# [skills.gog]
+# [skills.google]
 # enabled = true
-#
-# [skills.gog.capability_provider]
-# enabled = true
-# namespace = "gog"
-# command = ["gogcli", "bridge"]
-# timeout_seconds = 30
 #
 # Registers an external capability bridge command (for example from a skill
 # package/repo) that implements the capability provider contract.

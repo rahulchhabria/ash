@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import shlex
+import sys
 from pathlib import Path
 from typing import Any, Literal
 
@@ -34,7 +35,7 @@ class ModelConfig(BaseModel):
     Only supported by Anthropic Claude models.
     """
 
-    provider: Literal["anthropic", "openai", "openai-oauth"]
+    provider: Literal["anthropic", "openai", "openai-oauth", "pioneer"]
     model: str
     temperature: float | None = None  # None = use provider default
     max_tokens: int = 4096
@@ -238,6 +239,29 @@ class TodoConfig(BaseModel):
     enabled: bool = True
 
 
+class EmailForwardSummaryConfig(BaseModel):
+    """Configuration for the email-forward-summary integration.
+
+    Spec contract: specs/email_forward_summary.md.
+    """
+
+    enabled: bool = False
+    database_path: Path | None = None
+    max_body_chars: int = Field(default=4000, ge=200, le=20_000)
+
+
+class CloseGameAlertConfig(BaseModel):
+    """Configuration for the close-game-alert integration.
+
+    Spec contract: specs/close_game_alert.md.
+    """
+
+    enabled: bool = False
+    recent_window_minutes: int = Field(default=240, ge=1, le=1440)
+    history_lookback: int = Field(default=10, ge=1, le=100)
+    alert_prefixes: list[str] = Field(default_factory=lambda: ["Close Game Alert"])
+
+
 class CapabilityProviderConfig(BaseModel):
     """Configuration for one capability provider plugin."""
 
@@ -245,6 +269,7 @@ class CapabilityProviderConfig(BaseModel):
     namespace: str | None = None
     command: list[str]
     timeout_seconds: float = Field(default=30.0, ge=1.0, le=300.0)
+    env: dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
@@ -353,8 +378,8 @@ class SessionsConfig(BaseModel):
     max_concurrent: int = 2  # Parallel session processing limit
 
 
-class BraveSearchConfig(BaseModel):
-    """Configuration for Brave Search API."""
+class ParallelSearchConfig(BaseModel):
+    """Configuration for Parallel Search API."""
 
     api_key: SecretStr | None = None
 
@@ -371,6 +396,7 @@ class SentryConfig(BaseModel):
     release: str | None = None
     traces_sample_rate: float = Field(default=0.1, ge=0.0, le=1.0)
     profiles_sample_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    stream_gen_ai_spans: bool = False
     send_default_pii: bool = False
     debug: bool = False
 
@@ -512,12 +538,17 @@ class AshConfig(BaseModel):
     # Provider-level API keys
     anthropic: ProviderConfig | None = None
     openai: ProviderConfig | None = None
+    pioneer: ProviderConfig | None = None
     telegram: TelegramConfig | None = None
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     image: ImageConfig = Field(default_factory=ImageConfig)
     todo: TodoConfig = Field(default_factory=TodoConfig)
+    email_forward_summary: EmailForwardSummaryConfig = Field(
+        default_factory=EmailForwardSummaryConfig
+    )
+    close_game_alert: CloseGameAlertConfig = Field(default_factory=CloseGameAlertConfig)
     capabilities: CapabilitiesConfig = Field(default_factory=CapabilitiesConfig)
     tool_output_trust: ToolOutputTrustConfig = Field(
         default_factory=ToolOutputTrustConfig
@@ -526,7 +557,7 @@ class AshConfig(BaseModel):
     conversation: ConversationConfig = Field(default_factory=ConversationConfig)
     sessions: SessionsConfig = Field(default_factory=SessionsConfig)
     embeddings: EmbeddingsConfig | None = None
-    brave_search: BraveSearchConfig | None = None
+    parallel_search: ParallelSearchConfig | None = None
     sentry: SentryConfig | None = None
     # Environment variables from [env] section
     # Loaded into session environment for skills and bash commands
@@ -535,7 +566,7 @@ class AshConfig(BaseModel):
     # Allows overriding model, max_iterations per agent
     agents: dict[str, AgentOverrideConfig] = Field(default_factory=dict)
     # Skill-specific configuration: [skills.<name>] sections
-    # Allows setting API keys, model override, and enabled flag per skill
+    # Allows setting env/config values, model override, and enabled flag per skill
     skills: dict[str, SkillConfig] = Field(default_factory=dict)
     # Skill defaults from [skills.defaults]
     skill_defaults: SkillDefaultsConfig = Field(default_factory=SkillDefaultsConfig)
@@ -602,7 +633,7 @@ class AshConfig(BaseModel):
             # Remaining entries are per-skill configs
             data["skills"] = skills_data
 
-        _apply_gog_skill_provider_preset(data)
+        _apply_google_skill_provider_preset(data)
         return data
 
     @model_validator(mode="after")
@@ -626,7 +657,7 @@ class AshConfig(BaseModel):
         return self.get_model("default")
 
     def _resolve_provider_api_key(
-        self, provider: Literal["anthropic", "openai", "openai-oauth"]
+        self, provider: Literal["anthropic", "openai", "openai-oauth", "pioneer"]
     ) -> SecretStr | None:
         if provider == "openai-oauth":
             # OAuth-based provider — API key comes from auth.json, not config
@@ -663,7 +694,7 @@ class AshConfig(BaseModel):
         return self._resolve_provider_api_key(self.get_model(alias).provider)
 
     def resolve_provider_api_key(
-        self, provider: Literal["anthropic", "openai", "openai-oauth"]
+        self, provider: Literal["anthropic", "openai", "openai-oauth", "pioneer"]
     ) -> SecretStr | None:
         """Resolve API key for a provider from config/env/oauth storage."""
         return self._resolve_provider_api_key(provider)
@@ -707,7 +738,7 @@ class AshConfig(BaseModel):
         )
 
     def create_llm_provider_for_provider(
-        self, provider: Literal["anthropic", "openai", "openai-oauth"]
+        self, provider: Literal["anthropic", "openai", "openai-oauth", "pioneer"]
     ):
         """Create an LLM provider instance directly from a provider id."""
         from ash.llm.registry import create_llm_provider
@@ -747,15 +778,15 @@ class AshConfig(BaseModel):
         }
 
 
-def _apply_gog_skill_provider_preset(data: dict[str, Any]) -> None:
-    """Apply default provider wiring when bundled gog skill is enabled."""
+def _apply_google_skill_provider_preset(data: dict[str, Any]) -> None:
+    """Apply default provider wiring when bundled google skill is enabled."""
     skills = data.get("skills")
     if not isinstance(skills, dict):
         return
-    gog_skill = skills.get("gog")
-    if not isinstance(gog_skill, dict):
+    google_skill = skills.get("google")
+    if not isinstance(google_skill, dict):
         return
-    if gog_skill.get("enabled") is not True:
+    if google_skill.get("enabled") is not True:
         return
 
     # Wire default external provider bridge command by default.
@@ -769,7 +800,7 @@ def _apply_gog_skill_provider_preset(data: dict[str, Any]) -> None:
     if not isinstance(provider_gog, dict):
         provider_gog = {}
 
-    provider_from_skill = gog_skill.get("capability_provider")
+    provider_from_skill = google_skill.get("capability_provider")
     if isinstance(provider_from_skill, dict):
         for field in ("enabled", "namespace", "command", "timeout_seconds"):
             if field in provider_from_skill:
@@ -777,8 +808,27 @@ def _apply_gog_skill_provider_preset(data: dict[str, Any]) -> None:
 
     provider_gog.setdefault("enabled", True)
     provider_gog.setdefault("namespace", "gog")
-    provider_gog.setdefault("command", ["gogcli", "bridge"])
+    provider_gog.setdefault(
+        "command",
+        [
+            sys.executable,
+            "-m",
+            "ash.skills.bundled.gog.scripts.gogcli_bridge",
+            "bridge",
+        ],
+    )
     provider_gog.setdefault("timeout_seconds", 30.0)
+
+    # Wire Google OAuth credentials from skill config into provider env
+    # so the bridge subprocess receives them.
+    provider_env = provider_gog.setdefault("env", {})
+    google_client_id = google_skill.get("google_client_id")
+    google_client_secret = google_skill.get("google_client_secret")
+    if isinstance(google_client_id, str) and google_client_id.strip():
+        provider_env.setdefault("GOOGLE_CLIENT_ID", google_client_id.strip())
+    if isinstance(google_client_secret, str) and google_client_secret.strip():
+        provider_env.setdefault("GOOGLE_CLIENT_SECRET", google_client_secret.strip())
+
     providers["gog"] = provider_gog
     capabilities["providers"] = providers
     data["capabilities"] = capabilities

@@ -43,6 +43,7 @@ def test_list_capabilities(cli_runner: CliRunner, mock_rpc) -> None:
                 "description": "Email operations",
                 "available": True,
                 "authenticated": False,
+                "linked_accounts": [],
                 "operations": ["list_messages"],
             }
         ]
@@ -84,6 +85,110 @@ def test_invoke_capability(cli_runner: CliRunner, mock_rpc) -> None:
     assert params["input"] == {"folder": "inbox"}
 
 
+def test_invoke_capability_with_account(cli_runner: CliRunner, mock_rpc) -> None:
+    mock_rpc.return_value = {
+        "ok": True,
+        "request_id": "cap_123",
+        "output": {"status": "ok"},
+    }
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "invoke",
+            "--capability",
+            "gog.email",
+            "--operation",
+            "list_messages",
+            "--account",
+            "work",
+        ],
+    )
+    assert result.exit_code == 0
+    params = mock_rpc.call_args[0][1]
+    assert params["account_ref"] == "work"
+
+
+def test_invoke_capability_with_mutation_proof(cli_runner: CliRunner, mock_rpc) -> None:
+    mock_rpc.return_value = {
+        "ok": True,
+        "request_id": "cap_123",
+        "output": {"status": "ok"},
+    }
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "invoke",
+            "--capability",
+            "gog.email",
+            "--operation",
+            "archive_messages",
+            "--plan-id",
+            "plan-1",
+            "--target-fingerprint",
+            "fp-1",
+        ],
+    )
+    assert result.exit_code == 0
+    params = mock_rpc.call_args[0][1]
+    assert params["mutation_plan_id"] == "plan-1"
+    assert params["target_fingerprint"] == "fp-1"
+
+
+def test_list_capabilities_shows_linked_accounts(
+    cli_runner: CliRunner, mock_rpc
+) -> None:
+    mock_rpc.return_value = {
+        "capabilities": [
+            {
+                "id": "gog.email",
+                "description": "Email operations",
+                "available": True,
+                "authenticated": True,
+                "linked_accounts": [
+                    {
+                        "account_ref": "work",
+                        "account_email": "me@company.com",
+                    }
+                ],
+                "operations": ["list_messages"],
+            }
+        ]
+    }
+
+    result = cli_runner.invoke(app, ["list"])
+    assert result.exit_code == 0
+    assert "Accounts: work (me@company.com)" in result.stdout
+
+
+def test_list_capabilities_hides_none_account_email(
+    cli_runner: CliRunner, mock_rpc
+) -> None:
+    mock_rpc.return_value = {
+        "capabilities": [
+            {
+                "id": "gog.email",
+                "description": "Email operations",
+                "available": True,
+                "authenticated": True,
+                "linked_accounts": [
+                    {
+                        "account_ref": "work",
+                        "account_email": None,
+                    }
+                ],
+                "operations": ["list_messages"],
+            }
+        ]
+    }
+
+    result = cli_runner.invoke(app, ["list"])
+    assert result.exit_code == 0
+    assert "Accounts: work" in result.stdout
+    assert "(None)" not in result.stdout
+
+
 def test_invoke_rejects_non_object_json(cli_runner: CliRunner, mock_rpc) -> None:
     result = cli_runner.invoke(
         app,
@@ -105,6 +210,8 @@ def test_invoke_rejects_non_object_json(cli_runner: CliRunner, mock_rpc) -> None
 def test_auth_begin(cli_runner: CliRunner, mock_rpc) -> None:
     mock_rpc.return_value = {
         "flow_id": "caf_1",
+        "capability": "gog.email",
+        "account_hint": "work",
         "auth_url": "https://auth.ash.invalid",
         "expires_at": "2026-02-24T20:10:00Z",
     }
@@ -117,6 +224,37 @@ def test_auth_begin(cli_runner: CliRunner, mock_rpc) -> None:
     assert "Started capability auth flow" in result.stdout
     assert "caf_1" in result.stdout
     assert mock_rpc.call_args[0][0] == "capability.auth.begin"
+
+
+def test_auth_list(cli_runner: CliRunner, mock_rpc) -> None:
+    mock_rpc.return_value = {
+        "flows": [
+            {
+                "flow_id": "caf_1",
+                "capability": "gog.calendar",
+                "account_hint": "work",
+                "auth_url": "https://auth.ash.invalid",
+                "flow_type": "authorization_code",
+                "expires_at": "2026-02-24T20:10:00Z",
+            }
+        ]
+    }
+
+    result = cli_runner.invoke(
+        app,
+        ["auth", "list", "--capability", "gog.calendar", "--account", "work"],
+    )
+    assert result.exit_code == 0
+    assert "Pending capability auth flows" in result.stdout
+    assert "caf_1 (gog.calendar, account=work)" in result.stdout
+    assert mock_rpc.call_args[0][0] == "capability.auth.list"
+
+
+def test_auth_list_empty(cli_runner: CliRunner, mock_rpc) -> None:
+    mock_rpc.return_value = {"flows": []}
+    result = cli_runner.invoke(app, ["auth", "list"])
+    assert result.exit_code == 0
+    assert "No pending capability auth flows." in result.stdout
 
 
 def test_auth_complete_requires_code_or_callback(
@@ -144,3 +282,37 @@ def test_auth_complete(cli_runner: CliRunner, mock_rpc) -> None:
     assert result.exit_code == 0
     assert "Capability auth completed" in result.stdout
     assert "account_ref=work" in result.stdout
+
+
+def test_auth_complete_callback(cli_runner: CliRunner, mock_rpc) -> None:
+    mock_rpc.return_value = {
+        "ok": True,
+        "flow_id": "caf_1",
+        "capability": "gog.email",
+        "account_ref": "work",
+    }
+    result = cli_runner.invoke(
+        app,
+        [
+            "auth",
+            "complete-callback",
+            "--callback-url",
+            "http://localhost/?state=s1&code=abc",
+            "--capability",
+            "gog.email",
+            "--account",
+            "work",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Capability auth completed" in result.stdout
+    assert "capability.auth.complete_callback" == mock_rpc.call_args[0][0]
+
+
+def test_auth_complete_callback_requires_code_or_callback(
+    cli_runner: CliRunner, mock_rpc
+) -> None:
+    result = cli_runner.invoke(app, ["auth", "complete-callback"])
+    assert result.exit_code == 1
+    assert "Must specify either --callback-url or --code" in result.output
+    mock_rpc.assert_not_called()

@@ -16,13 +16,14 @@ from ash.context_token import (
     ContextTokenError,
     ContextTokenService,
     get_default_context_token_service,
+    issue_host_context_token,
 )
 from ash.sandbox.executor import ExecutionResult
 
 BridgeExecutor = Callable[[str, int, dict[str, str]], ExecutionResult]
 _BRIDGE_TOKEN_SUBJECT = "browser-bridge"  # noqa: S105
 _BRIDGE_TOKEN_PROVIDER = "browser-bridge"  # noqa: S105
-_DEFAULT_BRIDGE_TOKEN_TTL_SECONDS = 120
+_DEFAULT_BRIDGE_TOKEN_TTL_SECONDS = 600
 
 
 @dataclass(slots=True)
@@ -56,12 +57,13 @@ class BrowserExecBridge:
         target_name = target.strip() or "default"
         auth_service = token_service or get_default_context_token_service()
         ttl = max(10, int(token_ttl_seconds))
-        bridge_token = auth_service.issue(
+        bridge_token = issue_host_context_token(
             effective_user_id=_BRIDGE_TOKEN_SUBJECT,
             provider=_BRIDGE_TOKEN_PROVIDER,
             session_key=scope,
             thread_id=target_name,
             ttl_seconds=ttl,
+            context_token_service=auth_service,
         )
 
         class _BridgeServer(ThreadingHTTPServer):
@@ -210,12 +212,13 @@ class BrowserExecBridge:
         ttl = (
             self._token_ttl_seconds if ttl_seconds is None else max(1, int(ttl_seconds))
         )
-        return self._token_service.issue(
+        return issue_host_context_token(
             effective_user_id=_BRIDGE_TOKEN_SUBJECT,
             provider=_BRIDGE_TOKEN_PROVIDER,
             session_key=self._scope,
             thread_id=self._target,
             ttl_seconds=ttl,
+            context_token_service=self._token_service,
         )
 
 

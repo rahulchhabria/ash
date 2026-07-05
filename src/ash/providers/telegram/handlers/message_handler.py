@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from ash.agents.types import ChildActivated
 from ash.config.models import ConversationConfig
 from ash.core import Agent
+from ash.core.signals import is_no_reply
 from ash.providers.base import IncomingMessage, OutgoingMessage
 from ash.providers.telegram.handlers.checkpoint_handler import CheckpointHandler
 from ash.providers.telegram.handlers.passive_handler import PassiveHandler
@@ -22,11 +24,13 @@ from ash.providers.telegram.handlers.session_handler import (
     SessionLock,
 )
 from ash.providers.telegram.handlers.tool_tracker import (
+    ProgressMessageTool,
     ToolTracker,
 )
 from ash.providers.telegram.handlers.utils import append_inline_attribution
 from ash.providers.telegram.provider import _truncate
 from ash.sessions.types import session_key as make_session_key
+from ash.tools.base import ToolContext
 
 if TYPE_CHECKING:
     from aiogram.types import CallbackQuery
@@ -42,6 +46,7 @@ if TYPE_CHECKING:
     from ash.tools.registry import ToolRegistry
 
 logger = logging.getLogger("telegram")
+_LOCALHOST_CALLBACK_URL_PATTERN = re.compile(r"https?://localhost[^\s]*[?&]code=[^\s]*")
 
 
 def _extract_tool_calls_from_session(session: SessionState) -> list[dict[str, Any]]:
@@ -215,6 +220,344 @@ class TelegramMessageHandler:
             skill_registry=self._skill_registry,
         )
 
+    def _get_capability_manager(self) -> Any | None:
+        """Best-effort lookup of the capability manager via use_skill tool wiring."""
+        if self._tool_registry is None:
+            return None
+        if not hasattr(self._tool_registry, "has") or not self._tool_registry.has(
+            "use_skill"
+        ):
+            return None
+        try:
+            skill_tool = self._tool_registry.get("use_skill")
+        except Exception:
+            return None
+        return getattr(skill_tool, "_capability_manager", None)
+
+    @staticmethod
+    def _extract_localhost_callback_url(message_text: str) -> str | None:
+        """Extract a localhost OAuth callback URL from message text."""
+        match = _LOCALHOST_CALLBACK_URL_PATTERN.search(message_text)
+        if not match:
+            return None
+        callback_url = match.group(0).strip().rstrip(".,;")
+        return callback_url or None
+
+    def _parse_slash_command(self, message_text: str) -> tuple[str, str] | None:
+        """Parse an exact slash command and its trailing arguments."""
+        text = (message_text or "").strip()
+        if not text.startswith("/"):
+            return None
+
+        first, _, remainder = text.partition(" ")
+        command = first.strip().lower()
+        if not command:
+            return None
+
+        if "@" in command:
+            base, _, mention = command.partition("@")
+            bot_username = (self._provider.bot_username or "").strip().lower()
+            if mention and bot_username and mention != bot_username:
+                return None
+            command = base
+
+        return command, remainder.strip()
+
+    def _match_triggered_skill(
+        self,
+        message_text: str,
+    ) -> tuple[Any, str, str] | None:
+        """Resolve a slash-command trigger to a skill plus argument text."""
+        if self._skill_registry is None:
+            return None
+        parsed = self._parse_slash_command(message_text)
+        if parsed is None:
+            return None
+        command, arguments = parsed
+        skill = self._skill_registry.find_by_trigger(command)
+        if skill is None:
+            return None
+        return skill, command, arguments
+
+    async def _send_direct_result(
+        self,
+        *,
+        message: IncomingMessage,
+        assistant_text: str,
+        skip_user_message: bool = False,
+    ) -> str:
+        """Send a direct Telegram reply and persist it."""
+        response_external_id = await self._provider.send(
+            OutgoingMessage(
+                chat_id=message.chat_id,
+                text=assistant_text,
+                reply_to_message_id=message.id,
+            )
+        )
+        self._log_response(assistant_text)
+        await self._session_handler.persist_messages(
+            chat_id=message.chat_id,
+            user_id=message.user_id,
+            user_message=message.text,
+            assistant_message=assistant_text,
+            external_id=message.id,
+            response_external_id=response_external_id,
+            thread_id=message.metadata.get("thread_id"),
+            username=message.username,
+            display_name=message.display_name,
+            reply_to_external_id=message.reply_to_message_id,
+            skip_user_message=skip_user_message,
+        )
+        return response_external_id
+
+    async def _try_handle_triggered_skill(self, message: IncomingMessage) -> bool:
+        """Handle explicit slash-command skill triggers without main-agent routing."""
+        matched = self._match_triggered_skill(message.text or "")
+        if matched is None:
+            return False
+        if self._tool_registry is None or not self._tool_registry.has("use_skill"):
+            return False
+
+        skill, command, arguments = matched
+        if not arguments:
+            await self._send_direct_result(
+                message=message,
+                assistant_text=(
+                    f"{command} requires a research task.\n\n"
+                    f"Example: `{command} compare Sentry and Honeycomb for AI debugging`"
+                ),
+            )
+            return True
+
+        use_skill_tool = self._tool_registry.get("use_skill")
+        tracker = self._create_tool_tracker(message)
+
+        thread_id = message.metadata.get("thread_id")
+        session_key = make_session_key(
+            self._provider.name,
+            message.chat_id,
+            message.user_id,
+            thread_id,
+        )
+        session = await self._session_handler.get_or_create_session(message)
+        if session.has_incomplete_tool_use():
+            session.repair_incomplete_tool_use()
+
+        session_manager = self._session_handler.get_session_manager(
+            message.chat_id,
+            message.user_id,
+            thread_id,
+        )
+        user_metadata: dict[str, str] = {}
+        if message.id:
+            user_metadata["external_id"] = message.id
+        if message.reply_to_message_id:
+            user_metadata["reply_to_external_id"] = message.reply_to_message_id
+        await session_manager.add_user_message(
+            content=message.text,
+            metadata=user_metadata or None,
+            username=message.username,
+            display_name=message.display_name,
+            user_id=message.user_id,
+        )
+
+        from ash.providers.telegram.handlers.tool_tracker import ProgressMessageTool
+
+        progress_tool = ProgressMessageTool(tracker)
+        tool_context = ToolContext(
+            session_id=session.session_id,
+            user_id=message.user_id,
+            chat_id=message.chat_id,
+            thread_id=thread_id,
+            provider=self._provider.name,
+            metadata={
+                **message.metadata,
+                "reply_to_message_id": message.id,
+                "current_user_message": message.text,
+            },
+            session_manager=session_manager,
+            tool_use_id=f"trigger-skill-{message.id}",
+            tool_overrides={progress_tool.name: progress_tool},
+        )
+
+        logger.info(
+            "triggered_skill_invoked",
+            extra={
+                "skill": skill.name,
+                "command": command,
+                "chat_id": message.chat_id,
+            },
+        )
+
+        try:
+            result = await use_skill_tool.execute(
+                {
+                    "skill": skill.name,
+                    "message": arguments,
+                    "context": (
+                        f"Invoked by explicit slash command `{command}`.\n"
+                        "Treat the slash command itself as authoritative routing input."
+                    ),
+                },
+                tool_context,
+            )
+        except ChildActivated as ca:
+            if not self._agent_executor or not ca.child_frame:
+                await self._send_direct_result(
+                    message=message,
+                    assistant_text="Triggered skill could not be started.",
+                    skip_user_message=True,
+                )
+                return True
+
+            stack = self._stack_manager.get_or_create(session_key)
+            stack.push(ca.child_frame)
+            self._persist_stack(session_key, session_manager)
+            response_external_id = await self._run_orchestration_loop(
+                message,
+                session_key,
+                entry_user_message=None,
+                thinking_msg_id=tracker.thinking_msg_id,
+                tracker=tracker,
+            )
+            await self._session_handler.persist_messages(
+                chat_id=message.chat_id,
+                user_id=message.user_id,
+                user_message=message.text,
+                assistant_message=None,
+                external_id=message.id,
+                response_external_id=response_external_id,
+                thread_id=thread_id,
+                username=message.username,
+                display_name=message.display_name,
+                reply_to_external_id=message.reply_to_message_id,
+                skip_user_message=True,
+            )
+            return True
+
+        await self._send_direct_result(
+            message=message,
+            assistant_text=result.content,
+            skip_user_message=True,
+        )
+        return True
+
+    async def _try_handle_capability_oauth_callback(
+        self, message: IncomingMessage
+    ) -> bool:
+        """Complete capability auth from pasted callback URL without LLM orchestration."""
+        callback_url = self._extract_localhost_callback_url(message.text or "")
+        if not callback_url:
+            return False
+
+        manager = self._get_capability_manager()
+        if manager is None:
+            return False
+
+        try:
+            completion = await manager.auth_complete_callback(
+                user_id=message.user_id,
+                callback_url=callback_url,
+                chat_id=message.chat_id,
+                chat_type=message.metadata.get("chat_type"),
+                provider=self._provider.name,
+                thread_id=message.metadata.get("thread_id"),
+                source_username=message.username,
+                source_display_name=message.display_name,
+            )
+            pending_flows = await manager.list_auth_flows(user_id=message.user_id)
+        except Exception as e:
+            code = getattr(e, "code", "")
+            if isinstance(code, str) and code.startswith("capability_auth_"):
+                reply = (
+                    "I could not apply that OAuth callback yet "
+                    f"({code}). Please continue with the latest auth URL."
+                )
+                await self._provider.send(
+                    OutgoingMessage(
+                        chat_id=message.chat_id,
+                        text=reply,
+                        reply_to_message_id=message.id,
+                    )
+                )
+                return True
+            logger.exception(
+                "capability_oauth_callback_failed",
+                extra={
+                    "chat_id": message.chat_id,
+                    "user_id": message.user_id,
+                },
+            )
+            reply = (
+                "I hit an internal error while processing that OAuth callback. "
+                "Please resend the callback URL."
+            )
+            await self._provider.send(
+                OutgoingMessage(
+                    chat_id=message.chat_id,
+                    text=reply,
+                    reply_to_message_id=message.id,
+                )
+            )
+            return True
+
+        capability = str(completion.get("capability", "")).strip()
+        account_hint = str(completion.get("account_hint", "")).strip() or "default"
+        capability_label = {
+            "gog.email": "Gmail",
+            "gog.calendar": "Google Calendar",
+        }.get(capability, capability or "Google capability")
+
+        pending_caps = sorted(
+            {
+                str(flow.get("capability", "")).strip()
+                for flow in pending_flows
+                if isinstance(flow, dict) and flow.get("capability")
+            }
+        )
+        if pending_caps:
+            pending_names = ", ".join(
+                sorted(
+                    {
+                        {
+                            "gog.email": "Gmail",
+                            "gog.calendar": "Google Calendar",
+                        }.get(cap, cap)
+                        for cap in pending_caps
+                    }
+                )
+            )
+            reply = (
+                f"{capability_label} connected for account '{account_hint}'. "
+                f"Still pending: {pending_names}. Paste the next callback URL when ready."
+            )
+        else:
+            reply = (
+                f"{capability_label} connected for account '{account_hint}'. "
+                "Google setup is complete."
+            )
+
+        response_external_id = await self._provider.send(
+            OutgoingMessage(
+                chat_id=message.chat_id,
+                text=reply,
+                reply_to_message_id=message.id,
+            )
+        )
+        self._log_response(reply)
+        await self._session_handler.persist_messages(
+            chat_id=message.chat_id,
+            user_id=message.user_id,
+            user_message=message.text,
+            assistant_message=reply,
+            external_id=message.id,
+            response_external_id=response_external_id,
+            thread_id=message.metadata.get("thread_id"),
+            username=message.username,
+            display_name=message.display_name,
+        )
+        return True
+
     def _log_response(self, text: str | None) -> None:
         bot_name = self._provider.bot_username or "bot"
         logger.info(
@@ -261,13 +604,6 @@ class TelegramMessageHandler:
                     )
                     return
 
-            if await self._session_handler.is_duplicate_message(message):
-                logger.debug(
-                    "duplicate_message_skipped",
-                    extra={"message.id": str(message.id)},
-                )
-                return
-
             if await self._session_handler.should_skip_reply(message):
                 logger.debug(
                     f"Skipping reply {message.id} - target not in conversation"
@@ -278,6 +614,13 @@ class TelegramMessageHandler:
             thread_id = await self._session_handler.resolve_reply_chain_thread(message)
             if thread_id:
                 message.metadata["thread_id"] = thread_id
+
+            if await self._session_handler.is_duplicate_message(message):
+                logger.debug(
+                    "duplicate_message_skipped",
+                    extra={"message.id": str(message.id)},
+                )
+                return
 
             session_key = make_session_key(
                 self._provider.name, message.chat_id, message.user_id, thread_id
@@ -369,6 +712,14 @@ class TelegramMessageHandler:
             if isinstance(candidate, IncomingMessage):
                 message = candidate
 
+        self._session_handler.maybe_record_mutation_confirmation_from_user(message)
+
+        if await self._try_handle_capability_oauth_callback(message):
+            return
+
+        if await self._try_handle_triggered_skill(message):
+            return
+
         # Check if there's an active interactive subagent stack for this session
         thread_id = message.metadata.get("thread_id")
         session_key = make_session_key(
@@ -444,6 +795,7 @@ class TelegramMessageHandler:
                     session_key,
                     entry_user_message=None,
                     thinking_msg_id=tracker.thinking_msg_id,
+                    tracker=tracker,
                 )
                 # Persist messages so thread_index registers the bot response
                 # (user message already early-persisted by sync/streaming handler)
@@ -615,6 +967,7 @@ class TelegramMessageHandler:
                 session=session,
                 system_prompt=system_prompt,
                 context=agent_context,
+                model_alias=getattr(meta, "model_alias", None),
                 model=meta.model,
                 environment=meta.environment or None,
                 iteration=meta.iteration,
@@ -669,8 +1022,12 @@ class TelegramMessageHandler:
                 "input.preview": _truncate(message.text),
             },
         )
+        tracker = self._create_tool_tracker(message)
         response_external_id = await self._run_orchestration_loop(
-            message, session_key, entry_user_message=message.text
+            message,
+            session_key,
+            entry_user_message=message.text,
+            tracker=tracker,
         )
         # Register bot response in thread_index so follow-up replies get routed
         if response_external_id:
@@ -685,6 +1042,7 @@ class TelegramMessageHandler:
         session_key: str,
         entry_user_message: str | None = None,
         thinking_msg_id: str | None = None,
+        tracker: ToolTracker | None = None,
     ) -> str | None:
         """Run the interactive subagent orchestration loop.
 
@@ -706,6 +1064,12 @@ class TelegramMessageHandler:
 
         entry_tool_result: tuple[str, str, bool] | None = None
         response_external_id: str | None = None
+        orchestration_tracker = tracker
+        if orchestration_tracker is None:
+            orchestration_tracker = self._create_tool_tracker(message)
+        if thinking_msg_id:
+            orchestration_tracker.thinking_msg_id = thinking_msg_id
+        progress_tool = ProgressMessageTool(orchestration_tracker)
 
         while True:
             top = stack.top
@@ -719,6 +1083,9 @@ class TelegramMessageHandler:
                 user_message=entry_user_message,
                 tool_result=entry_tool_result,
                 session_manager=sm,
+                tool_overrides={progress_tool.name: progress_tool},
+                on_tool_start=orchestration_tracker.on_tool_start,
+                on_tool_complete=orchestration_tracker.on_tool_complete,
             )
             entry_user_message = None
             entry_tool_result = None
@@ -735,10 +1102,10 @@ class TelegramMessageHandler:
                     response_external_id = await self._send_stack_response(
                         message,
                         result.text,
-                        thinking_msg_id=thinking_msg_id,
+                        thinking_msg_id=orchestration_tracker.thinking_msg_id,
                         provenance_clause=provenance_clause,
                     )
-                    thinking_msg_id = None  # Consume after first use
+                    orchestration_tracker.thinking_msg_id = None
                     # If top is the main agent, pop it (main agent done)
                     if top.agent_type == "main":
                         main_frame = stack.pop()
@@ -756,9 +1123,9 @@ class TelegramMessageHandler:
                 case TurnAction.COMPLETE:
                     completed = stack.pop()
                     logger.info(
-                        "stack_frame_completed",
+                        "child_completed",
                         extra={
-                            "agent_name": completed.agent_name,
+                            "child_agent": completed.agent_name,
                             "remaining_depth": stack.depth,
                         },
                     )
@@ -768,9 +1135,32 @@ class TelegramMessageHandler:
                             response_external_id = await self._send_stack_response(
                                 message,
                                 result.text,
-                                thinking_msg_id=thinking_msg_id,
+                                thinking_msg_id=orchestration_tracker.thinking_msg_id,
                             )
-                            thinking_msg_id = None
+                            orchestration_tracker.thinking_msg_id = None
+                        self._stack_manager.clear(session_key)
+                        self._persist_stack(session_key, sm)
+                        return response_external_id
+                    parent = stack.top
+                    if (
+                        completed.agent_type == "skill"
+                        and parent is not None
+                        and parent.agent_type == "main"
+                        and is_no_reply(result.text)
+                    ):
+                        logger.info(
+                            "child_no_reply_suppressed",
+                            extra={
+                                "child_agent": completed.agent_name,
+                                "remaining_depth": stack.depth,
+                            },
+                        )
+                        main_frame = stack.pop()
+                        await self._agent.run_message_postprocess_hooks(
+                            user_message="",
+                            session=main_frame.session,
+                            effective_user_id=main_frame.context.user_id or "",
+                        )
                         self._stack_manager.clear(session_key)
                         self._persist_stack(session_key, sm)
                         return response_external_id
@@ -800,9 +1190,11 @@ class TelegramMessageHandler:
                 case TurnAction.INTERRUPT:
                     # For now, treat interrupts in stack mode as text to user
                     response_external_id = await self._send_stack_response(
-                        message, result.text, thinking_msg_id=thinking_msg_id
+                        message,
+                        result.text,
+                        thinking_msg_id=orchestration_tracker.thinking_msg_id,
                     )
-                    thinking_msg_id = None
+                    orchestration_tracker.thinking_msg_id = None
                     return response_external_id
 
                 case TurnAction.MAX_ITERATIONS:
@@ -815,9 +1207,9 @@ class TelegramMessageHandler:
                         response_external_id = await self._send_stack_response(
                             message,
                             "Agent reached maximum steps.",
-                            thinking_msg_id=thinking_msg_id,
+                            thinking_msg_id=orchestration_tracker.thinking_msg_id,
                         )
-                        thinking_msg_id = None
+                        orchestration_tracker.thinking_msg_id = None
                         self._stack_manager.clear(session_key)
                         self._persist_stack(session_key, sm)
                         return response_external_id
@@ -843,9 +1235,9 @@ class TelegramMessageHandler:
                         response_external_id = await self._send_stack_response(
                             message,
                             result.text or "An error occurred.",
-                            thinking_msg_id=thinking_msg_id,
+                            thinking_msg_id=orchestration_tracker.thinking_msg_id,
                         )
-                        thinking_msg_id = None
+                        orchestration_tracker.thinking_msg_id = None
                         self._stack_manager.clear(session_key)
                         self._persist_stack(session_key, sm)
                         return response_external_id
@@ -933,7 +1325,50 @@ class TelegramMessageHandler:
 
     async def handle_callback_query(self, callback_query: CallbackQuery) -> None:
         """Handle callback queries from checkpoint inline keyboards."""
+        data = callback_query.data or ""
+        if data.startswith("fb:"):
+            await self._forward_external_callback(callback_query)
+            return
         await self._checkpoint_handler.handle_callback_query(callback_query)
+
+    async def _forward_external_callback(self, callback_query: CallbackQuery) -> None:
+        import os
+
+        import httpx
+
+        url = os.environ.get(
+            "ASH_EXTERNAL_CALLBACK_URL",
+            "http://127.0.0.1:8787/webhooks/telegram/callback",
+        )
+        message = callback_query.message
+        msg_payload: dict[str, Any] = {}
+        if message is not None:
+            msg_payload = {
+                "message_id": message.message_id,
+                "chat": {"id": message.chat.id} if message.chat else {},
+                "text": getattr(message, "text", None)
+                or getattr(message, "caption", None),
+            }
+        from_user = callback_query.from_user
+        update = {
+            "callback_query": {
+                "id": callback_query.id,
+                "from": {"id": from_user.id} if from_user else {},
+                "data": callback_query.data,
+                "message": msg_payload,
+            }
+        }
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                await client.post(url, json=update)
+        except Exception:
+            logger.exception("external_callback_forward_failed")
+            await callback_query.answer("Forwarding failed", show_alert=False)
+            return
+        try:
+            await callback_query.answer()
+        except Exception:
+            logger.debug("answer_callback_query_failed", exc_info=True)
 
     def clear_session(self, chat_id: str) -> None:
         """Clear session data for a chat."""

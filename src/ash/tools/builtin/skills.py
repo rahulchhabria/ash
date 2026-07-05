@@ -1,10 +1,12 @@
 """Skill invocation tool."""
 
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 from ash.agents.base import Agent
 from ash.agents.types import AgentConfig, AgentContext, ChildActivated, StackFrame
+from ash.core.types import SkillInstructionAugmenter
 from ash.skills.types import SkillDefinition
 from ash.tools.base import Tool, ToolContext, ToolResult, format_subagent_result
 
@@ -14,9 +16,27 @@ if TYPE_CHECKING:
     from ash.skills import SkillRegistry
 
 logger = logging.getLogger(__name__)
+_SECRET_ENV_NAME_PATTERNS = (
+    r"(?i)(?:^|_)(?:api[_-]?key|token|secret|password|passwd|auth)(?:$|_)",
+)
+_SECRET_ENV_NAME_ALLOWLIST = {
+    "511_API_KEY",
+}
+_OAUTH_CALLBACK_URL_PATTERN = re.compile(r"https?://localhost[^\s]*[?&]code=")
+_OAUTH_CODE_ONLY_PATTERN = re.compile(r"^\s*4/[^\s]+\s*$")
 
 # Built-in skills that are handled specially (not loaded from SKILL.md files)
 BUILTIN_SKILLS: dict[str, str] = {}
+GOOGLE_EMAIL_MODEL_KEYWORDS = (
+    "email",
+    "gmail",
+    "inbox",
+    "mail",
+    "message",
+    "messages",
+    "thread",
+    "threads",
+)
 
 # Wrapper guidance prepended to all skill system prompts
 SKILL_AGENT_WRAPPER = """You are a skill executor. Your job is to run the skill instructions below and report results.
@@ -31,7 +51,7 @@ SKILL_AGENT_WRAPPER = """You are a skill executor. Your job is to run the skill 
 
 When a command fails or returns an error:
 - Report the error message to the user
-- STOP - do not attempt to fix, debug, or work around the problem
+- STOP by default - do not attempt to fix, debug, or work around the problem unless the user explicitly asks you to do so
 - The user will decide whether to invoke the skill-writer to fix the skill
 
 **NEVER do any of the following when something fails:**
@@ -41,21 +61,49 @@ When a command fails or returns an error:
 - Write inline scripts to diagnose the issue
 - Try alternative approaches not in the instructions
 
-If the skill is broken, say so and stop. That's useful information.
+If the skill is broken, say so and stop unless the user explicitly asks for repair/debugging.
 
 ## Output
 
-Your final response is the skill's output - this is how results reach the user.
+When your task is finished, call `complete` with the final output:
+- `complete({"result": "<final output>"})`
+
+This is required so control returns to the parent agent.
 
 - Include actual command output, not just summaries
 - If something failed, include the error message
 - Be concise - the user wants results, not a narrative
+- Preserve user-action artifacts exactly (auth URLs, user codes, callback tokens,
+  IDs, one-time codes). Do not paraphrase or omit them.
+- If the skill instructions require an exact final output (for example `[NO_REPLY]`),
+  treat that as mandatory and return it exactly with no extra text.
+- If the skill instructions say to stay silent for a no-op result, do not add
+  commentary, diagnostics, or “helpful” footnotes.
 
 For long-running tasks, use `send_message` for progress updates only (e.g., "Processing file 3 of 10...").
-Never use `send_message` for the final result - that must be in your response.
+Never use `send_message` for the final result - the final result must go through `complete`.
+Never duplicate user-action prompts (for example auth URLs/codes) in both `send_message` and `complete`.
+Put user-action instructions in `complete` exactly once.
 
 ---
 
+"""
+
+CAPABILITY_AUTH_UX_CONTRACT = """## Capability Auth UX Contract
+
+This skill declares host capabilities. When capability auth is required or re-authorization is needed:
+
+1. Start auth immediately with `ash-sb capability auth begin -c <capability>` (do not only say "need auth").
+2. Include the exact `flow_id` returned by the command.
+3. Include the exact `auth_url` returned by the command.
+4. Include the exact `user_code` for device-code flows.
+5. Ask for one clear next step: paste callback URL or code (or confirm completion for device flow polling).
+
+If the user already pasted a callback URL or auth code, complete the existing flow first.
+Do not run another `auth begin` until completion fails as invalid/expired.
+
+Never replace auth instructions with generic hints or slash-command suggestions.
+Preserve auth URLs/codes verbatim in your `complete` output.
 """
 
 
@@ -76,15 +124,21 @@ class SkillAgent(Agent):
         self,
         skill: SkillDefinition,
         model_override: str | None = None,
+        instruction_augmenter: "SkillInstructionAugmenter | None" = None,
+        sandbox_skill_dir: str | None = None,
     ) -> None:
         """Initialize skill agent.
 
         Args:
             skill: Skill definition to wrap.
             model_override: Optional model alias to override skill's default.
+            instruction_augmenter: Optional callback returning extra instruction lines.
+            sandbox_skill_dir: Sandbox container path to this skill's directory.
         """
         self._skill = skill
         self._model_override = model_override
+        self._instruction_augmenter = instruction_augmenter
+        self._sandbox_skill_dir = sandbox_skill_dir
 
     @property
     def config(self) -> AgentConfig:
@@ -122,6 +176,25 @@ class SkillAgent(Agent):
 
         # Add skill instructions
         prompt += self._skill.instructions
+
+        # Add shared capability-auth UX rules for capability-backed skills.
+        if self._skill.capabilities:
+            prompt += f"\n\n{CAPABILITY_AUTH_UX_CONTRACT}"
+
+        # Tell the skill agent where its co-located files live in the sandbox
+        if self._sandbox_skill_dir:
+            prompt += "\n\n## Skill Directory\n\n"
+            prompt += f"Your skill files are at `{self._sandbox_skill_dir}/`. "
+            prompt += (
+                "Relative paths in your instructions resolve against this directory."
+            )
+
+        # Inject integration-provided additional context
+        if self._instruction_augmenter:
+            extra_lines = self._instruction_augmenter(self._skill.name)
+            if extra_lines:
+                prompt += "\n\n## Additional Context\n\n"
+                prompt += "\n".join(extra_lines)
 
         # Inject user-provided context if available
         user_context = context.input_data.get("context", "")
@@ -176,6 +249,7 @@ class UseSkillTool(Tool):
         self._voice = voice
         self._subagent_context = subagent_context
         self._capability_manager: Any | None = None
+        self._skill_instruction_augmenter: SkillInstructionAugmenter | None = None
 
     def set_shared_prompt(self, prompt: str | None) -> None:
         """Update shared prompt context used for skill execution."""
@@ -184,6 +258,31 @@ class UseSkillTool(Tool):
     def set_capability_manager(self, manager: Any | None) -> None:
         """Attach host capability manager for skill capability preflight checks."""
         self._capability_manager = manager
+
+    @staticmethod
+    def _resolve_model_override(
+        skill_name: str,
+        message: str,
+        skill_config: Any,
+    ) -> str | None:
+        if not skill_config:
+            return None
+        email_model = getattr(skill_config, "email_model", None)
+        if (
+            skill_name == "google"
+            and isinstance(email_model, str)
+            and email_model.strip()
+        ):
+            lowered = message.lower()
+            if any(keyword in lowered for keyword in GOOGLE_EMAIL_MODEL_KEYWORDS):
+                return email_model.strip()
+        return skill_config.model
+
+    def set_skill_instruction_augmenter(
+        self, augmenter: SkillInstructionAugmenter | None
+    ) -> None:
+        """Attach integration skill instruction augmenter for skill execution."""
+        self._skill_instruction_augmenter = augmenter
 
     @property
     def name(self) -> str:
@@ -244,6 +343,33 @@ class UseSkillTool(Tool):
                     },
                 )
         return env
+
+    def _is_secret_like_env_var(self, var_name: str) -> bool:
+        """Return True when an env var name matches blocked secret patterns."""
+        normalized = var_name.strip()
+        if not normalized:
+            return False
+        if normalized in _SECRET_ENV_NAME_ALLOWLIST:
+            return False
+
+        for pattern in _SECRET_ENV_NAME_PATTERNS:
+            if re.search(pattern, normalized):
+                return True
+        return False
+
+    def _validate_secret_delivery_policy(self, skill: SkillDefinition) -> str | None:
+        """Return an error if skill declares blocked secret-like env names."""
+        secret_names = sorted(
+            {name for name in skill.env if self._is_secret_like_env_var(name)}
+        )
+        if not secret_names:
+            return None
+
+        return (
+            f"Skill '{skill.name}' declares secret-like env vars that are blocked by "
+            f"security policy: {', '.join(secret_names)}. "
+            "Use host-managed capability/proxy auth instead."
+        )
 
     def _resolve_allowed_chat_ids(self, skill_config: Any) -> set[str]:
         """Resolve effective allowed chat IDs (per-skill override -> defaults)."""
@@ -309,12 +435,12 @@ class UseSkillTool(Tool):
 
         return None
 
-    async def _validate_required_capabilities(
+    async def _validate_required_capabilities_hard(
         self,
         skill: SkillDefinition,
         context: ToolContext | None,
     ) -> str | None:
-        """Return an error if skill-declared capabilities are unavailable."""
+        """Return an error for hard failures (missing user context / manager)."""
         required = sorted({item.strip() for item in skill.capabilities if item.strip()})
         if not required:
             return None
@@ -332,6 +458,27 @@ class UseSkillTool(Tool):
                 "is not available."
             )
 
+        return None
+
+    async def _check_capability_availability(
+        self,
+        skill: SkillDefinition,
+        context: ToolContext | None,
+    ) -> str | None:
+        """Return a warning if declared capabilities are unavailable.
+
+        This is advisory — skills with declared capabilities include their
+        own verification step and can guide the user through setup when
+        capabilities are unavailable (e.g. auth flow).
+        """
+        required = sorted({item.strip() for item in skill.capabilities if item.strip()})
+        if not required or context is None or not context.user_id:
+            return None
+
+        manager = self._capability_manager
+        if manager is None:
+            return None
+
         chat_type_raw = context.metadata.get("chat_type")
         chat_type = str(chat_type_raw).strip() if chat_type_raw else None
         try:
@@ -342,7 +489,7 @@ class UseSkillTool(Tool):
             )
         except Exception as e:
             code = getattr(e, "code", "capability_backend_unavailable")
-            return f"Capability preflight failed ({code}): {e}"
+            return f"Capability preflight warning ({code}): {e}"
 
         visible_ids = {str(item.get("id")) for item in visible if item.get("id")}
         missing = [
@@ -354,9 +501,41 @@ class UseSkillTool(Tool):
             return None
 
         return (
-            f"Skill '{skill.name}' requires unavailable capabilities in this context: "
-            f"{', '.join(missing)}"
+            f"Skill '{skill.name}' has unavailable capabilities: {', '.join(missing)}"
         )
+
+    def _looks_like_oauth_callback_or_code(self, message: str) -> bool:
+        """Detect user-provided OAuth callback URLs or code-only replies."""
+        return bool(
+            _OAUTH_CALLBACK_URL_PATTERN.search(message)
+            or _OAUTH_CODE_ONLY_PATTERN.match(message)
+        )
+
+    def _build_capability_auth_recovery_context(
+        self,
+        *,
+        skill: SkillDefinition,
+        message: str,
+        raw_user_message: str | None,
+        user_context: str,
+    ) -> str:
+        """Inject deterministic auth-completion guidance for callback follow-ups."""
+        if not skill.capabilities:
+            return user_context
+        callback_source = raw_user_message or message
+        if not self._looks_like_oauth_callback_or_code(callback_source):
+            return user_context
+
+        hint = (
+            "OAuth callback/code detected in the latest user message.\n"
+            "Do this before any new auth begin:\n"
+            "1. Run `ash-sb capability auth list` (add `-c <capability>` / `--account <alias>` if known).\n"
+            "2. Complete the newest matching pending flow with `ash-sb capability auth complete --flow-id <flow_id> --callback-url '<user_callback_url>'` or `--code '<user_code>'`.\n"
+            "3. Only run `auth begin` if completion fails with invalid/expired flow."
+        )
+        if not user_context:
+            return hint
+        return f"{user_context}\n\n{hint}"
 
     async def execute(
         self,
@@ -373,6 +552,9 @@ class UseSkillTool(Tool):
         if not message:
             return ToolResult.error("Missing required field: message")
 
+        message = str(message)
+        user_context = str(user_context)
+
         if not self._registry.has(skill_name):
             self._registry.reload_all(self._config.workspace)
             if not self._registry.has(skill_name):
@@ -384,6 +566,17 @@ class UseSkillTool(Tool):
                 )
 
         skill = self._registry.get(skill_name)
+        raw_user_message = None
+        if context is not None:
+            raw = context.metadata.get("current_user_message")
+            if isinstance(raw, str) and raw.strip():
+                raw_user_message = raw
+        user_context = self._build_capability_auth_recovery_context(
+            skill=skill,
+            message=message,
+            raw_user_message=raw_user_message,
+            user_context=user_context,
+        )
         skill_config = self._config.skills.get(skill_name)
 
         if skill_config and not skill_config.enabled:
@@ -393,9 +586,24 @@ class UseSkillTool(Tool):
         if access_error:
             return ToolResult.error(access_error)
 
-        capability_error = await self._validate_required_capabilities(skill, context)
-        if capability_error:
-            return ToolResult.error(capability_error)
+        capability_hard_error = await self._validate_required_capabilities_hard(
+            skill, context
+        )
+        if capability_hard_error:
+            return ToolResult.error(capability_hard_error)
+
+        secret_policy_error = self._validate_secret_delivery_policy(skill)
+        if secret_policy_error:
+            return ToolResult.error(secret_policy_error)
+
+        # Advisory check — don't block; skills handle their own capability
+        # verification and can guide the user through setup/auth flows.
+        capability_warning = await self._check_capability_availability(skill, context)
+        if capability_warning:
+            logger.warning(
+                "skill_capability_preflight_warning",
+                extra={"skill": skill.name, "detail": capability_warning},
+            )
 
         if skill.env:
             config_env = skill_config.get_env_vars() if skill_config else {}
@@ -414,8 +622,23 @@ class UseSkillTool(Tool):
             skill_config,
             base_env=inherited_env,
         )
-        model_override = skill_config.model if skill_config else None
-        agent = SkillAgent(skill, model_override=model_override)
+        model_override = self._resolve_model_override(
+            skill_name,
+            message,
+            skill_config,
+        )
+
+        # Compute sandbox container path for this skill's directory
+        from ash.skills.types import compute_sandbox_skill_dir
+
+        sb_dir = compute_sandbox_skill_dir(skill, self._config.sandbox.mount_prefix)
+
+        agent = SkillAgent(
+            skill,
+            model_override=model_override,
+            instruction_augmenter=self._skill_instruction_augmenter,
+            sandbox_skill_dir=sb_dir,
+        )
 
         if context:
             agent_context = AgentContext.from_tool_context(
@@ -494,6 +717,7 @@ class UseSkillTool(Tool):
             session=child_session,
             system_prompt=system_prompt,
             context=agent_context,
+            model_alias=model_alias,
             model=resolved_model,
             environment=env,
             max_iterations=agent_config.max_iterations,

@@ -19,6 +19,12 @@ from ash.cli.console import console, error
 
 logger = logging.getLogger(__name__)
 
+PROVIDER_ENV_VARS = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "pioneer": "PIONEER_API_KEY",
+}
+
 
 def _resolve_model_alias(model_alias: str | None) -> str:
     """Resolve model alias with CLI/env/default precedence."""
@@ -49,7 +55,7 @@ def _validate_model_credentials(ash_config: AshConfig, alias: str) -> None:
     api_key = ash_config.resolve_api_key(alias)
     if api_key is None:
         provider = model_config.provider
-        env_var = "ANTHROPIC_API_KEY" if provider == "anthropic" else "OPENAI_API_KEY"
+        env_var = PROVIDER_ENV_VARS.get(provider, "OPENAI_API_KEY")
         error(
             f"No API key for provider '{provider}'. Set {env_var} or api_key in config"
         )
@@ -189,6 +195,19 @@ async def _run_chat(
                 include_todo=ash_config.todo.enabled,
             ).contributors,
         ) as (integration_runtime, integration_context):
+            integrations_health = integration_runtime.health_snapshot()
+            if integrations_health.is_degraded:
+                logger.warning(
+                    "integrations_degraded",
+                    extra={
+                        "integrations.configured": integrations_health.configured_count,
+                        "integrations.active": integrations_health.active_count,
+                        "integrations.failed_setup": list(
+                            integrations_health.failed_setup
+                        ),
+                        "integrations.hook_failures": integrations_health.hook_failures,
+                    },
+                )
             async with active_rpc_server(
                 runtime=integration_runtime,
                 context=integration_context,

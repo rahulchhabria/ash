@@ -8,7 +8,9 @@ import pytest
 
 from ash.capabilities import (
     CapabilityAuthBeginResult,
+    CapabilityAuthCompleteInput,
     CapabilityAuthCompleteResult,
+    CapabilityAuthPollResult,
     CapabilityCallContext,
     CapabilityDefinition,
     CapabilityManager,
@@ -62,14 +64,12 @@ class _ContextCaptureProvider:
         *,
         capability_id: str,
         flow_state: dict[str, Any],
-        callback_url: str | None,
-        code: str | None,
+        completion: CapabilityAuthCompleteInput,
         context: CapabilityCallContext,
     ) -> CapabilityAuthCompleteResult:
         _ = capability_id
         _ = flow_state
-        _ = callback_url
-        _ = code
+        _ = completion
         _ = context
         return CapabilityAuthCompleteResult(account_ref="work")
 
@@ -90,6 +90,15 @@ class _ContextCaptureProvider:
         _ = idempotency_key
         self.invoke_context = context
         return {"status": "ok"}
+
+    async def auth_poll(
+        self,
+        *,
+        capability_id: str,
+        flow_state: dict[str, Any],
+        context: CapabilityCallContext,
+    ) -> CapabilityAuthPollResult:
+        return CapabilityAuthPollResult(status="pending", retry_after_seconds=5)
 
 
 @pytest.mark.asyncio
@@ -176,6 +185,140 @@ async def test_capability_rpc_uses_verified_user_scope(tmp_path: Path) -> None:
     )
     assert invoke_response.error is not None
     assert "capability_auth_required" in invoke_response.error.message
+
+
+@pytest.mark.asyncio
+async def test_capability_auth_list_returns_only_callers_flows(tmp_path: Path) -> None:
+    service = _service()
+    manager = CapabilityManager(auth_flow_ttl_seconds=300)
+    await manager.register(
+        CapabilityDefinition(
+            id="gog.calendar",
+            description="Calendar ops",
+            sensitive=True,
+            operations={
+                "list_events": CapabilityOperation(
+                    name="list_events",
+                    description="List events",
+                    requires_auth=True,
+                )
+            },
+        )
+    )
+
+    server = RPCServer(tmp_path / "rpc.sock", context_token_service=service)
+    register_capability_methods(server, manager)
+
+    token_user1 = service.issue(
+        effective_user_id="user-1",
+        chat_type="private",
+        provider="telegram",
+    )
+    token_user2 = service.issue(
+        effective_user_id="user-2",
+        chat_type="private",
+        provider="telegram",
+    )
+
+    for token in (token_user1, token_user2):
+        begin_payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "capability.auth.begin",
+            "params": {
+                "context_token": token,
+                "capability": "gog.calendar",
+                "account_hint": "work",
+            },
+        }
+        begin_response = await server._process_request(
+            json.dumps(begin_payload).encode("utf-8")
+        )
+        assert begin_response.error is None
+
+    list_payload = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "capability.auth.list",
+        "params": {
+            "context_token": token_user1,
+            "capability": "gog.calendar",
+            "account_hint": "work",
+        },
+    }
+    list_response = await server._process_request(
+        json.dumps(list_payload).encode("utf-8")
+    )
+    assert list_response.error is None
+    assert list_response.result is not None
+    flows = list_response.result["flows"]
+    assert len(flows) == 1
+    assert flows[0]["capability"] == "gog.calendar"
+    assert flows[0]["account_hint"] == "work"
+
+
+@pytest.mark.asyncio
+async def test_capability_auth_complete_callback_routes_by_state(
+    tmp_path: Path,
+) -> None:
+    service = _service()
+    manager = CapabilityManager(auth_flow_ttl_seconds=300)
+    await manager.register(
+        CapabilityDefinition(
+            id="gog.calendar",
+            description="Calendar ops",
+            sensitive=True,
+            operations={
+                "list_events": CapabilityOperation(
+                    name="list_events",
+                    description="List events",
+                    requires_auth=True,
+                )
+            },
+        )
+    )
+    server = RPCServer(tmp_path / "rpc.sock", context_token_service=service)
+    register_capability_methods(server, manager)
+
+    token = service.issue(
+        effective_user_id="user-1",
+        chat_type="private",
+        provider="telegram",
+    )
+    begin_payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "capability.auth.begin",
+        "params": {
+            "context_token": token,
+            "capability": "gog.calendar",
+            "account_hint": "work",
+        },
+    }
+    begin_response = await server._process_request(
+        json.dumps(begin_payload).encode("utf-8")
+    )
+    assert begin_response.error is None
+    assert begin_response.result is not None
+    flow_id = str(begin_response.result["flow_id"])
+    manager._auth_flows[flow_id].expected_callback_state = "state-1"
+
+    complete_payload = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "capability.auth.complete_callback",
+        "params": {
+            "context_token": token,
+            "callback_url": "http://localhost/?state=state-1&code=abc",
+        },
+    }
+    complete_response = await server._process_request(
+        json.dumps(complete_payload).encode("utf-8")
+    )
+    assert complete_response.error is None
+    assert complete_response.result is not None
+    assert complete_response.result["ok"] is True
+    assert complete_response.result["capability"] == "gog.calendar"
 
 
 @pytest.mark.asyncio

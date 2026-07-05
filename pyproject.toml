@@ -52,6 +52,7 @@ dependencies = [
     "croniter>=6.0.0",
     # Workspace packages
     "ash-rpc-protocol",
+    "langchain-openai>=1.3.2",
 ]
 
 [project.optional-dependencies]
@@ -63,7 +64,11 @@ dev = [
     "ty>=0.0.1a11",
 ]
 sentry = [
-    "sentry-sdk[fastapi]>=2.0.0",
+    "sentry-sdk[fastapi]>=2.60.0",
+]
+deepagents = [
+    "deepagents>=0.1.0",
+    "langsmith>=0.2.0",
 ]
 
 [project.scripts]
@@ -95,7 +100,10 @@ dev = [
     "ash-sandbox-cli",
 ]
 sentry = [
-    "sentry-sdk[fastapi]>=2.0.0",
+    "sentry-sdk[fastapi]>=2.60.0",
+]
+test = [
+    "time-machine>=3.2.0",
 ]
 
 # ============== HATCH BUILD ==============

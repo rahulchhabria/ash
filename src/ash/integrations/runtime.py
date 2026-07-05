@@ -15,6 +15,7 @@ from ash.core.types import (
     IncomingMessagePreprocessor,
     PromptContextAugmenter,
     SandboxEnvAugmenter,
+    SkillInstructionAugmenter,
 )
 
 if TYPE_CHECKING:
@@ -41,6 +42,20 @@ class IntegrationContext:
     # Runtime-owned env projected into sandbox tool execution hooks.
     # Spec contract: specs/subsystems.md (Integration Hooks), specs/rpc.md.
     sandbox_env: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class IntegrationHealthSnapshot:
+    """Operational health summary for integration runtime."""
+
+    configured_count: int
+    active_count: int
+    failed_setup: tuple[str, ...]
+    hook_failures: dict[str, int]
+
+    @property
+    def is_degraded(self) -> bool:
+        return bool(self.failed_setup or self.hook_failures)
 
 
 class IntegrationContributor:
@@ -96,6 +111,14 @@ class IntegrationContributor:
         """Preprocess provider incoming messages before session processing."""
         return message
 
+    def augment_skill_instructions(
+        self,
+        skill_name: str,
+        context: IntegrationContext,
+    ) -> list[str]:
+        """Return additional instruction lines to append when a skill is invoked."""
+        return []
+
     async def on_message_postprocess(
         self,
         user_message: str,
@@ -115,6 +138,8 @@ class IntegrationRuntime:
             sorted(contributors or [], key=lambda c: (c.priority, c.name))
         )
         self._active_contributors = self._contributors
+        self._failed_setup: dict[str, int] = {}
+        self._hook_failure_counts: dict[str, int] = {}
 
     @property
     def contributors(self) -> tuple[IntegrationContributor, ...]:
@@ -130,6 +155,8 @@ class IntegrationRuntime:
         hook_name: str,
         contributor: IntegrationContributor,
     ) -> None:
+        key = f"{contributor.name}.{hook_name}"
+        self._hook_failure_counts[key] = self._hook_failure_counts.get(key, 0) + 1
         logger.warning(
             "integration_hook_failed",
             extra={
@@ -144,14 +171,26 @@ class IntegrationRuntime:
         # Spec contract: specs/subsystems.md (Integration Hooks)
         # Keep integration failures isolated so one contributor doesn't break all.
         active: list[IntegrationContributor] = []
+        self._failed_setup.clear()
         for contributor in self._contributors:
             try:
                 await contributor.setup(context)
             except Exception:
+                self._failed_setup[contributor.name] = (
+                    self._failed_setup.get(contributor.name, 0) + 1
+                )
                 self._log_hook_failure(hook_name="setup", contributor=contributor)
                 continue
             active.append(contributor)
         self._active_contributors = tuple(active)
+
+    def health_snapshot(self) -> IntegrationHealthSnapshot:
+        return IntegrationHealthSnapshot(
+            configured_count=len(self._contributors),
+            active_count=len(self._active_contributors),
+            failed_setup=tuple(sorted(self._failed_setup)),
+            hook_failures=dict(sorted(self._hook_failure_counts.items())),
+        )
 
     async def on_startup(self, context: IntegrationContext) -> None:
         for contributor in self._active_contributors:
@@ -204,6 +243,27 @@ class IntegrationRuntime:
             return _hook
 
         return self._build_hooks(_factory)
+
+    def skill_instruction_augmenter(
+        self, context: IntegrationContext
+    ) -> SkillInstructionAugmenter:
+        """Return a closure that collects skill instruction augmentations from contributors."""
+
+        def _augmenter(skill_name: str) -> list[str]:
+            lines: list[str] = []
+            for contributor in self._active_contributors:
+                try:
+                    lines.extend(
+                        contributor.augment_skill_instructions(skill_name, context)
+                    )
+                except Exception:
+                    self._log_hook_failure(
+                        hook_name="augment_skill_instructions",
+                        contributor=contributor,
+                    )
+            return lines
+
+        return _augmenter
 
     def sandbox_env_augmenters(
         self, context: IntegrationContext

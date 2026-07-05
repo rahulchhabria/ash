@@ -5,11 +5,24 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from ash.agents.types import AgentContext
+from ash.agents.types import AgentContext, ChildActivated
 from ash.config.models import AshConfig, SkillConfig
 from ash.skills.types import SkillDefinition
 from ash.tools.base import ToolContext
 from ash.tools.builtin.skills import SkillAgent, UseSkillTool
+
+
+def _mock_config(**overrides) -> MagicMock:
+    """Create a MagicMock config with sandbox.mount_prefix accessible."""
+    config = MagicMock(spec=AshConfig)
+    config.sandbox = SimpleNamespace(mount_prefix="/ash")
+    config.skills = {}
+    config.skill_defaults = SimpleNamespace(allow_chat_ids=[])
+    config.agents = {}
+    config.workspace = None
+    for k, v in overrides.items():
+        setattr(config, k, v)
+    return config
 
 
 class TestSkillAgent:
@@ -57,6 +70,155 @@ class TestSkillAgent:
 
         assert agent.config.allowed_tools == ["bash", "web_search"]
 
+    def test_system_prompt_instructs_complete_for_final_output(self):
+        """Skill wrapper should require complete() for final handoff."""
+        skill = SkillDefinition(
+            name="test",
+            description="Test",
+            instructions="Do something",
+        )
+        agent = SkillAgent(skill)
+        context = AgentContext()
+
+        prompt = agent.build_system_prompt(context)
+
+        assert "call `complete`" in prompt
+        assert "control returns to the parent agent" in prompt
+
+    def test_system_prompt_enforces_exact_output_contracts(self):
+        """Skill wrapper should preserve exact-output instructions like [NO_REPLY]."""
+        skill = SkillDefinition(
+            name="test",
+            description="Test",
+            instructions="Return [NO_REPLY] when there is nothing to send.",
+        )
+        agent = SkillAgent(skill)
+        context = AgentContext()
+
+        prompt = agent.build_system_prompt(context)
+
+        assert "treat that as mandatory and return it exactly" in prompt
+        assert "stay silent for a no-op result" in prompt
+        assert "helpful” footnotes" in prompt
+
+    def test_augmenter_lines_appended_to_system_prompt(self):
+        """Instruction augmenter lines should appear in system prompt."""
+        skill = SkillDefinition(
+            name="todo",
+            description="Todo",
+            instructions="Base instructions",
+        )
+
+        def augmenter(skill_name: str) -> list[str]:
+            if skill_name == "todo":
+                return ["Scheduling is enabled.", "Offer reminders."]
+            return []
+
+        agent = SkillAgent(skill, instruction_augmenter=augmenter)
+        context = AgentContext(input_data={"context": ""})
+
+        prompt = agent.build_system_prompt(context)
+
+        assert "## Additional Context" in prompt
+        assert "Scheduling is enabled." in prompt
+        assert "Offer reminders." in prompt
+        # Augmented lines should come after base instructions
+        assert prompt.index("Base instructions") < prompt.index(
+            "Scheduling is enabled."
+        )
+
+    def test_no_additional_context_section_when_augmenter_returns_empty(self):
+        """No Additional Context header when augmenter returns empty list."""
+        skill = SkillDefinition(
+            name="research",
+            description="Research",
+            instructions="Research instructions",
+        )
+
+        def augmenter(skill_name: str) -> list[str]:
+            return []
+
+        agent = SkillAgent(skill, instruction_augmenter=augmenter)
+        context = AgentContext(input_data={"context": ""})
+
+        prompt = agent.build_system_prompt(context)
+
+        assert "## Additional Context" not in prompt
+
+    def test_no_additional_context_section_without_augmenter(self):
+        """No Additional Context header when no augmenter is set."""
+        skill = SkillDefinition(
+            name="test",
+            description="Test",
+            instructions="Base instructions",
+        )
+        agent = SkillAgent(skill)
+        context = AgentContext(input_data={"context": ""})
+
+        prompt = agent.build_system_prompt(context)
+
+        assert "## Additional Context" not in prompt
+
+    def test_sandbox_skill_dir_injected_when_set(self):
+        """Skill agent prompt should include skill directory when set."""
+        skill = SkillDefinition(
+            name="debug-self",
+            description="Debug",
+            instructions="Debug instructions",
+        )
+        agent = SkillAgent(skill, sandbox_skill_dir="/ash/skills/debug-self")
+        context = AgentContext(input_data={"context": ""})
+
+        prompt = agent.build_system_prompt(context)
+
+        assert "## Skill Directory" in prompt
+        assert "`/ash/skills/debug-self/`" in prompt
+
+    def test_sandbox_skill_dir_omitted_when_none(self):
+        """Skill agent prompt should not include skill directory when None."""
+        skill = SkillDefinition(
+            name="test",
+            description="Test",
+            instructions="Test instructions",
+        )
+        agent = SkillAgent(skill, sandbox_skill_dir=None)
+        context = AgentContext(input_data={"context": ""})
+
+        prompt = agent.build_system_prompt(context)
+
+        assert "## Skill Directory" not in prompt
+
+    def test_capability_auth_contract_added_for_capability_skills(self):
+        """Capability-backed skills should include shared auth UX contract."""
+        skill = SkillDefinition(
+            name="google",
+            description="Google skill",
+            instructions="Use capability commands.",
+            capabilities=["gog.email"],
+        )
+        agent = SkillAgent(skill)
+        context = AgentContext(input_data={"context": ""})
+
+        prompt = agent.build_system_prompt(context)
+
+        assert "## Capability Auth UX Contract" in prompt
+        assert "ash-sb capability auth begin" in prompt
+        assert "exact `auth_url`" in prompt
+
+    def test_capability_auth_contract_not_added_for_non_capability_skills(self):
+        """Non-capability skills should not get auth UX contract noise."""
+        skill = SkillDefinition(
+            name="research",
+            description="Research",
+            instructions="Use web search.",
+        )
+        agent = SkillAgent(skill)
+        context = AgentContext(input_data={"context": ""})
+
+        prompt = agent.build_system_prompt(context)
+
+        assert "## Capability Auth UX Contract" not in prompt
+
 
 class TestUseSkillToolValidation:
     """Tests for UseSkillTool input validation."""
@@ -68,9 +230,9 @@ class TestUseSkillToolValidation:
         registry.list_available.return_value = []
         registry.has.return_value = False
         executor = MagicMock()
-        config = MagicMock(spec=AshConfig)
-        config.skills = {}
-        config.skill_defaults = SimpleNamespace(allow_chat_ids=[])
+        config = _mock_config(
+            skills={}, skill_defaults=SimpleNamespace(allow_chat_ids=[]), workspace=None
+        )
         return UseSkillTool(registry, executor, config)
 
     @pytest.mark.asyncio
@@ -102,10 +264,11 @@ class TestUseSkillToolErrorHandling:
     @pytest.fixture
     def tool(self, registry, tmp_path):
         executor = MagicMock()
-        config = MagicMock(spec=AshConfig)
-        config.skills = {}
-        config.skill_defaults = SimpleNamespace(allow_chat_ids=[])
-        config.workspace = tmp_path
+        config = _mock_config(
+            skills={},
+            skill_defaults=SimpleNamespace(allow_chat_ids=[]),
+            workspace=tmp_path,
+        )
         return UseSkillTool(registry, executor, config)
 
     @pytest.mark.asyncio
@@ -139,7 +302,7 @@ class TestUseSkillToolErrorHandling:
             name="test",
             description="Test",
             instructions="x",
-            env=["API_KEY", "SECRET"],
+            env=["SERVICE_URL", "ACCOUNT_NAME"],
         )
         registry.has.return_value = True
         registry.get.return_value = skill
@@ -150,8 +313,44 @@ class TestUseSkillToolErrorHandling:
         assert result.is_error
         assert "requires configuration" in result.content
         assert "[skills.test]" in result.content
-        assert "API_KEY" in result.content
-        assert "SECRET" in result.content
+        assert "SERVICE_URL" in result.content
+        assert "ACCOUNT_NAME" in result.content
+
+    @pytest.mark.asyncio
+    async def test_secret_env_vars_blocked_by_default(self, tool, registry):
+        skill = SkillDefinition(
+            name="test",
+            description="Test",
+            instructions="x",
+            env=["API_KEY", "SERVICE_URL"],
+        )
+        registry.has.return_value = True
+        registry.get.return_value = skill
+        tool._config.skills = {"test": SkillConfig(**{"API_KEY": "secret"})}  # type: ignore[arg-type]
+
+        result = await tool.execute({"skill": "test", "message": "do"})
+
+        assert result.is_error
+        assert "blocked by security policy" in result.content
+
+    @pytest.mark.asyncio
+    async def test_511_api_key_allowed_by_exception(self, tool, registry):
+        skill = SkillDefinition(
+            name="test",
+            description="Test",
+            instructions="x",
+            env=["511_API_KEY", "SERVICE_URL"],
+        )
+        registry.has.return_value = True
+        registry.get.return_value = skill
+        tool._config.skills = {
+            "test": SkillConfig(
+                **{"511_API_KEY": "secret", "SERVICE_URL": "https://example.com"}
+            )
+        }  # type: ignore[arg-type]
+
+        with pytest.raises(ChildActivated):
+            await tool.execute({"skill": "test", "message": "do"})
 
 
 class TestUseSkillToolExecution:
@@ -173,10 +372,9 @@ class TestUseSkillToolExecution:
 
         executor = MagicMock()
 
-        config = MagicMock(spec=AshConfig)
-        config.skills = {}
-        config.agents = {}
-        config.skill_defaults = SimpleNamespace(allow_chat_ids=[])
+        config = _mock_config(
+            skills={}, agents={}, skill_defaults=SimpleNamespace(allow_chat_ids=[])
+        )
 
         return UseSkillTool(registry, executor, config)
 
@@ -198,6 +396,57 @@ class TestUseSkillToolExecution:
         assert messages[0].role == "user"
 
     @pytest.mark.asyncio
+    async def test_google_email_model_override_applies_only_to_email_messages(self):
+        skill = SkillDefinition(
+            name="google",
+            description="Google skill",
+            instructions="Use Google.",
+        )
+        registry = MagicMock()
+        registry.has.return_value = True
+        registry.get.return_value = skill
+        executor = MagicMock()
+        config = _mock_config(
+            skills={"google": SkillConfig(email_model="school_email_pioneer")},
+            agents={},
+            skill_defaults=SimpleNamespace(allow_chat_ids=[]),
+        )
+        config.get_model.return_value.model = "job_school_email"
+        tool = UseSkillTool(registry, executor, config)
+
+        with pytest.raises(ChildActivated) as exc_info:
+            await tool.execute({"skill": "google", "message": "summarize my inbox"})
+
+        frame = exc_info.value.child_frame
+        assert frame.model_alias == "school_email_pioneer"
+        assert frame.model == "job_school_email"
+
+    @pytest.mark.asyncio
+    async def test_google_email_model_override_ignores_calendar_messages(self):
+        skill = SkillDefinition(
+            name="google",
+            description="Google skill",
+            instructions="Use Google.",
+        )
+        registry = MagicMock()
+        registry.has.return_value = True
+        registry.get.return_value = skill
+        executor = MagicMock()
+        config = _mock_config(
+            skills={"google": SkillConfig(email_model="school_email_pioneer")},
+            agents={},
+            skill_defaults=SimpleNamespace(allow_chat_ids=[]),
+        )
+        tool = UseSkillTool(registry, executor, config)
+
+        with pytest.raises(ChildActivated) as exc_info:
+            await tool.execute({"skill": "google", "message": "show my calendar"})
+
+        frame = exc_info.value.child_frame
+        assert frame.model_alias is None
+        assert frame.model is None
+
+    @pytest.mark.asyncio
     async def test_child_frame_has_system_prompt(self, tool):
         """Should include skill instructions in the child frame's system prompt."""
         from ash.agents.types import ChildActivated
@@ -207,6 +456,118 @@ class TestUseSkillToolExecution:
 
         frame = exc_info.value.child_frame
         assert "Do the thing" in frame.system_prompt
+
+    @pytest.mark.asyncio
+    async def test_callback_message_injects_auth_recovery_context(self):
+        from ash.agents.types import ChildActivated
+
+        skill = SkillDefinition(
+            name="google",
+            description="Google skill",
+            instructions="Use capabilities.",
+            capabilities=["gog.calendar"],
+        )
+        registry = MagicMock()
+        registry.has.return_value = True
+        registry.get.return_value = skill
+        executor = MagicMock()
+        config = _mock_config(
+            skills={},
+            agents={},
+            skill_defaults=SimpleNamespace(allow_chat_ids=[]),
+        )
+        tool = UseSkillTool(registry, executor, config)
+
+        class _Manager:
+            async def list_capabilities(
+                self,
+                *,
+                user_id: str,
+                chat_type: str | None,
+                include_unavailable: bool = False,
+            ):
+                _ = (user_id, chat_type, include_unavailable)
+                return [{"id": "gog.calendar"}]
+
+        tool.set_capability_manager(_Manager())
+
+        callback_url = (
+            "http://localhost/?state=abc&code=4/0AFakeCode&"
+            "scope=https://www.googleapis.com/auth/calendar"
+        )
+        with pytest.raises(ChildActivated) as exc_info:
+            await tool.execute(
+                {"skill": "google", "message": callback_url, "context": "base context"},
+                context=ToolContext(
+                    user_id="u-1",
+                    chat_id="dm-1",
+                    metadata={"chat_type": "private"},
+                ),
+            )
+
+        injected = str(exc_info.value.child_frame.context.input_data.get("context", ""))
+        assert "OAuth callback/code detected in the latest user message." in injected
+        assert "ash-sb capability auth list" in injected
+        assert "ash-sb capability auth complete --flow-id <flow_id>" in injected
+        assert "base context" in injected
+
+    @pytest.mark.asyncio
+    async def test_callback_detection_prefers_raw_user_message_from_context(self):
+        from ash.agents.types import ChildActivated
+
+        skill = SkillDefinition(
+            name="google",
+            description="Google skill",
+            instructions="Use capabilities.",
+            capabilities=["gog.calendar"],
+        )
+        registry = MagicMock()
+        registry.has.return_value = True
+        registry.get.return_value = skill
+        executor = MagicMock()
+        config = _mock_config(
+            skills={},
+            agents={},
+            skill_defaults=SimpleNamespace(allow_chat_ids=[]),
+        )
+        tool = UseSkillTool(registry, executor, config)
+
+        class _Manager:
+            async def list_capabilities(
+                self,
+                *,
+                user_id: str,
+                chat_type: str | None,
+                include_unavailable: bool = False,
+            ):
+                _ = (user_id, chat_type, include_unavailable)
+                return [{"id": "gog.calendar"}]
+
+        tool.set_capability_manager(_Manager())
+
+        raw_callback = (
+            "http://localhost/?state=abc&code=4/0AFakeCode&"
+            "scope=https://www.googleapis.com/auth/calendar"
+        )
+        with pytest.raises(ChildActivated) as exc_info:
+            await tool.execute(
+                {
+                    "skill": "google",
+                    "message": "user provided oauth redirect url, continue",
+                    "context": "base context",
+                },
+                context=ToolContext(
+                    user_id="u-1",
+                    chat_id="dm-1",
+                    metadata={
+                        "chat_type": "private",
+                        "current_user_message": raw_callback,
+                    },
+                ),
+            )
+
+        injected = str(exc_info.value.child_frame.context.input_data.get("context", ""))
+        assert "OAuth callback/code detected in the latest user message." in injected
 
 
 class TestSkillEnvironmentBuilding:
@@ -312,10 +673,9 @@ class TestSkillAccessControls:
         registry.has.return_value = True
         registry.get.return_value = skill
         executor = MagicMock()
-        config = MagicMock(spec=AshConfig)
-        config.skills = {}
-        config.agents = {}
-        config.skill_defaults = SimpleNamespace(allow_chat_ids=[])
+        config = _mock_config(
+            skills={}, agents={}, skill_defaults=SimpleNamespace(allow_chat_ids=[])
+        )
         return UseSkillTool(registry, executor, config)
 
     @pytest.mark.asyncio
@@ -358,10 +718,9 @@ class TestSkillCapabilityRequirements:
         registry.has.return_value = True
         registry.get.return_value = skill
         executor = MagicMock()
-        config = MagicMock(spec=AshConfig)
-        config.skills = {}
-        config.agents = {}
-        config.skill_defaults = SimpleNamespace(allow_chat_ids=[])
+        config = _mock_config(
+            skills={}, agents={}, skill_defaults=SimpleNamespace(allow_chat_ids=[])
+        )
         return UseSkillTool(registry, executor, config)
 
     @pytest.mark.asyncio
@@ -375,7 +734,11 @@ class TestSkillCapabilityRequirements:
         assert "requires verified user context" in result.content
 
     @pytest.mark.asyncio
-    async def test_skill_with_capabilities_fails_when_unavailable(self, tool):
+    async def test_skill_with_unavailable_capabilities_still_runs(self, tool):
+        """Unavailable capabilities are advisory — the skill runs and handles
+        missing capabilities itself (e.g. guiding the user through auth setup)."""
+        from ash.agents.types import ChildActivated
+
         class _Manager:
             async def list_capabilities(
                 self,
@@ -388,18 +751,15 @@ class TestSkillCapabilityRequirements:
                 return []
 
         tool.set_capability_manager(_Manager())
-        result = await tool.execute(
-            {"skill": "mail", "message": "check inbox"},
-            context=ToolContext(
-                user_id="u-1",
-                chat_id="dm-1",
-                metadata={"chat_type": "private"},
-            ),
-        )
-
-        assert result.is_error
-        assert "requires unavailable capabilities" in result.content
-        assert "gog.email" in result.content
+        with pytest.raises(ChildActivated):
+            await tool.execute(
+                {"skill": "mail", "message": "check inbox"},
+                context=ToolContext(
+                    user_id="u-1",
+                    chat_id="dm-1",
+                    metadata={"chat_type": "private"},
+                ),
+            )
 
     @pytest.mark.asyncio
     async def test_skill_with_capabilities_runs_when_available(self, tool):

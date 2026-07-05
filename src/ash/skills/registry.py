@@ -2,9 +2,10 @@
 
 Loading precedence (later sources override earlier):
 1. Bundled - Built-in skills (lowest priority)
-2. Installed - Externally installed from repos/local paths
-3. User - User skills (~/.ash/skills/)
-4. Workspace - Project-specific skills (highest priority)
+2. Integration - Integration-provided skills (from integrations/skills/)
+3. Installed - Externally installed from repos/local paths
+4. User - User skills (~/.ash/skills/)
+5. Workspace - Project-specific skills (highest priority)
 """
 
 from __future__ import annotations
@@ -116,6 +117,20 @@ def _coerce_chat_types(name: str, value: Any) -> list[str]:
     return [item.lower() for item in items if item]
 
 
+def _coerce_triggers(name: str, value: Any) -> list[str]:
+    """Normalize slash-command triggers."""
+    items = _coerce_str_list(name, value)
+    normalized: list[str] = []
+    for item in items:
+        text = item.strip().lower()
+        if not text:
+            continue
+        if not text.startswith("/"):
+            text = f"/{text}"
+        normalized.append(text)
+    return sorted(set(normalized))
+
+
 def _coerce_capability_ids(name: str, value: Any) -> list[str]:
     items = _coerce_str_list(name, value)
     invalid = [item for item in items if not _NAMESPACED_CAPABILITY_ID.match(item)]
@@ -146,14 +161,16 @@ class SkillRegistry:
 
     Skills are loaded in order of precedence:
     1. Bundled (lowest) - built-in skills
-    2. Installed - from [[skills.sources]] in config
-    3. User - ~/.ash/skills/
-    4. Workspace (highest) - workspace/skills/
+    2. Integration - integration-provided skills (integrations/skills/)
+    3. Installed - from [[skills.sources]] in config
+    4. User - ~/.ash/skills/
+    5. Workspace (highest) - workspace/skills/
     """
 
     def __init__(self, skill_config: dict[str, SkillConfig] | None = None) -> None:
         self._skills: dict[str, SkillDefinition] = {}
         self._skill_sources: dict[str, Path] = {}
+        self._trigger_map: dict[str, str] = {}
         self._skill_config = skill_config or {}
 
     def discover(
@@ -176,11 +193,15 @@ class SkillRegistry:
         if include_bundled:
             self._load_bundled_skills()
 
-        # 2. Installed skills (from external sources)
+        # 2. Integration-provided skills (same trust level as bundled)
+        if include_bundled:
+            self._load_integration_skills()
+
+        # 3. Installed skills (from external sources)
         if include_installed:
             self._load_installed_skills()
 
-        # 3. User skills (~/.ash/skills/)
+        # 4. User skills (~/.ash/skills/)
         if include_user:
             user_skills_dir = get_user_skills_path()
             if user_skills_dir.exists():
@@ -189,7 +210,7 @@ class SkillRegistry:
                     source_type=SkillSourceType.USER,
                 )
 
-        # 4. Workspace skills (highest priority)
+        # 5. Workspace skills (highest priority)
         skills_dir = workspace_path / "skills"
         if skills_dir.exists():
             self._load_from_directory(
@@ -207,6 +228,24 @@ class SkillRegistry:
                 bundled_dir,
                 source_type=SkillSourceType.BUNDLED,
             )
+
+    def _load_integration_skills(self) -> None:
+        """Load skills provided by integrations.
+
+        Integration skills live in src/ash/integrations/skills/{contributor}/
+        and follow the same {skill_name}/SKILL.md layout as other skill sources.
+        """
+        # spec-ref: specs/integrations.md — Integration-Provided Skills
+        integration_skills_dir = Path(__file__).parents[1] / "integrations" / "skills"
+        if not integration_skills_dir.exists():
+            return
+
+        for contributor_dir in sorted(integration_skills_dir.iterdir()):
+            if contributor_dir.is_dir():
+                self._load_from_directory(
+                    contributor_dir,
+                    source_type=SkillSourceType.INTEGRATION,
+                )
 
     def _load_installed_skills(self) -> None:
         """Load skills from installed sources (repos and local paths)."""
@@ -318,6 +357,7 @@ class SkillRegistry:
             capabilities=_coerce_capability_ids(
                 "capabilities", data.get("capabilities")
             ),
+            triggers=_coerce_triggers("triggers", data.get("triggers")),
             source_type=source_type,
             source_repo=source_repo,
             source_ref=source_ref,
@@ -373,9 +413,15 @@ class SkillRegistry:
                     f"Skill '{skill.name}' from {existing_source} "
                     f"overridden by {source_path}"
                 )
+            existing_skill = self._skills[skill.name]
+            for trigger in existing_skill.triggers:
+                if self._trigger_map.get(trigger) == skill.name:
+                    self._trigger_map.pop(trigger, None)
 
         self._skills[skill.name] = skill
         self._skill_sources[skill.name] = source_path
+        for trigger in skill.triggers:
+            self._trigger_map[trigger] = skill.name
         logger.debug(f"Loaded skill: {skill.name} from {source_path}")
 
     def _load_markdown_skill(
@@ -429,6 +475,18 @@ class SkillRegistry:
     def list_available(self) -> list[SkillDefinition]:
         return list(self._skills.values())
 
+    def find_by_trigger(self, trigger: str) -> SkillDefinition | None:
+        """Return the skill registered for an explicit slash-command trigger."""
+        normalized = trigger.strip().lower()
+        if not normalized:
+            return None
+        if not normalized.startswith("/"):
+            normalized = f"/{normalized}"
+        skill_name = self._trigger_map.get(normalized)
+        if not skill_name:
+            return None
+        return self._skills.get(skill_name)
+
     def reload_workspace(self, workspace_path: Path) -> int:
         """Reload workspace skills only (preserves other sources)."""
         count_before = len(self._skills)
@@ -455,6 +513,7 @@ class SkillRegistry:
         """
         self._skills.clear()
         self._skill_sources.clear()
+        self._trigger_map.clear()
         self.discover(
             workspace_path,
             include_bundled=include_bundled,

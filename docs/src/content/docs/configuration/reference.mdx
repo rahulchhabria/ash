@@ -31,7 +31,7 @@ reasoning = "medium"
 
 | Key | Type | Notes |
 |-----|------|-------|
-| `provider` | `anthropic` \| `openai` \| `openai-oauth` | Required |
+| `provider` | `anthropic` \| `openai` \| `openai-oauth` \| `pioneer` | Required |
 | `model` | string | Required |
 | `temperature` | float \| null | Optional |
 | `max_tokens` | int | Default `4096` |
@@ -46,12 +46,16 @@ api_key = "sk-..."
 
 [anthropic]
 api_key = "sk-ant-..."
+
+[pioneer]
+api_key = "pio-..."
 ```
 
 | Section | Key | Env Fallback |
 |---------|-----|--------------|
 | `[openai]` | `api_key` | `OPENAI_API_KEY` |
 | `[anthropic]` | `api_key` | `ANTHROPIC_API_KEY` |
+| `[pioneer]` | `api_key` | `PIONEER_API_KEY` |
 
 ## Sandbox (`[sandbox]`)
 
@@ -326,11 +330,14 @@ enabled = false
 response_allowed_chats = []
 response_blocked_chats = []
 
-[brave_search]
+[parallel_search]
 api_key = "..."
 
 [sentry]
 dsn = "https://..."
+traces_sample_rate = 0.1
+stream_gen_ai_spans = false
+send_default_pii = false
 
 [server]
 host = "127.0.0.1"

@@ -11,8 +11,10 @@ import base64
 import binascii
 import hashlib
 import hmac
+import html
 import json
 import os
+import re
 import secrets
 import sys
 import time
@@ -20,7 +22,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
-from urllib.parse import quote_plus
 
 from ash.config.paths import get_vault_path
 from ash.security.vault import FileVault, VaultError
@@ -37,9 +38,61 @@ ENV_VAULT_PATH = "GOGCLI_VAULT_PATH"
 DEFAULT_STATE_PATH = Path.home() / ".ash" / "gogcli" / "state.json"
 VAULT_NAMESPACE = "gog.credentials"
 STATE_VERSION = 1
-DEFAULT_AUTH_FLOW_TTL_SECONDS = 600
+DEFAULT_AUTH_FLOW_TTL_SECONDS = 1800
 MIN_AUTH_FLOW_TTL_SECONDS = 30
 MAX_AUTH_FLOW_TTL_SECONDS = 3600
+ENV_GOOGLE_CLIENT_ID = "GOOGLE_CLIENT_ID"
+ENV_GOOGLE_CLIENT_SECRET = "GOOGLE_CLIENT_SECRET"  # noqa: S105
+
+ENV_GOOGLE_OAUTH_BASE_URL = "GOOGLE_OAUTH_BASE_URL"
+DEFAULT_GOOGLE_OAUTH_BASE_URL = "https://oauth2.googleapis.com"
+DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+
+# Google authorization endpoint (different host from token endpoint)
+DEFAULT_GOOGLE_AUTH_BASE_URL = "https://accounts.google.com"
+ENV_GOOGLE_AUTH_BASE_URL = "GOOGLE_AUTH_BASE_URL"
+ENV_GOOGLE_USERINFO_BASE_URL = "GOOGLE_USERINFO_BASE_URL"
+DEFAULT_GOOGLE_USERINFO_PATH = "/oauth2/v3/userinfo"
+
+# Scopes supported by device code flow (from Google docs)
+DEVICE_CODE_ALLOWED_SCOPES: frozenset[str] = frozenset(
+    {
+        "email",
+        "openid",
+        "profile",
+        "https://www.googleapis.com/auth/drive.appdata",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/youtube",
+        "https://www.googleapis.com/auth/youtube.readonly",
+    }
+)
+
+AUTH_CODE_REDIRECT_URI = "http://localhost"
+
+ENV_GOOGLE_GMAIL_API_BASE_URL = "GOOGLE_GMAIL_API_BASE_URL"
+DEFAULT_GOOGLE_GMAIL_API_BASE_URL = "https://gmail.googleapis.com"
+ENV_GOOGLE_CALENDAR_API_BASE_URL = "GOOGLE_CALENDAR_API_BASE_URL"
+DEFAULT_GOOGLE_CALENDAR_API_BASE_URL = "https://www.googleapis.com"
+
+GMAIL_FOLDER_LABELS: dict[str, str] = {
+    "inbox": "INBOX",
+    "sent": "SENT",
+    "drafts": "DRAFT",
+    "spam": "SPAM",
+    "trash": "TRASH",
+    "starred": "STARRED",
+    "important": "IMPORTANT",
+    "unread": "UNREAD",
+}
+
+CAPABILITY_SCOPES: dict[str, str] = {
+    "gog.email": (
+        "https://www.googleapis.com/auth/gmail.readonly"
+        " https://www.googleapis.com/auth/gmail.send"
+        " https://www.googleapis.com/auth/gmail.modify"
+    ),
+    "gog.calendar": "https://www.googleapis.com/auth/calendar",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,6 +361,338 @@ def _require_namespaced_capability(capability_id: Any) -> str:
     return capability
 
 
+def _google_oauth_base_url() -> str:
+    value = _optional_text(os.environ.get(ENV_GOOGLE_OAUTH_BASE_URL))
+    return value or DEFAULT_GOOGLE_OAUTH_BASE_URL
+
+
+def _google_device_code_url() -> str:
+    return f"{_google_oauth_base_url()}/device/code"
+
+
+def _google_token_url() -> str:
+    return f"{_google_oauth_base_url()}/token"
+
+
+def _scopes_support_device_code(scope_string: str) -> bool:
+    return all(s in DEVICE_CODE_ALLOWED_SCOPES for s in scope_string.split())
+
+
+def _google_authorization_url() -> str:
+    value = _optional_text(os.environ.get(ENV_GOOGLE_AUTH_BASE_URL))
+    base = value or DEFAULT_GOOGLE_AUTH_BASE_URL
+    return f"{base}/o/oauth2/v2/auth"
+
+
+def _google_userinfo_url() -> str:
+    base = _optional_text(os.environ.get(ENV_GOOGLE_USERINFO_BASE_URL))
+    if not base:
+        base = _optional_text(os.environ.get(ENV_GOOGLE_OAUTH_BASE_URL))
+    if not base:
+        base = _optional_text(os.environ.get(ENV_GOOGLE_AUTH_BASE_URL))
+    host = (base or DEFAULT_GOOGLE_OAUTH_BASE_URL).rstrip("/")
+    return f"{host}{DEFAULT_GOOGLE_USERINFO_PATH}"
+
+
+def _google_client_id() -> str:
+    value = _optional_text(os.environ.get(ENV_GOOGLE_CLIENT_ID))
+    if not value:
+        raise BridgeError(
+            "capability_backend_unavailable",
+            "GOOGLE_CLIENT_ID is not configured",
+        )
+    return value
+
+
+def _google_client_secret() -> str:
+    value = _optional_text(os.environ.get(ENV_GOOGLE_CLIENT_SECRET))
+    if not value:
+        raise BridgeError(
+            "capability_backend_unavailable",
+            "GOOGLE_CLIENT_SECRET is not configured",
+        )
+    return value
+
+
+def _google_gmail_api_base_url() -> str:
+    value = _optional_text(os.environ.get(ENV_GOOGLE_GMAIL_API_BASE_URL))
+    return value or DEFAULT_GOOGLE_GMAIL_API_BASE_URL
+
+
+def _google_calendar_api_base_url() -> str:
+    value = _optional_text(os.environ.get(ENV_GOOGLE_CALENDAR_API_BASE_URL))
+    return value or DEFAULT_GOOGLE_CALENDAR_API_BASE_URL
+
+
+def _google_api_request(
+    method: str,
+    url: str,
+    *,
+    access_token: str,
+    params: list[tuple[str, str]] | None = None,
+    json_body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Authenticated HTTP request to a Google API endpoint."""
+    from urllib.error import HTTPError, URLError
+    from urllib.parse import urlencode
+    from urllib.request import Request, urlopen
+
+    if params:
+        url = f"{url}?{urlencode(params, doseq=True)}"
+
+    data = None
+    if json_body is not None:
+        data = json.dumps(json_body).encode("utf-8")
+
+    request = Request(url, data=data, method=method)  # noqa: S310
+    request.add_header("Authorization", f"Bearer {access_token}")
+    if data is not None:
+        request.add_header("Content-Type", "application/json")
+    try:
+        with urlopen(request, timeout=30) as resp:  # noqa: S310
+            raw_body = resp.read().decode("utf-8").strip()
+            if not raw_body:
+                return {}
+            return json.loads(raw_body)
+    except HTTPError as e:
+        if e.code == 401:
+            raise BridgeError(
+                "capability_auth_required",
+                "Google API returned 401 — re-authentication required",
+            ) from None
+        try:
+            error_body = json.loads(e.read().decode("utf-8"))
+        except (json.JSONDecodeError, OSError):
+            error_body = {}
+        error_msg = ""
+        if isinstance(error_body.get("error"), dict):
+            error_msg = _optional_text(error_body["error"].get("message")) or ""
+        raise BridgeError(
+            "capability_backend_unavailable",
+            f"Google API returned HTTP {e.code}{': ' + error_msg if error_msg else ''}",
+        ) from None
+    except URLError as e:
+        raise BridgeError(
+            "capability_backend_unavailable",
+            f"Google API request failed: {e.reason}",
+        ) from None
+
+
+def _get_access_token(vault_ref: str) -> str:
+    """Read the current access_token from the vault."""
+    try:
+        vault = _vault()
+        creds = vault.get_json(vault_ref)
+    except VaultError:
+        raise BridgeError(
+            "capability_auth_required",
+            "failed to read credentials from vault",
+        ) from None
+    if not isinstance(creds, dict):
+        raise BridgeError(
+            "capability_auth_required",
+            "credentials not found in vault",
+        )
+    token = _optional_text(creds.get("access_token"))
+    if not token:
+        raise BridgeError(
+            "capability_auth_required",
+            "access_token not found in stored credentials",
+        )
+    return token
+
+
+def _resolve_refresh_token(
+    *,
+    new_refresh_token: str | None,
+    existing_vault_ref: str | None,
+    additional_vault_refs: list[str] | None = None,
+) -> str | None:
+    """Prefer new refresh token, then preserve a stored token from any related account."""
+    if new_refresh_token:
+        return new_refresh_token
+
+    candidate_refs: list[str] = []
+    if existing_vault_ref:
+        candidate_refs.append(existing_vault_ref)
+    if additional_vault_refs:
+        candidate_refs.extend(additional_vault_refs)
+
+    seen: set[str] = set()
+    for vault_ref in candidate_refs:
+        if vault_ref in seen:
+            continue
+        seen.add(vault_ref)
+        try:
+            creds = _vault().get_json(vault_ref)
+        except VaultError:
+            continue
+        if not isinstance(creds, dict):
+            continue
+        refresh_token = _optional_text(creds.get("refresh_token"))
+        if refresh_token:
+            return refresh_token
+    return None
+
+
+def _google_identity_metadata(*, access_token: str) -> dict[str, str]:
+    """Best-effort profile lookup for metadata (non-fatal on failure)."""
+    try:
+        profile = _google_api_request(
+            "GET",
+            _google_userinfo_url(),
+            access_token=access_token,
+        )
+    except BridgeError:
+        return {}
+    if not isinstance(profile, dict):
+        return {}
+
+    account_email = _optional_text(profile.get("email")) or ""
+    account_name = _optional_text(profile.get("name")) or ""
+    google_sub = _optional_text(profile.get("sub")) or ""
+    metadata: dict[str, str] = {}
+    if account_name:
+        metadata["account_name"] = account_name
+    if account_email:
+        metadata["account_email"] = account_email
+    if google_sub:
+        metadata["google_sub"] = google_sub
+    return metadata
+
+
+def _related_vault_refs(
+    *,
+    state: dict[str, Any],
+    user_id: str,
+    account_ref: str,
+    google_sub: str | None = None,
+    exclude_account_key: str | None = None,
+) -> list[tuple[str, str]]:
+    """Collect vault refs for the same Google account across capabilities."""
+    accounts = _dict_values(state.get("accounts"))
+    prefix = f"{user_id}:"
+    suffix = f":{account_ref}"
+    matched_by_identity: list[tuple[str, str]] = []
+    matched_by_alias: list[tuple[str, str]] = []
+    for account_key, account in accounts.items():
+        if account_key == exclude_account_key:
+            continue
+        if not account_key.startswith(prefix):
+            continue
+        vault_ref = _optional_text(account.get("vault_ref"))
+        if not vault_ref:
+            continue
+        related_sub = _optional_text(account.get("google_sub"))
+        if google_sub:
+            if related_sub:
+                if related_sub == google_sub:
+                    matched_by_identity.append((account_key, vault_ref))
+                # Do not alias-match entries that assert a different identity.
+                continue
+        if account_key.endswith(suffix):
+            matched_by_alias.append((account_key, vault_ref))
+    if matched_by_identity:
+        return matched_by_identity
+    return matched_by_alias
+
+
+def _propagate_refresh_token(
+    *,
+    state: dict[str, Any],
+    user_id: str,
+    account_ref: str,
+    refresh_token: str,
+    exclude_account_key: str,
+    google_sub: str | None = None,
+) -> None:
+    """Keep refresh tokens in sync across Gmail/Calendar entries for one account."""
+    for related_account_key, related_vault_ref in _related_vault_refs(
+        state=state,
+        user_id=user_id,
+        account_ref=account_ref,
+        google_sub=google_sub,
+        exclude_account_key=exclude_account_key,
+    ):
+        try:
+            creds = _vault().get_json(related_vault_ref)
+        except VaultError:
+            continue
+        if not isinstance(creds, dict):
+            continue
+        creds["refresh_token"] = refresh_token
+        try:
+            _vault().put_json(
+                namespace=VAULT_NAMESPACE,
+                key=related_account_key,
+                payload=creds,
+            )
+        except VaultError:
+            continue
+
+
+def _parse_window(window: str) -> int:
+    """Parse a window string like '7d', '3h', '2w' into seconds."""
+    if not window:
+        return 7 * 86400  # default 7 days
+
+    normalized = window.strip().lower()
+    if len(normalized) < 2:
+        raise BridgeError(
+            "capability_invalid_input",
+            "window must be a positive duration like '7d', '3h', or '2w'",
+        )
+    unit = normalized[-1]
+    value_text = normalized[:-1]
+    if not value_text.isdigit():
+        raise BridgeError(
+            "capability_invalid_input",
+            "window must be a positive duration like '7d', '3h', or '2w'",
+        )
+    value = int(value_text)
+    if value <= 0:
+        raise BridgeError(
+            "capability_invalid_input",
+            "window must be greater than zero",
+        )
+    multipliers = {"h": 3600, "d": 86400, "w": 604800}
+    multiplier = multipliers.get(unit)
+    if multiplier is None:
+        raise BridgeError(
+            "capability_invalid_input",
+            "window unit must be one of: h, d, w",
+        )
+    return value * multiplier
+
+
+def _http_post_form(url: str, params: dict[str, str]) -> dict[str, Any]:
+    """POST form-encoded data and return parsed JSON response."""
+    from urllib.error import HTTPError, URLError
+    from urllib.parse import urlencode
+    from urllib.request import Request, urlopen
+
+    body = urlencode(params).encode("utf-8")
+    request = Request(url, data=body, method="POST")  # noqa: S310
+    request.add_header("Content-Type", "application/x-www-form-urlencoded")
+    try:
+        with urlopen(request, timeout=30) as resp:  # noqa: S310
+            return json.loads(resp.read().decode("utf-8"))
+    except HTTPError as e:
+        try:
+            error_body = json.loads(e.read().decode("utf-8"))
+        except (json.JSONDecodeError, OSError):
+            raise BridgeError(
+                "capability_backend_unavailable",
+                f"Google API returned HTTP {e.code}",
+            ) from None
+        return error_body
+    except URLError as e:
+        raise BridgeError(
+            "capability_backend_unavailable",
+            f"Google API request failed: {e.reason}",
+        ) from None
+
+
 def _handle_definitions() -> dict[str, Any]:
     return {
         "definitions": [
@@ -324,8 +709,38 @@ def _handle_definitions() -> dict[str, Any]:
                         "mutating": False,
                     },
                     {
+                        "name": "search_messages",
+                        "description": "Search messages with Gmail query syntax",
+                        "requires_auth": True,
+                        "mutating": False,
+                    },
+                    {
+                        "name": "get_message",
+                        "description": "Read a message body and headers",
+                        "requires_auth": True,
+                        "mutating": False,
+                    },
+                    {
+                        "name": "get_thread",
+                        "description": "Read messages in an email thread",
+                        "requires_auth": True,
+                        "mutating": False,
+                    },
+                    {
                         "name": "send_message",
                         "description": "Send an email message",
+                        "requires_auth": True,
+                        "mutating": True,
+                    },
+                    {
+                        "name": "archive_messages",
+                        "description": "Archive or unarchive one or more messages",
+                        "requires_auth": True,
+                        "mutating": True,
+                    },
+                    {
+                        "name": "update_labels",
+                        "description": "Add/remove labels on one or more messages",
                         "requires_auth": True,
                         "mutating": True,
                     },
@@ -369,6 +784,96 @@ def _handle_auth_begin(params: dict[str, Any]) -> dict[str, Any]:
     nonce = secrets.token_hex(8)
     flow_id = f"gaf_{secrets.token_hex(12)}"
     expires_epoch = now_epoch + _auth_flow_ttl_seconds()
+
+    # Require Google OAuth credentials — fail loudly when not configured.
+    client_id = _google_client_id()
+    _google_client_secret()  # validate presence early
+    scope = CAPABILITY_SCOPES.get(capability_id)
+    if not scope:
+        raise BridgeError(
+            "capability_invalid_input",
+            f"no OAuth scopes configured for {capability_id}",
+        )
+
+    if _scopes_support_device_code(scope):
+        # Device code flow (RFC 8628)
+        device_resp = _http_post_form(
+            _google_device_code_url(),
+            {"client_id": client_id, "scope": scope},
+        )
+        device_error = _optional_text(device_resp.get("error"))
+        if device_error:
+            error_desc = (
+                _optional_text(device_resp.get("error_description")) or device_error
+            )
+            raise BridgeError(
+                "capability_backend_unavailable",
+                f"Google device code request failed: {error_desc}",
+            )
+
+        device_code = _optional_text(device_resp.get("device_code"))
+        user_code = _optional_text(device_resp.get("user_code"))
+        verification_url = _optional_text(device_resp.get("verification_url"))
+        google_interval = _int_claim(device_resp, "interval") or 5
+        google_expires_in = _int_claim(device_resp, "expires_in")
+
+        if not device_code or not user_code or not verification_url:
+            raise BridgeError(
+                "capability_backend_unavailable",
+                "Google device code response missing required fields",
+            )
+
+        if google_expires_in and google_expires_in < (expires_epoch - now_epoch):
+            expires_epoch = now_epoch + google_expires_in
+
+        state = _read_state()
+        _prune_expired_flows(state=state, now_epoch=now_epoch)
+        state["auth_flows"][flow_id] = {
+            "user_id": claims.user_id,
+            "capability_id": capability_id,
+            "account_hint": account_hint,
+            "nonce": nonce,
+            "issued_at": now_epoch,
+            "expires_at": expires_epoch,
+            "device_code": device_code,
+            "poll_interval": google_interval,
+            "flow_type": "device_code",
+        }
+        _write_state(state)
+
+        flow_state = {
+            "flow_id": flow_id,
+            "nonce": nonce,
+            "device_code": device_code,
+        }
+        return {
+            "auth_url": verification_url,
+            "expires_at": _iso8601_utc(expires_epoch),
+            "flow_state": flow_state,
+            "flow_type": "device_code",
+            "user_code": user_code,
+            "poll_interval_seconds": google_interval,
+        }
+
+    # Authorization code flow (loopback redirect)
+    from urllib.parse import urlencode
+
+    # state_param is included in the auth URL for Google's CSRF protection.
+    # The bridge cannot validate it on completion because the user pastes only
+    # the auth code, not the full redirect URL.  Stored for audit/debugging.
+    state_param = secrets.token_hex(16)
+    auth_params = {
+        "client_id": client_id,
+        "redirect_uri": AUTH_CODE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": scope,
+        "access_type": "offline",
+        "include_granted_scopes": "true",
+        "prompt": "consent",
+        "state": state_param,
+    }
+    auth_url = f"{_google_authorization_url()}?{urlencode(auth_params)}"
+
     state = _read_state()
     _prune_expired_flows(state=state, now_epoch=now_epoch)
     state["auth_flows"][flow_id] = {
@@ -378,23 +883,228 @@ def _handle_auth_begin(params: dict[str, Any]) -> dict[str, Any]:
         "nonce": nonce,
         "issued_at": now_epoch,
         "expires_at": expires_epoch,
+        "flow_type": "authorization_code",
+        "state_param": state_param,
+        "redirect_uri": AUTH_CODE_REDIRECT_URI,
     }
     _write_state(state)
+
     flow_state = {
         "flow_id": flow_id,
         "nonce": nonce,
     }
-    auth_url = (
-        "https://auth.gog.local/authorize"
-        f"?capability={quote_plus(capability_id)}"
-        f"&account={quote_plus(account_hint)}"
-        f"&flow_id={quote_plus(flow_id)}"
-        f"&nonce={quote_plus(nonce)}"
-    )
     return {
         "auth_url": auth_url,
         "expires_at": _iso8601_utc(expires_epoch),
         "flow_state": flow_state,
+        "flow_type": "authorization_code",
+        "expected_callback_state": state_param,
+    }
+
+
+def _handle_auth_poll(params: dict[str, Any]) -> dict[str, Any]:
+    context_token = _required_text(
+        params.get("context_token"),
+        code="capability_invalid_input",
+        message="context_token is required",
+    )
+    claims = _verify_context_token(context_token)
+
+    capability_id = _require_namespaced_capability(params.get("capability_id"))
+    flow_state = params.get("flow_state")
+    if not isinstance(flow_state, dict):
+        raise BridgeError("capability_invalid_input", "flow_state must be an object")
+    flow_id = _required_text(
+        flow_state.get("flow_id"),
+        code="capability_invalid_input",
+        message="flow_state.flow_id is required",
+    )
+    device_code = _required_text(
+        flow_state.get("device_code"),
+        code="capability_invalid_input",
+        message="flow_state.device_code is required",
+    )
+
+    state = _read_state()
+    now_epoch = int(time.time())
+    if _prune_expired_flows(state=state, now_epoch=now_epoch):
+        _write_state(state)
+    stored_flow = state["auth_flows"].get(flow_id)
+    if not isinstance(stored_flow, dict):
+        raise BridgeError(
+            "capability_auth_flow_invalid",
+            "flow is invalid or expired",
+        )
+    flow_user_id = _optional_text(stored_flow.get("user_id"))
+    if flow_user_id != claims.user_id:
+        raise BridgeError(
+            "capability_auth_flow_invalid",
+            "flow user does not match caller",
+        )
+    flow_capability_id = _optional_text(stored_flow.get("capability_id"))
+    if flow_capability_id != capability_id:
+        raise BridgeError(
+            "capability_auth_flow_invalid",
+            "flow capability does not match caller request",
+        )
+    expected_nonce = _optional_text(stored_flow.get("nonce"))
+    nonce = _optional_text(flow_state.get("nonce"))
+    if expected_nonce and nonce != expected_nonce:
+        raise BridgeError(
+            "capability_auth_flow_invalid",
+            "flow_state nonce mismatch",
+        )
+
+    poll_interval = _int_claim(stored_flow, "poll_interval") or 5
+    client_id = _google_client_id()
+    client_secret = _google_client_secret()
+
+    token_resp = _http_post_form(
+        _google_token_url(),
+        {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "device_code": device_code,
+            "grant_type": DEVICE_CODE_GRANT_TYPE,
+        },
+    )
+
+    # Check for pending/error responses
+    error_code = _optional_text(token_resp.get("error"))
+    if error_code == "authorization_pending":
+        return {
+            "status": "pending",
+            "retry_after_seconds": poll_interval,
+        }
+    if error_code == "slow_down":
+        return {
+            "status": "pending",
+            "retry_after_seconds": poll_interval + 5,
+        }
+    if error_code == "access_denied":
+        state["auth_flows"].pop(flow_id, None)
+        _write_state(state)
+        raise BridgeError(
+            "capability_auth_flow_denied",
+            "user denied access during device code authorization",
+        )
+    if error_code == "expired_token":
+        state["auth_flows"].pop(flow_id, None)
+        _write_state(state)
+        raise BridgeError(
+            "capability_auth_flow_expired",
+            "device code has expired — start a new auth flow",
+        )
+    if error_code:
+        raise BridgeError(
+            "capability_backend_unavailable",
+            f"Google token endpoint returned error: {error_code}",
+        )
+
+    account_hint = _optional_text(stored_flow.get("account_hint")) or "default"
+    account_ref = account_hint
+    account_key = _account_key(claims.user_id, capability_id, account_ref)
+
+    existing = state["accounts"].get(account_key)
+    existing_created_at = (
+        _int_claim(existing, "created_at") if isinstance(existing, dict) else None
+    )
+    existing_vault_ref = (
+        _optional_text(existing.get("vault_ref"))
+        if isinstance(existing, dict)
+        else None
+    )
+    credential_key = (
+        _optional_text(existing.get("credential_key"))
+        if isinstance(existing, dict)
+        else None
+    )
+    if credential_key is None:
+        credential_key = f"cred_{secrets.token_hex(8)}"
+    # Success — we got tokens
+    access_token = _optional_text(token_resp.get("access_token"))
+    if not access_token:
+        raise BridgeError(
+            "capability_backend_unavailable",
+            "Google token response missing access_token",
+        )
+    identity_metadata = _google_identity_metadata(access_token=access_token)
+    google_sub = _optional_text(identity_metadata.get("google_sub"))
+    related_accounts = _related_vault_refs(
+        state=state,
+        user_id=claims.user_id,
+        account_ref=account_ref,
+        google_sub=google_sub,
+        exclude_account_key=account_key,
+    )
+    refresh_token = _resolve_refresh_token(
+        new_refresh_token=_optional_text(token_resp.get("refresh_token")),
+        existing_vault_ref=existing_vault_ref,
+        additional_vault_refs=[vault_ref for _, vault_ref in related_accounts],
+    )
+
+    try:
+        vault = _vault()
+        vault_ref = vault.put_json(
+            namespace=VAULT_NAMESPACE,
+            key=account_key,
+            payload={
+                "credential_key": credential_key,
+                "provider": "google",
+                "capability_id": capability_id,
+                "user_id": claims.user_id,
+                "account_ref": account_ref,
+                "linked_at": now_epoch,
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "token_type": _optional_text(token_resp.get("token_type")),
+                "expires_in": _int_claim(token_resp, "expires_in"),
+                "obtained_at": now_epoch,
+            },
+        )
+    except VaultError:
+        raise BridgeError(
+            "capability_backend_unavailable",
+            "vault write failed during auth poll completion",
+        ) from None
+
+    state["accounts"][account_key] = {
+        "created_at": existing_created_at or now_epoch,
+        "updated_at": now_epoch,
+        "provider": claims.provider,
+        "chat_type": claims.chat_type,
+        "credential_key": credential_key,
+        "vault_ref": vault_ref,
+        "account_name": identity_metadata.get("account_name"),
+        "account_email": identity_metadata.get("account_email"),
+        "google_sub": identity_metadata.get("google_sub"),
+    }
+    if refresh_token:
+        _propagate_refresh_token(
+            state=state,
+            user_id=claims.user_id,
+            account_ref=account_ref,
+            refresh_token=refresh_token,
+            exclude_account_key=account_key,
+            google_sub=google_sub,
+        )
+    state["auth_flows"].pop(flow_id, None)
+    _write_state(state)
+
+    return {
+        "status": "complete",
+        "account_ref": account_ref,
+        "credential_material": {
+            "credential_key": credential_key,
+        },
+        "metadata": {
+            "provider": "google",
+            "capability_id": capability_id,
+            "linked_at": _iso8601_utc(now_epoch),
+            "account_name": identity_metadata.get("account_name"),
+            "account_email": identity_metadata.get("account_email"),
+            "google_sub": identity_metadata.get("google_sub"),
+        },
     }
 
 
@@ -447,17 +1157,58 @@ def _handle_auth_complete(params: dict[str, Any]) -> dict[str, Any]:
             "flow_state nonce mismatch",
         )
 
+    stored_flow_type = _optional_text(stored_flow.get("flow_type"))
+    if stored_flow_type == "device_code":
+        raise BridgeError(
+            "capability_invalid_input",
+            "device_code flows must use auth_poll, not auth_complete",
+        )
+
     account_ref = (
         _optional_text(stored_flow.get("account_hint"))
         or _optional_text(params.get("account_hint"))
         or "default"
     )
-    callback_url = _optional_text(params.get("callback_url"))
-    code = _optional_text(params.get("code"))
+    code = _required_text(
+        params.get("authorization_code"),
+        code="capability_invalid_input",
+        message="authorization_code is required for auth_complete",
+    )
+    redirect_uri = (
+        _optional_text(stored_flow.get("redirect_uri")) or AUTH_CODE_REDIRECT_URI
+    )
+
+    # Exchange authorization code for tokens
+    client_id = _google_client_id()
+    client_secret = _google_client_secret()
+    token_resp = _http_post_form(
+        _google_token_url(),
+        {
+            "grant_type": "authorization_code",
+            "code": code,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": redirect_uri,
+        },
+    )
+
+    error_code = _optional_text(token_resp.get("error"))
+    if error_code:
+        error_desc = _optional_text(token_resp.get("error_description")) or error_code
+        raise BridgeError(
+            "capability_backend_unavailable",
+            f"Google token exchange failed: {error_desc}",
+        )
+
     account_key = _account_key(claims.user_id, capability_id, account_ref)
     existing = state["accounts"].get(account_key)
     existing_created_at = (
         _int_claim(existing, "created_at") if isinstance(existing, dict) else None
+    )
+    existing_vault_ref = (
+        _optional_text(existing.get("vault_ref"))
+        if isinstance(existing, dict)
+        else None
     )
     credential_key = (
         _optional_text(existing.get("credential_key"))
@@ -466,10 +1217,25 @@ def _handle_auth_complete(params: dict[str, Any]) -> dict[str, Any]:
     )
     if credential_key is None:
         credential_key = f"cred_{secrets.token_hex(8)}"
-    vault_ref = (
-        _optional_text(existing.get("vault_ref"))
-        if isinstance(existing, dict)
-        else None
+    access_token = _optional_text(token_resp.get("access_token"))
+    if not access_token:
+        raise BridgeError(
+            "capability_backend_unavailable",
+            "Google token response missing access_token",
+        )
+    identity_metadata = _google_identity_metadata(access_token=access_token)
+    google_sub = _optional_text(identity_metadata.get("google_sub"))
+    related_accounts = _related_vault_refs(
+        state=state,
+        user_id=claims.user_id,
+        account_ref=account_ref,
+        google_sub=google_sub,
+        exclude_account_key=account_key,
+    )
+    refresh_token = _resolve_refresh_token(
+        new_refresh_token=_optional_text(token_resp.get("refresh_token")),
+        existing_vault_ref=existing_vault_ref,
+        additional_vault_refs=[vault_ref for _, vault_ref in related_accounts],
     )
     try:
         vault = _vault()
@@ -483,10 +1249,11 @@ def _handle_auth_complete(params: dict[str, Any]) -> dict[str, Any]:
                 "user_id": claims.user_id,
                 "account_ref": account_ref,
                 "linked_at": now_epoch,
-                "auth_exchange": {
-                    "code": code,
-                    "callback_url": callback_url,
-                },
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "token_type": _optional_text(token_resp.get("token_type")),
+                "expires_in": _int_claim(token_resp, "expires_in"),
+                "obtained_at": now_epoch,
             },
         )
     except VaultError:
@@ -501,7 +1268,19 @@ def _handle_auth_complete(params: dict[str, Any]) -> dict[str, Any]:
         "chat_type": claims.chat_type,
         "credential_key": credential_key,
         "vault_ref": vault_ref,
+        "account_name": identity_metadata.get("account_name"),
+        "account_email": identity_metadata.get("account_email"),
+        "google_sub": identity_metadata.get("google_sub"),
     }
+    if refresh_token:
+        _propagate_refresh_token(
+            state=state,
+            user_id=claims.user_id,
+            account_ref=account_ref,
+            refresh_token=refresh_token,
+            exclude_account_key=account_key,
+            google_sub=google_sub,
+        )
     state["auth_flows"].pop(flow_id, None)
     _write_state(state)
     return {
@@ -513,6 +1292,9 @@ def _handle_auth_complete(params: dict[str, Any]) -> dict[str, Any]:
             "provider": "google",
             "capability_id": capability_id,
             "linked_at": _iso8601_utc(now_epoch),
+            "account_name": identity_metadata.get("account_name"),
+            "account_email": identity_metadata.get("account_email"),
+            "google_sub": identity_metadata.get("google_sub"),
         },
     }
 
@@ -564,6 +1346,137 @@ def _as_object(value: Any, *, field_name: str) -> dict[str, Any]:
     raise BridgeError("capability_invalid_input", f"{field_name} must be an object")
 
 
+def _refresh_token_if_needed(
+    *,
+    account_key: str,
+    vault_ref: str | None,
+    force: bool = False,
+) -> bool:
+    """Attempt to refresh Google access token if expired or explicitly forced."""
+    if not vault_ref:
+        return False
+    try:
+        vault = _vault()
+        creds = vault.get_json(vault_ref)
+    except VaultError:
+        return False
+    if not isinstance(creds, dict):
+        return False
+    refresh_token = _optional_text(creds.get("refresh_token"))
+    if not refresh_token:
+        return False
+    obtained_at = _int_claim(creds, "obtained_at") or 0
+    expires_in = _int_claim(creds, "expires_in") or 3600
+    now_epoch = int(time.time())
+    # Refresh 60 seconds before actual expiry
+    if not force and now_epoch < obtained_at + expires_in - 60:
+        return False
+    try:
+        client_id = _google_client_id()
+        client_secret = _google_client_secret()
+    except BridgeError:
+        return False
+    token_resp = _http_post_form(
+        _google_token_url(),
+        {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        },
+    )
+    new_access_token = _optional_text(token_resp.get("access_token"))
+    if not new_access_token:
+        return False
+    creds["access_token"] = new_access_token
+    new_expires_in = _int_claim(token_resp, "expires_in")
+    if new_expires_in:
+        creds["expires_in"] = new_expires_in
+    creds["obtained_at"] = now_epoch
+    try:
+        vault.put_json(namespace=VAULT_NAMESPACE, key=account_key, payload=creds)
+    except VaultError:
+        return False
+    return True
+
+
+def _invoke_operation(
+    *,
+    capability_id: str,
+    operation: str,
+    input_data: dict[str, Any],
+    access_token: str,
+    account_ref: str,
+) -> dict[str, Any]:
+    if capability_id == "gog.email" and operation == "list_messages":
+        return _invoke_list_messages(
+            input_data=input_data,
+            access_token=access_token,
+            account_ref=account_ref,
+        )
+
+    if capability_id == "gog.email" and operation == "search_messages":
+        return _invoke_search_messages(
+            input_data=input_data,
+            access_token=access_token,
+            account_ref=account_ref,
+        )
+
+    if capability_id == "gog.email" and operation == "get_message":
+        return _invoke_get_message(
+            input_data=input_data,
+            access_token=access_token,
+            account_ref=account_ref,
+        )
+
+    if capability_id == "gog.email" and operation == "get_thread":
+        return _invoke_get_thread(
+            input_data=input_data,
+            access_token=access_token,
+            account_ref=account_ref,
+        )
+
+    if capability_id == "gog.email" and operation == "send_message":
+        return _invoke_send_message(
+            input_data=input_data,
+            access_token=access_token,
+            account_ref=account_ref,
+        )
+
+    if capability_id == "gog.email" and operation == "archive_messages":
+        return _invoke_archive_messages(
+            input_data=input_data,
+            access_token=access_token,
+            account_ref=account_ref,
+        )
+
+    if capability_id == "gog.email" and operation == "update_labels":
+        return _invoke_update_labels(
+            input_data=input_data,
+            access_token=access_token,
+            account_ref=account_ref,
+        )
+
+    if capability_id == "gog.calendar" and operation == "list_events":
+        return _invoke_list_events(
+            input_data=input_data,
+            access_token=access_token,
+            account_ref=account_ref,
+        )
+
+    if capability_id == "gog.calendar" and operation == "create_event":
+        return _invoke_create_event(
+            input_data=input_data,
+            access_token=access_token,
+            account_ref=account_ref,
+        )
+
+    raise BridgeError(
+        "capability_invalid_input",
+        f"unsupported operation for {capability_id}: {operation}",
+    )
+
+
 def _handle_invoke(params: dict[str, Any]) -> dict[str, Any]:
     context_token = _required_text(
         params.get("context_token"),
@@ -589,11 +1502,17 @@ def _handle_invoke(params: dict[str, Any]) -> dict[str, Any]:
     now_epoch = int(time.time())
     if _prune_expired_flows(state=state, now_epoch=now_epoch):
         _write_state(state)
-    _ = _require_linked_account(
+    linked_account = _require_linked_account(
         user_id=claims.user_id,
         capability_id=capability_id,
         account_ref=account_ref,
         state=state,
+    )
+    linked_account_key = _account_key(claims.user_id, capability_id, account_ref)
+    _refresh_token_if_needed(
+        account_key=linked_account_key,
+        vault_ref=_optional_text(linked_account.get("vault_ref")),
+        force=False,
     )
     scope_key = _operation_scope_key(claims.user_id, capability_id)
     existing_scope = state["operation_state"].get(scope_key)
@@ -607,106 +1526,721 @@ def _handle_invoke(params: dict[str, Any]) -> dict[str, Any]:
         "last_invoked_at": now_epoch,
     }
     _write_state(state)
-    now_iso = _iso8601_utc(now_epoch)
 
-    if capability_id == "gog.email" and operation == "list_messages":
-        folder = _optional_text(input_data.get("folder")) or "inbox"
-        limit_value = input_data.get("limit", 10)
-        try:
-            limit = int(limit_value)
-        except (TypeError, ValueError):
-            raise BridgeError(
-                "capability_invalid_input", "limit must be an integer"
-            ) from None
-        limit = max(1, min(limit, 50))
-        messages = [
-            {
-                "id": f"msg_{index + 1}",
-                "from": "updates@example.com",
-                "subject": f"Sample message {index + 1}",
-                "received_at": now_iso,
-            }
-            for index in range(limit)
-        ]
-        return {
-            "output": {
-                "folder": folder,
-                "messages": messages,
-                "count": len(messages),
-                "account_ref": account_ref,
-            }
-        }
+    vault_ref = _optional_text(linked_account.get("vault_ref"))
+    if not vault_ref:
+        raise BridgeError(
+            "capability_auth_required",
+            "account has no vault reference",
+        )
+    access_token = _get_access_token(vault_ref)
+    try:
+        return _invoke_operation(
+            capability_id=capability_id,
+            operation=operation,
+            input_data=input_data,
+            access_token=access_token,
+            account_ref=account_ref,
+        )
+    except BridgeError as e:
+        # Access token can be stale due to clock drift/revocation despite local expiry checks.
+        if e.code != "capability_auth_required":
+            raise
+        refreshed = _refresh_token_if_needed(
+            account_key=linked_account_key,
+            vault_ref=vault_ref,
+            force=True,
+        )
+        if not refreshed:
+            raise
+        access_token = _get_access_token(vault_ref)
+        return _invoke_operation(
+            capability_id=capability_id,
+            operation=operation,
+            input_data=input_data,
+            access_token=access_token,
+            account_ref=account_ref,
+        )
 
-    if capability_id == "gog.email" and operation == "send_message":
-        recipient = _required_text(
-            input_data.get("to"),
-            code="capability_invalid_input",
-            message="to is required",
-        )
-        subject = _required_text(
-            input_data.get("subject"),
-            code="capability_invalid_input",
-            message="subject is required",
-        )
-        _required_text(
-            input_data.get("body"),
-            code="capability_invalid_input",
-            message="body is required",
-        )
-        return {
-            "output": {
-                "status": "queued",
-                "message_id": f"queued_{secrets.token_hex(6)}",
-                "to": recipient,
-                "subject": subject,
-                "account_ref": account_ref,
-            }
-        }
 
-    if capability_id == "gog.calendar" and operation == "list_events":
-        window = _optional_text(input_data.get("window")) or "7d"
-        events = [
-            {
-                "id": "evt_1",
-                "title": "Example event",
-                "start": now_iso,
-                "calendar": _optional_text(input_data.get("calendar")) or "primary",
-            }
-        ]
-        return {
-            "output": {
-                "window": window,
-                "events": events,
-                "count": len(events),
-                "account_ref": account_ref,
-            }
-        }
+def _decode_gmail_data(value: Any) -> str:
+    encoded = _optional_text(value)
+    if not encoded:
+        return ""
+    try:
+        decoded = _b64url_decode(encoded)
+    except (ValueError, binascii.Error):
+        return ""
+    return decoded.decode("utf-8", errors="replace")
 
-    if capability_id == "gog.calendar" and operation == "create_event":
-        title = _required_text(
-            input_data.get("title"),
-            code="capability_invalid_input",
-            message="title is required",
-        )
-        start = _required_text(
-            input_data.get("start"),
-            code="capability_invalid_input",
-            message="start is required",
-        )
-        return {
-            "output": {
-                "status": "created",
-                "event_id": f"evt_{secrets.token_hex(6)}",
-                "title": title,
-                "start": start,
-                "account_ref": account_ref,
-            }
-        }
 
-    raise BridgeError(
-        "capability_invalid_input",
-        f"unsupported operation for {capability_id}: {operation}",
+def _html_to_text(value: str) -> str:
+    no_tags = re.sub(r"<[^>]+>", " ", value)
+    unescaped = html.unescape(no_tags)
+    return " ".join(unescaped.split())
+
+
+def _gmail_header_map(detail: dict[str, Any]) -> dict[str, str]:
+    headers_list = (
+        detail.get("payload", {}).get("headers", [])
+        if isinstance(detail.get("payload"), dict)
+        else []
     )
+    header_map: dict[str, str] = {}
+    for hdr in headers_list:
+        if isinstance(hdr, dict):
+            name = _optional_text(hdr.get("name"))
+            value = _optional_text(hdr.get("value"))
+            if name and value:
+                header_map[name.lower()] = value
+    return header_map
+
+
+def _received_at(detail: dict[str, Any], header_map: dict[str, str]) -> str:
+    internal_date = _optional_text(detail.get("internalDate"))
+    if not internal_date:
+        return header_map.get("date", "")
+    try:
+        return _iso8601_utc(int(internal_date) // 1000)
+    except (ValueError, OSError):
+        return header_map.get("date", "")
+
+
+def _extract_gmail_bodies(payload: Any) -> tuple[str, str]:
+    text_parts: list[str] = []
+    html_parts: list[str] = []
+
+    def _walk(part: Any) -> None:
+        if not isinstance(part, dict):
+            return
+        mime_type = (_optional_text(part.get("mimeType")) or "").lower()
+        body = part.get("body")
+        data = None
+        if isinstance(body, dict):
+            data = body.get("data")
+        decoded = _decode_gmail_data(data)
+        if decoded:
+            if mime_type.startswith("text/plain"):
+                text_parts.append(decoded)
+            elif mime_type.startswith("text/html"):
+                html_parts.append(decoded)
+
+        raw_parts = part.get("parts")
+        if isinstance(raw_parts, list):
+            for child in raw_parts:
+                _walk(child)
+
+    _walk(payload)
+    text_body = "\n\n".join(item for item in text_parts if item).strip()
+    html_body = "\n\n".join(item for item in html_parts if item).strip()
+    if not text_body and html_body:
+        text_body = _html_to_text(html_body)
+    return text_body, html_body
+
+
+def _message_summary(detail: dict[str, Any]) -> dict[str, Any]:
+    header_map = _gmail_header_map(detail)
+    msg_id = _optional_text(detail.get("id")) or ""
+    return {
+        "id": msg_id,
+        "thread_id": _optional_text(detail.get("threadId")) or "",
+        "from": header_map.get("from", ""),
+        "subject": header_map.get("subject", ""),
+        "received_at": _received_at(detail, header_map),
+        "snippet": _optional_text(detail.get("snippet")) or "",
+    }
+
+
+def _message_detail(
+    detail: dict[str, Any],
+    *,
+    include_html: bool,
+) -> dict[str, Any]:
+    header_map = _gmail_header_map(detail)
+    text_body, html_body = _extract_gmail_bodies(detail.get("payload"))
+    output = {
+        "id": _optional_text(detail.get("id")) or "",
+        "thread_id": _optional_text(detail.get("threadId")) or "",
+        "subject": header_map.get("subject", ""),
+        "from": header_map.get("from", ""),
+        "to": header_map.get("to", ""),
+        "cc": header_map.get("cc", ""),
+        "received_at": _received_at(detail, header_map),
+        "snippet": _optional_text(detail.get("snippet")) or "",
+        "body_text": text_body,
+        "labels": detail.get("labelIds")
+        if isinstance(detail.get("labelIds"), list)
+        else [],
+    }
+    if include_html:
+        output["body_html"] = html_body
+    return output
+
+
+def _list_message_summaries(
+    *,
+    access_token: str,
+    limit: int,
+    folder: str | None = None,
+    query: str | None = None,
+) -> list[dict[str, Any]]:
+    params: list[tuple[str, str]] = [("maxResults", str(limit))]
+    if folder:
+        label_id = GMAIL_FOLDER_LABELS.get(folder.lower(), folder.upper())
+        params.append(("labelIds", label_id))
+    if query:
+        params.append(("q", query))
+    gmail_base = _google_gmail_api_base_url()
+    list_resp = _google_api_request(
+        "GET",
+        f"{gmail_base}/gmail/v1/users/me/messages",
+        access_token=access_token,
+        params=params,
+    )
+    raw_messages = list_resp.get("messages")
+    if not isinstance(raw_messages, list):
+        raw_messages = []
+
+    messages: list[dict[str, Any]] = []
+    for raw_msg in raw_messages[:limit]:
+        msg_id = raw_msg.get("id") if isinstance(raw_msg, dict) else None
+        if not msg_id:
+            continue
+        detail = _google_api_request(
+            "GET",
+            f"{gmail_base}/gmail/v1/users/me/messages/{msg_id}",
+            access_token=access_token,
+            params=[
+                ("format", "metadata"),
+                ("metadataHeaders", "From"),
+                ("metadataHeaders", "To"),
+                ("metadataHeaders", "Cc"),
+                ("metadataHeaders", "Subject"),
+                ("metadataHeaders", "Date"),
+            ],
+        )
+        messages.append(_message_summary(detail))
+    return messages
+
+
+def _invoke_list_messages(
+    *,
+    input_data: dict[str, Any],
+    access_token: str,
+    account_ref: str,
+) -> dict[str, Any]:
+    folder = _optional_text(input_data.get("folder")) or "inbox"
+    query = _optional_text(input_data.get("query"))
+    limit_value = input_data.get("limit", 10)
+    try:
+        limit = int(limit_value)
+    except (TypeError, ValueError):
+        raise BridgeError(
+            "capability_invalid_input", "limit must be an integer"
+        ) from None
+    limit = max(1, min(limit, 50))
+
+    messages = _list_message_summaries(
+        access_token=access_token,
+        limit=limit,
+        folder=folder,
+        query=query,
+    )
+
+    return {
+        "output": {
+            "folder": folder,
+            "query": query or "",
+            "messages": messages,
+            "count": len(messages),
+            "account_ref": account_ref,
+        }
+    }
+
+
+def _invoke_search_messages(
+    *,
+    input_data: dict[str, Any],
+    access_token: str,
+    account_ref: str,
+) -> dict[str, Any]:
+    query = _required_text(
+        input_data.get("query"),
+        code="capability_invalid_input",
+        message="query is required",
+    )
+    limit_value = input_data.get("limit", 20)
+    try:
+        limit = int(limit_value)
+    except (TypeError, ValueError):
+        raise BridgeError(
+            "capability_invalid_input", "limit must be an integer"
+        ) from None
+    limit = max(1, min(limit, 50))
+    messages = _list_message_summaries(
+        access_token=access_token,
+        limit=limit,
+        query=query,
+    )
+    return {
+        "output": {
+            "query": query,
+            "messages": messages,
+            "count": len(messages),
+            "account_ref": account_ref,
+        }
+    }
+
+
+def _invoke_get_message(
+    *,
+    input_data: dict[str, Any],
+    access_token: str,
+    account_ref: str,
+) -> dict[str, Any]:
+    message_id = _required_text(
+        input_data.get("id"),
+        code="capability_invalid_input",
+        message="id is required",
+    )
+    body_format = (_optional_text(input_data.get("format")) or "text").lower()
+    if body_format not in {"text", "html", "both"}:
+        raise BridgeError(
+            "capability_invalid_input",
+            "format must be one of: text, html, both",
+        )
+    include_html = body_format in {"html", "both"}
+    gmail_base = _google_gmail_api_base_url()
+    detail = _google_api_request(
+        "GET",
+        f"{gmail_base}/gmail/v1/users/me/messages/{message_id}",
+        access_token=access_token,
+        params=[("format", "full")],
+    )
+    output = _message_detail(detail, include_html=include_html)
+    if body_format == "html":
+        output["body_text"] = ""
+    return {"output": {**output, "account_ref": account_ref}}
+
+
+def _invoke_get_thread(
+    *,
+    input_data: dict[str, Any],
+    access_token: str,
+    account_ref: str,
+) -> dict[str, Any]:
+    thread_id = _required_text(
+        input_data.get("thread_id"),
+        code="capability_invalid_input",
+        message="thread_id is required",
+    )
+    limit_value = input_data.get("limit", 20)
+    try:
+        limit = int(limit_value)
+    except (TypeError, ValueError):
+        raise BridgeError(
+            "capability_invalid_input",
+            "limit must be an integer",
+        ) from None
+    limit = max(1, min(limit, 100))
+
+    gmail_base = _google_gmail_api_base_url()
+    thread = _google_api_request(
+        "GET",
+        f"{gmail_base}/gmail/v1/users/me/threads/{thread_id}",
+        access_token=access_token,
+        params=[("format", "full")],
+    )
+    raw_messages = thread.get("messages")
+    if not isinstance(raw_messages, list):
+        raw_messages = []
+    messages: list[dict[str, Any]] = []
+    for detail in raw_messages[:limit]:
+        if not isinstance(detail, dict):
+            continue
+        messages.append(_message_detail(detail, include_html=False))
+    return {
+        "output": {
+            "thread_id": thread_id,
+            "messages": messages,
+            "count": len(messages),
+            "account_ref": account_ref,
+        }
+    }
+
+
+def _invoke_send_message(
+    *,
+    input_data: dict[str, Any],
+    access_token: str,
+    account_ref: str,
+) -> dict[str, Any]:
+    from email.mime.text import MIMEText
+
+    recipient = _required_text(
+        input_data.get("to"),
+        code="capability_invalid_input",
+        message="to is required",
+    )
+    subject = _required_text(
+        input_data.get("subject"),
+        code="capability_invalid_input",
+        message="subject is required",
+    )
+    body = _required_text(
+        input_data.get("body"),
+        code="capability_invalid_input",
+        message="body is required",
+    )
+
+    mime_msg = MIMEText(body)
+    mime_msg["To"] = recipient
+    mime_msg["Subject"] = subject
+    raw_bytes = mime_msg.as_bytes()
+    raw_b64 = base64.urlsafe_b64encode(raw_bytes).decode("ascii")
+
+    gmail_base = _google_gmail_api_base_url()
+    send_resp = _google_api_request(
+        "POST",
+        f"{gmail_base}/gmail/v1/users/me/messages/send",
+        access_token=access_token,
+        json_body={"raw": raw_b64},
+    )
+
+    return {
+        "output": {
+            "status": "sent",
+            "message_id": _optional_text(send_resp.get("id")) or "",
+            "to": recipient,
+            "subject": subject,
+            "account_ref": account_ref,
+        }
+    }
+
+
+def _required_string_list(
+    value: Any,
+    *,
+    field_name: str,
+    max_items: int,
+    allow_empty: bool = False,
+) -> list[str]:
+    if value is None:
+        values: list[Any] = []
+    elif isinstance(value, list):
+        values = value
+    else:
+        raise BridgeError("capability_invalid_input", f"{field_name} must be a list")
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        text = _optional_text(item)
+        if not text:
+            raise BridgeError(
+                "capability_invalid_input",
+                f"{field_name} entries must be non-empty strings",
+            )
+        if text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+
+    if not allow_empty and not result:
+        raise BridgeError("capability_invalid_input", f"{field_name} is required")
+    if len(result) > max_items:
+        raise BridgeError(
+            "capability_invalid_input",
+            f"{field_name} must contain at most {max_items} items",
+        )
+    return result
+
+
+def _gmail_modify_messages(
+    *,
+    access_token: str,
+    ids: list[str],
+    add_label_ids: list[str],
+    remove_label_ids: list[str],
+) -> None:
+    gmail_base = _google_gmail_api_base_url()
+    payload: dict[str, Any] = {}
+    if add_label_ids:
+        payload["addLabelIds"] = add_label_ids
+    if remove_label_ids:
+        payload["removeLabelIds"] = remove_label_ids
+
+    if len(ids) == 1:
+        _google_api_request(
+            "POST",
+            f"{gmail_base}/gmail/v1/users/me/messages/{ids[0]}/modify",
+            access_token=access_token,
+            json_body=payload,
+        )
+        return
+
+    _google_api_request(
+        "POST",
+        f"{gmail_base}/gmail/v1/users/me/messages/batchModify",
+        access_token=access_token,
+        json_body={**payload, "ids": ids},
+    )
+
+
+def _invoke_archive_messages(
+    *,
+    input_data: dict[str, Any],
+    access_token: str,
+    account_ref: str,
+) -> dict[str, Any]:
+    ids = _required_string_list(
+        input_data.get("ids"),
+        field_name="ids",
+        max_items=100,
+    )
+    raw_archive = input_data.get("archive", True)
+    if not isinstance(raw_archive, bool):
+        raise BridgeError("capability_invalid_input", "archive must be a boolean")
+    archive = raw_archive
+
+    add_label_ids = [] if archive else ["INBOX"]
+    remove_label_ids = ["INBOX"] if archive else []
+    _gmail_modify_messages(
+        access_token=access_token,
+        ids=ids,
+        add_label_ids=add_label_ids,
+        remove_label_ids=remove_label_ids,
+    )
+    return {
+        "output": {
+            "status": "updated",
+            "archive": archive,
+            "updated_count": len(ids),
+            "ids": ids,
+            "account_ref": account_ref,
+        }
+    }
+
+
+def _invoke_update_labels(
+    *,
+    input_data: dict[str, Any],
+    access_token: str,
+    account_ref: str,
+) -> dict[str, Any]:
+    ids = _required_string_list(
+        input_data.get("ids"),
+        field_name="ids",
+        max_items=100,
+    )
+    add_label_ids = _required_string_list(
+        input_data.get("add_label_ids"),
+        field_name="add_label_ids",
+        max_items=100,
+        allow_empty=True,
+    )
+    remove_label_ids = _required_string_list(
+        input_data.get("remove_label_ids"),
+        field_name="remove_label_ids",
+        max_items=100,
+        allow_empty=True,
+    )
+    if not add_label_ids and not remove_label_ids:
+        raise BridgeError(
+            "capability_invalid_input",
+            "at least one of add_label_ids or remove_label_ids is required",
+        )
+
+    _gmail_modify_messages(
+        access_token=access_token,
+        ids=ids,
+        add_label_ids=add_label_ids,
+        remove_label_ids=remove_label_ids,
+    )
+    return {
+        "output": {
+            "status": "updated",
+            "updated_count": len(ids),
+            "ids": ids,
+            "add_label_ids": add_label_ids,
+            "remove_label_ids": remove_label_ids,
+            "account_ref": account_ref,
+        }
+    }
+
+
+def _invoke_list_events(
+    *,
+    input_data: dict[str, Any],
+    access_token: str,
+    account_ref: str,
+) -> dict[str, Any]:
+    window = _optional_text(input_data.get("window")) or "7d"
+    calendar_id = _optional_text(input_data.get("calendar")) or "primary"
+    limit_value = input_data.get("limit", 25)
+    try:
+        limit = int(limit_value)
+    except (TypeError, ValueError):
+        limit = 25
+    limit = max(1, min(limit, 250))
+
+    now_epoch = int(time.time())
+    window_seconds = _parse_window(window)
+    time_min = _iso8601_utc(now_epoch)
+    time_max = _iso8601_utc(now_epoch + window_seconds)
+
+    cal_base = _google_calendar_api_base_url()
+    from urllib.parse import quote
+
+    list_resp = _google_api_request(
+        "GET",
+        f"{cal_base}/calendar/v3/calendars/{quote(calendar_id, safe='')}/events",
+        access_token=access_token,
+        params=[
+            ("timeMin", time_min),
+            ("timeMax", time_max),
+            ("singleEvents", "true"),
+            ("orderBy", "startTime"),
+            ("maxResults", str(limit)),
+        ],
+    )
+
+    raw_items = list_resp.get("items")
+    if not isinstance(raw_items, list):
+        raw_items = []
+
+    events: list[dict[str, Any]] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        start_obj = item.get("start", {})
+        end_obj = item.get("end", {})
+        if isinstance(start_obj, dict):
+            start_val = start_obj.get("dateTime") or start_obj.get("date") or ""
+        else:
+            start_val = ""
+        if isinstance(end_obj, dict):
+            end_val = end_obj.get("dateTime") or end_obj.get("date") or ""
+        else:
+            end_val = ""
+        events.append(
+            {
+                "id": _optional_text(item.get("id")) or "",
+                "title": _optional_text(item.get("summary")) or "",
+                "start": start_val,
+                "end": end_val,
+                "calendar": calendar_id,
+                "location": _optional_text(item.get("location")) or "",
+                "description": _optional_text(item.get("description")) or "",
+            }
+        )
+
+    return {
+        "output": {
+            "window": window,
+            "events": events,
+            "count": len(events),
+            "account_ref": account_ref,
+        }
+    }
+
+
+def _invoke_create_event(
+    *,
+    input_data: dict[str, Any],
+    access_token: str,
+    account_ref: str,
+) -> dict[str, Any]:
+    title = _required_text(
+        input_data.get("title"),
+        code="capability_invalid_input",
+        message="title is required",
+    )
+    start = _required_text(
+        input_data.get("start"),
+        code="capability_invalid_input",
+        message="start is required",
+    )
+    end = _optional_text(input_data.get("end"))
+    description = _optional_text(input_data.get("description"))
+    location = _optional_text(input_data.get("location"))
+    calendar_id = _optional_text(input_data.get("calendar")) or "primary"
+
+    is_all_day = len(start) == 10  # "2026-03-02" format
+
+    if is_all_day:
+        from datetime import date, timedelta
+
+        start_body: dict[str, str] = {"date": start}
+        if end:
+            end_body: dict[str, str] = {"date": end}
+        else:
+            try:
+                end_body = {
+                    "date": (date.fromisoformat(start) + timedelta(days=1)).isoformat()
+                }
+            except ValueError:
+                end_body = {"date": start}
+    else:
+        start_body = {"dateTime": start}
+        if end:
+            end_body = {"dateTime": end}
+        else:
+            # Default: start + 1 hour
+            try:
+                # Parse ISO datetime and add 1 hour
+                from datetime import datetime, timedelta
+
+                dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                end_dt = dt + timedelta(hours=1)
+                end_body = {"dateTime": end_dt.isoformat()}
+            except (ValueError, OSError):
+                end_body = {"dateTime": start}
+
+    event_body: dict[str, Any] = {
+        "summary": title,
+        "start": start_body,
+        "end": end_body,
+    }
+    if description:
+        event_body["description"] = description
+    if location:
+        event_body["location"] = location
+
+    cal_base = _google_calendar_api_base_url()
+    from urllib.parse import quote
+
+    created = _google_api_request(
+        "POST",
+        f"{cal_base}/calendar/v3/calendars/{quote(calendar_id, safe='')}/events",
+        access_token=access_token,
+        json_body=event_body,
+    )
+
+    created_start = created.get("start", {})
+    created_end = created.get("end", {})
+    if isinstance(created_start, dict):
+        start_val = created_start.get("dateTime") or created_start.get("date") or start
+    else:
+        start_val = start
+    if isinstance(created_end, dict):
+        end_val = created_end.get("dateTime") or created_end.get("date") or ""
+    else:
+        end_val = ""
+
+    return {
+        "output": {
+            "status": "created",
+            "event_id": _optional_text(created.get("id")) or "",
+            "title": _optional_text(created.get("summary")) or title,
+            "start": start_val,
+            "end": end_val,
+            "calendar": calendar_id,
+            "location": _optional_text(created.get("location")) or "",
+            "description": _optional_text(created.get("description")) or "",
+            "account_ref": account_ref,
+        }
+    }
 
 
 def _dispatch(method: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -714,6 +2248,8 @@ def _dispatch(method: str, params: dict[str, Any]) -> dict[str, Any]:
         return _handle_definitions()
     if method == "auth_begin":
         return _handle_auth_begin(params)
+    if method == "auth_poll":
+        return _handle_auth_poll(params)
     if method == "auth_complete":
         return _handle_auth_complete(params)
     if method == "invoke":

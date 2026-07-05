@@ -3,6 +3,7 @@
 import re
 from datetime import UTC, datetime
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 import typer
 
@@ -21,6 +22,7 @@ def _get_context() -> dict[str, str]:
     return {
         "user_id": context.get("user_id") or "",
         "chat_id": context.get("chat_id") or "",
+        "chat_type": context.get("chat_type") or "",
         "chat_title": context.get("chat_title") or "",
         "provider": context.get("provider") or "",
         "username": context.get("username") or "",
@@ -46,6 +48,51 @@ def _truncate(text: str, max_len: int = 50) -> str:
     return f"{text[:max_len]}..." if len(text) > max_len else text
 
 
+def _normalize_time_input(time_str: str) -> str:
+    """Normalize free-form time text before parsing."""
+    normalized = time_str.strip().rstrip(".,!?")
+    # dateparser can fail on "this <weekday>"; normalize to "<weekday>".
+    return re.sub(
+        r"\bthis\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+        r"\1",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+
+
+def _to_utc(parsed: datetime, timezone: str) -> datetime:
+    """Convert parsed datetime to UTC, assuming local timezone when naive."""
+    dt = parsed
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=ZoneInfo(timezone))
+    return dt.astimezone(UTC)
+
+
+def _parse_time_with_rpc_fallback(normalized: str, timezone: str) -> datetime | None:
+    """Ask host scheduler to parse time with LLM fallback."""
+    try:
+        result = rpc_call(
+            "schedule.parse_time",
+            {"time": normalized, "timezone": timezone},
+        )
+    except (ConnectionError, RPCError):
+        return None
+
+    if not isinstance(result, dict):
+        return None
+
+    trigger_at = result.get("trigger_at")
+    if not isinstance(trigger_at, str) or not trigger_at.strip():
+        return None
+
+    try:
+        return _to_utc(
+            datetime.fromisoformat(trigger_at.replace("Z", "+00:00")), timezone
+        )
+    except ValueError:
+        return None
+
+
 def _parse_time(time_str: str, timezone: str) -> datetime | None:
     """Parse time string to UTC datetime.
 
@@ -58,18 +105,13 @@ def _parse_time(time_str: str, timezone: str) -> datetime | None:
     Returns:
         UTC datetime if parsing succeeds, None otherwise.
     """
-    normalized = time_str.strip().rstrip(".,!?")
-    # dateparser can fail on "this <weekday>"; normalize to "<weekday>".
-    normalized = re.sub(
-        r"\bthis\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
-        r"\1",
-        normalized,
-        flags=re.IGNORECASE,
-    )
+    normalized = _normalize_time_input(time_str)
 
     # Fast path: ISO 8601
     try:
-        return datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+        return _to_utc(
+            datetime.fromisoformat(normalized.replace("Z", "+00:00")), timezone
+        )
     except ValueError:
         pass
 
@@ -83,14 +125,25 @@ def _parse_time(time_str: str, timezone: str) -> datetime | None:
     }
     parsed = dateparser.parse(normalized, settings=settings)
     if parsed:
-        return parsed.astimezone(UTC)
-    return None
+        return _to_utc(parsed, timezone)
+
+    return _parse_time_with_rpc_fallback(normalized, timezone)
+
+
+def _format_rpc_error(error: RPCError) -> str:
+    """Convert RPC errors to user-actionable CLI output."""
+    message = str(error).strip()
+    lowered = message.lower()
+    if "invalid context token" in lowered and "context token expired" in lowered:
+        return (
+            "Invalid context token: ASH_CONTEXT_TOKEN expired. "
+            "Refresh/re-auth the session that provides ASH_CONTEXT_TOKEN, then try again."
+        )
+    return message
 
 
 def _format_time_local(iso_time: str, timezone: str) -> str:
     """Format an ISO timestamp in the user's local timezone."""
-    from zoneinfo import ZoneInfo
-
     try:
         dt = datetime.fromisoformat(iso_time.replace("Z", "+00:00"))
         tz = ZoneInfo(timezone)
@@ -102,8 +155,6 @@ def _format_time_local(iso_time: str, timezone: str) -> str:
 
 def _format_next_cron(cron_expr: str, timezone: str) -> str | None:
     """Return the next fire time for a cron expression in the given timezone."""
-    from zoneinfo import ZoneInfo
-
     try:
         from croniter import croniter
     except ImportError:
@@ -173,8 +224,6 @@ def create(
             typer.echo(f"Error: Could not parse time: {at}", err=True)
             raise typer.Exit(1)
         if trigger_time <= datetime.now(UTC):
-            from zoneinfo import ZoneInfo
-
             tz = ZoneInfo(ctx["timezone"])
             local_str = trigger_time.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
             typer.echo(
@@ -209,6 +258,8 @@ def create(
         params["cron"] = cron
     if ctx["chat_title"]:
         params["chat_title"] = ctx["chat_title"]
+    if ctx["chat_type"]:
+        params["chat_type"] = ctx["chat_type"]
     if ctx["user_id"]:
         params["user_id"] = ctx["user_id"]
     if ctx["username"]:
@@ -220,7 +271,7 @@ def create(
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1) from None
     except RPCError as e:
-        typer.echo(f"Error: {e}", err=True)
+        typer.echo(f"Error: {_format_rpc_error(e)}", err=True)
         raise typer.Exit(1) from None
 
     entry_id = result.get("id", "?")
@@ -272,7 +323,7 @@ def list_tasks(
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1) from None
     except RPCError as e:
-        typer.echo(f"Error: {e}", err=True)
+        typer.echo(f"Error: {_format_rpc_error(e)}", err=True)
         raise typer.Exit(1) from None
 
     if not entries:
@@ -328,7 +379,7 @@ def cancel(
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1) from None
     except RPCError as e:
-        typer.echo(f"Error: {e}", err=True)
+        typer.echo(f"Error: {_format_rpc_error(e)}", err=True)
         raise typer.Exit(1) from None
 
     if result.get("cancelled"):
@@ -388,8 +439,6 @@ def update(
             typer.echo(f"Error: Could not parse time: {at}", err=True)
             raise typer.Exit(1)
         if trigger_time <= datetime.now(UTC):
-            from zoneinfo import ZoneInfo
-
             tz = ZoneInfo(ctx["timezone"])
             local_str = trigger_time.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
             typer.echo(
@@ -429,7 +478,7 @@ def update(
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1) from None
     except RPCError as e:
-        typer.echo(f"Error: {e}", err=True)
+        typer.echo(f"Error: {_format_rpc_error(e)}", err=True)
         raise typer.Exit(1) from None
 
     if result.get("updated"):

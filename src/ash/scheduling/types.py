@@ -31,6 +31,7 @@ class ScheduleEntry:
     timezone: str | None = None
     # Context for routing response back
     chat_id: str | None = None
+    chat_type: str | None = None  # "private", "group", "supergroup", ...
     chat_title: str | None = None  # Friendly name for the chat
     user_id: str | None = None
     username: str | None = None  # For @mentions in response
@@ -110,8 +111,12 @@ class ScheduleEntry:
                 )
                 tz = ZoneInfo("UTC")
 
-            now = datetime.now(tz)
-            prev_local = croniter(self.cron, now).get_prev(datetime)
+            now_local = datetime.now(tz)
+            # croniter can drift by an hour across DST transitions when given
+            # timezone-aware datetimes; evaluate in naive local wall-clock time.
+            now_naive = now_local.replace(tzinfo=None)
+            prev_naive = croniter(self.cron, now_naive).get_prev(datetime)
+            prev_local = prev_naive.replace(tzinfo=tz)
             return prev_local.astimezone(UTC)
         except Exception as e:
             logger.warning(
@@ -190,8 +195,11 @@ class ScheduleEntry:
             else:
                 base_time = self.created_at.astimezone(tz)
 
-            # Evaluate cron in local timezone, result is timezone-aware
-            next_local = croniter(self.cron, base_time).get_next(datetime)
+            # croniter can drift by an hour across DST transitions when given
+            # timezone-aware datetimes; evaluate in naive local wall-clock time.
+            base_naive = base_time.replace(tzinfo=None)
+            next_naive = croniter(self.cron, base_naive).get_next(datetime)
+            next_local = next_naive.replace(tzinfo=tz)
 
             # Convert to UTC for consistent storage/comparison
             next_utc = next_local.astimezone(UTC)
@@ -234,6 +242,8 @@ class ScheduleEntry:
         # Context fields
         if self.chat_id:
             data["chat_id"] = self.chat_id
+        if self.chat_type:
+            data["chat_type"] = self.chat_type
         if self.chat_title:
             data["chat_title"] = self.chat_title
         if self.user_id:
@@ -290,6 +300,7 @@ class ScheduleEntry:
             "last_run",
             "timezone",
             "chat_id",
+            "chat_type",
             "chat_title",
             "user_id",
             "username",
@@ -306,6 +317,7 @@ class ScheduleEntry:
             last_run=last_run,
             timezone=data.get("timezone"),
             chat_id=data.get("chat_id"),
+            chat_type=data.get("chat_type"),
             chat_title=data.get("chat_title"),
             user_id=data.get("user_id"),
             username=data.get("username"),

@@ -102,7 +102,7 @@ class AgentConfig:
         - send_message if enable_progress_updates is True
         """
         tools = list(self.allowed_tools)
-        if self.enable_progress_updates and "send_message" not in tools:
+        if tools and self.enable_progress_updates and "send_message" not in tools:
             tools.append("send_message")
         return tools
 
@@ -209,6 +209,7 @@ class StackFrame:
     session: SessionState  # In-memory LLM conversation state
     system_prompt: str  # Cached for resumption
     context: AgentContext  # Routing context
+    model_alias: str | None = None  # Config alias used to resolve provider/model
     model: str | None = None  # Resolved model name
     environment: dict[str, str] | None = None  # Sandbox env vars
     iteration: int = 0
@@ -228,6 +229,7 @@ class StackFrame:
             agent_session_id=self.agent_session_id,
             agent_name=self.agent_name,
             agent_type=self.agent_type,
+            model_alias=self.model_alias,
             model=self.model,
             iteration=self.iteration,
             max_iterations=self.max_iterations,

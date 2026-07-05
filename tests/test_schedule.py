@@ -614,6 +614,56 @@ class TestScheduleListRPC:
         assert len(result) == 0
 
 
+class TestScheduleParseTimeRPC:
+    """Tests for schedule.parse_time RPC method."""
+
+    @pytest.fixture
+    def schedule_parse_time(self, tmp_path: Path):
+        from ash.rpc.server import RPCServer
+
+        server = RPCServer(tmp_path / "test.sock")
+        store = _make_store(tmp_path / "schedule.jsonl")
+
+        from ash.rpc.methods.schedule import register_schedule_methods
+
+        async def _parse_time_with_llm(_time_text: str, _timezone: str):
+            return datetime(2030, 1, 2, 3, 4, tzinfo=UTC)
+
+        register_schedule_methods(
+            server,
+            store,
+            parse_time_with_llm=_parse_time_with_llm,
+        )
+        return server._methods["schedule.parse_time"]
+
+    @pytest.mark.asyncio
+    async def test_parse_time_returns_iso_when_callback_resolves(
+        self, schedule_parse_time
+    ):
+        result = await schedule_parse_time({"time": "tomorrow at 9", "timezone": "UTC"})
+        assert result["trigger_at"] == "2030-01-02T03:04:00Z"
+
+    @pytest.mark.asyncio
+    async def test_parse_time_requires_time(self, schedule_parse_time):
+        with pytest.raises(ValueError, match="time is required"):
+            await schedule_parse_time({})
+
+    @pytest.mark.asyncio
+    async def test_parse_time_returns_null_without_callback(self, tmp_path: Path):
+        from ash.rpc.server import RPCServer
+
+        server = RPCServer(tmp_path / "test.sock")
+        store = _make_store(tmp_path / "schedule.jsonl")
+
+        from ash.rpc.methods.schedule import register_schedule_methods
+
+        register_schedule_methods(server, store)
+        parse_method = server._methods["schedule.parse_time"]
+
+        result = await parse_method({"time": "next week", "timezone": "UTC"})
+        assert result == {"trigger_at": None}
+
+
 class TestScheduleWatcher:
     """Tests for ScheduleWatcher (polling/handler behavior)."""
 
@@ -1576,6 +1626,41 @@ class TestScheduledTaskWrapper:
         # Times should be formatted in LA timezone
         # The previous 8 AM LA should show as 08:00, not UTC equivalent
         assert "08:00" in wrapped_message
+
+    @pytest.mark.asyncio
+    async def test_handler_sets_session_chat_type_for_dm_policy(self):
+        """Scheduled tasks in DMs preserve private chat_type for skill policy checks."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ash.scheduling import ScheduledTaskHandler
+
+        mock_agent = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = "ok"
+        mock_agent.process_message = AsyncMock(return_value=mock_response)
+
+        mock_sender = AsyncMock(return_value="msg_123")
+        handler = ScheduledTaskHandler(
+            agent=mock_agent,
+            senders={"telegram": mock_sender},
+            timezone="UTC",
+        )
+
+        entry = ScheduleEntry(
+            id="dm_ctx_1",
+            message="Check my calendar",
+            trigger_at=datetime.now(UTC) - timedelta(minutes=1),
+            provider="telegram",
+            chat_id="123456789",
+            chat_type="private",
+            user_id="42",
+        )
+
+        await handler.handle(entry)
+
+        call_args = mock_agent.process_message.call_args
+        session = call_args.args[1]
+        assert session.context.chat_type == "private"
 
 
 class TestStalenessGuard:

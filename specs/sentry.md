@@ -45,6 +45,7 @@ class SentryConfig(BaseModel):
     release: str | None = None
     traces_sample_rate: float = 0.1  # 0.0-1.0
     profiles_sample_rate: float = 0.0  # 0.0-1.0
+    stream_gen_ai_spans: bool = False
     send_default_pii: bool = False
     debug: bool = False
 ```
@@ -58,6 +59,7 @@ environment = "production"  # optional
 release = "ash@0.1.0"  # optional
 traces_sample_rate = 0.1  # 0.0-1.0, default 0.1
 profiles_sample_rate = 0.0  # 0.0-1.0, default 0.0
+stream_gen_ai_spans = false  # stream GenAI span data for agent monitoring
 send_default_pii = false  # default false
 debug = false  # SDK debug logging
 ```

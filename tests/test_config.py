@@ -356,6 +356,18 @@ class TestNamedModelConfigs:
         assert api_key is not None
         assert api_key.get_secret_value() == "env-key"
 
+    def test_resolve_pioneer_api_key_from_env(self, monkeypatch):
+        """Test Pioneer API key resolution from environment variable."""
+        monkeypatch.setenv("PIONEER_API_KEY", "pioneer-env-key")
+        config = AshConfig(
+            models={
+                "default": ModelConfig(provider="pioneer", model="job_abc123"),
+            }
+        )
+        api_key = config.resolve_api_key("default")
+        assert api_key is not None
+        assert api_key.get_secret_value() == "pioneer-env-key"
+
     def test_resolve_api_key_provider_takes_precedence(self, monkeypatch):
         """Test provider-level config takes precedence over env var."""
         monkeypatch.setenv("OPENAI_API_KEY", "env-key")
@@ -464,14 +476,14 @@ class TestResolveEnvSecrets:
         result = _resolve_env_secrets(config)
         assert result["telegram"]["bot_token"].get_secret_value() == "test-token"
 
-    def test_resolves_brave_search_key(self, monkeypatch):
-        monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "brave-key")
+    def test_resolves_parallel_search_key(self, monkeypatch):
+        monkeypatch.setenv("PARALLEL_API_KEY", "parallel-key")
         config = {
             "models": {"default": {"provider": "anthropic", "model": "test"}},
-            "brave_search": {},
+            "parallel_search": {},
         }
         result = _resolve_env_secrets(config)
-        assert result["brave_search"]["api_key"].get_secret_value() == "brave-key"
+        assert result["parallel_search"]["api_key"].get_secret_value() == "parallel-key"
 
     def test_does_not_override_existing_value(self, monkeypatch):
         from pydantic import SecretStr
@@ -628,26 +640,33 @@ class TestSkillAutoSyncConfig:
         )
         assert cfg.get_env_vars() == {"API_KEY": "secret"}
 
-    def test_skill_gog_enabled_applies_provider_defaults(self):
+    def test_skill_google_enabled_applies_provider_defaults(self):
         config = AshConfig.model_validate(
             {
                 "models": {"default": {"provider": "openai", "model": "test"}},
-                "skills": {"gog": {"enabled": True}},
+                "skills": {"google": {"enabled": True}},
             }
         )
-        assert config.skills["gog"].enabled is True
+        assert config.skills["google"].enabled is True
         provider = config.capabilities.providers["gog"]
         assert provider.enabled is True
         assert provider.namespace == "gog"
-        assert provider.command == ["gogcli", "bridge"]
+        import sys
+
+        assert provider.command == [
+            sys.executable,
+            "-m",
+            "ash.skills.bundled.gog.scripts.gogcli_bridge",
+            "bridge",
+        ]
         assert provider.timeout_seconds == 30.0
 
-    def test_skill_gog_provider_settings_override_provider_config(self):
+    def test_skill_google_provider_settings_override_provider_config(self):
         config = AshConfig.model_validate(
             {
                 "models": {"default": {"provider": "openai", "model": "test"}},
                 "skills": {
-                    "gog": {
+                    "google": {
                         "enabled": True,
                         "capability_provider": {
                             "enabled": True,

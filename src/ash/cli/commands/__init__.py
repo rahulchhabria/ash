@@ -10,6 +10,7 @@ from ash.cli.commands import (
     init,
     memory,
     people,
+    research,
     sandbox,
     schedule,
     serve,
@@ -17,6 +18,7 @@ from ash.cli.commands import (
     sessions,
     skill,
     stats,
+    todo,
     upgrade,
 )
 
@@ -30,6 +32,7 @@ __all__ = [
     "init",
     "memory",
     "people",
+    "research",
     "sandbox",
     "schedule",
     "serve",
@@ -37,5 +40,6 @@ __all__ = [
     "sessions",
     "skill",
     "stats",
+    "todo",
     "upgrade",
 ]

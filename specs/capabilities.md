@@ -56,6 +56,7 @@ per-user credential isolation rules.
 - Capability auth flow handles are short-lived, unguessable, and bound to the requesting user scope.
 - Capability execution emits structured audit events without logging raw bearer tokens.
 - Capability responses must never include raw credential artifacts (access tokens, refresh tokens, cookie jars, client secrets).
+- Provider auth `credential_material` must contain only opaque references/metadata (no raw tokens/secrets).
 - Provider-side credential artifacts must be persisted via a dedicated vault abstraction (not graph collections or sandbox-readable mounts).
 
 ### SHOULD
@@ -64,6 +65,8 @@ per-user credential isolation rules.
 - Capability-sidecar/runtime bridges reuse authenticated loopback bearer-token patterns.
 - Capability stores separate credential material from operation data/artifacts.
 - Flow completion should support callback URL ingestion and manual code fallback.
+- Headless deployments should use Device Authorization Grant (RFC 8628) for auth flows.
+  See `specs/capability-auth.md` for the device code flow spec.
 
 ### MAY
 
@@ -118,22 +121,23 @@ Capability providers are configured as bridge commands.
 For bundled `gog` dogfood, configure from the skill section:
 
 ```toml
-[skills.gog]
+[skills.google]
 enabled = true
 
-[skills.gog.capability_provider]
+[skills.google.capability_provider]
 enabled = true
 namespace = "gog"
 command = ["gogcli", "bridge"]
 timeout_seconds = 30
 ```
 
-`skills.gog.enabled = true` applies default `capabilities.providers.gog` wiring.
-Optional `skills.gog.capability_provider` values override command/namespace/timeout.
+`skills.google.enabled = true` applies default `capabilities.providers.gog` wiring.
+Optional `skills.google.capability_provider` values override command/namespace/timeout.
 Explicit `[capabilities.providers.gog]` remains available for host-level overrides.
 
 The host invokes the bridge with JSON over stdin/stdout for `definitions`,
-`auth_begin`, `auth_complete`, and `invoke`.
+`auth_begin`, `auth_complete`, `auth_poll`, and `invoke`.
+(`auth_poll` is defined in `specs/capability-auth.md`.)
 
 Skill metadata declares required capability IDs only; it does not select the
 provider command/container/runtime.
@@ -244,6 +248,7 @@ class CapabilityProvider(Protocol):
     async def definitions(self) -> list[CapabilityDefinition]: ...
     async def auth_begin(...) -> CapabilityAuthBeginResult: ...
     async def auth_complete(...) -> CapabilityAuthCompleteResult: ...
+    async def auth_poll(...) -> CapabilityAuthPollResult: ...  # specs/capability-auth.md
     async def invoke(...) -> dict[str, Any]: ...
 ```
 
@@ -253,6 +258,7 @@ Rules:
 - Provider responses are user-facing payloads and must be credential-safe.
 - Host rejects provider outputs containing credential-like keys (`access_token`,
   `refresh_token`, `id_token`, `client_secret`, cookie/auth headers).
+- Host rejects provider auth `credential_material` containing credential-like keys.
 
 ### RPC Methods
 
@@ -316,6 +322,11 @@ Response:
 #### `capability.auth.begin`
 
 Starts auth for a capability/account and returns an auth flow handle.
+For device code flow extensions (`flow_type`, `user_code`, `auth_poll`), see `specs/capability-auth.md`.
+
+If an unexpired pending auth flow already exists for the same caller scope
+(`effective_user_id`, `capability`, `account_hint`), the host returns that
+existing flow instead of creating a new one.
 
 Request params:
 
@@ -347,9 +358,17 @@ Request params:
 {
   "flow_id": "caf_01...",
   "callback_url": "https://localhost/callback?code=...",
+  "code": "optional-direct-auth-code",
   "context_token": "<signed-token>"
 }
 ```
+
+Normalization rules (host-owned, provider-independent):
+
+- Accept `code`, `callback_url`, or both.
+- If both are provided and disagree, fail with `capability_auth_code_conflict`.
+- If callback `state` is present and mismatches stored flow state, fail with `capability_auth_state_mismatch`.
+- If no usable code can be resolved, fail with `capability_auth_code_missing`.
 
 Response:
 
@@ -360,12 +379,53 @@ Response:
 }
 ```
 
+#### `capability.auth.list`
+
+Lists pending auth flows for the verified caller so follow-up callback/code messages can
+complete an existing flow without restarting auth.
+
+Request params:
+
+```json
+{
+  "capability": "gog.calendar",
+  "account_hint": "work",
+  "context_token": "<signed-token>"
+}
+```
+
+`capability` and `account_hint` are optional filters.
+
+Response:
+
+```json
+{
+  "flows": [
+    {
+      "flow_id": "caf_01...",
+      "capability": "gog.calendar",
+      "account_hint": "work",
+      "auth_url": "https://...",
+      "expires_at": "2026-02-24T20:10:00Z",
+      "flow_type": "authorization_code"
+    }
+  ]
+}
+```
+
+#### `capability.auth.poll`
+
+Polls a pending device code auth flow. See `specs/capability-auth.md` for full contract.
+
 ### Sandbox CLI Contract (`ash-sb capability`)
 
 - `ash-sb capability list`
 - `ash-sb capability invoke --capability <id> --operation <name> --input-json <json>`
 - `ash-sb capability auth begin --capability <id> [--account <hint>]`
+- `ash-sb capability auth list [--capability <id>] [--account <hint>]`
 - `ash-sb capability auth complete --flow-id <id> (--callback-url <url> | --code <code>)`
+- `ash-sb capability auth poll --flow-id <id> [--timeout <secs>] [--interval <secs>]`
+  (See `specs/capability-auth.md`.)
 
 All commands must use the same `ASH_CONTEXT_TOKEN` trust chain as other sandbox CLI
 commands. No direct credential env vars are a supported auth path.
@@ -411,6 +471,12 @@ See `specs/browser.md` for runtime bridge invariants.
 | Access denied by chat policy | `capability_access_denied` |
 | Auth required but missing | `capability_auth_required` |
 | Auth flow expired/invalid | `capability_auth_flow_invalid` |
+| Device auth flow expired | `capability_auth_flow_expired` |
+| Device auth flow denied by user | `capability_auth_flow_denied` |
+| Callback URL malformed | `capability_auth_callback_invalid` |
+| Callback/code mismatch | `capability_auth_code_conflict` |
+| Callback state mismatch | `capability_auth_state_mismatch` |
+| Missing authorization code | `capability_auth_code_missing` |
 | Invalid input schema | `capability_invalid_input` |
 | Upstream/provider unavailable | `capability_backend_unavailable` |
 

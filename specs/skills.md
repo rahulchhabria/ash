@@ -9,7 +9,7 @@ Files: src/ash/skills/base.py, src/ash/skills/registry.py, src/ash/tools/builtin
 Skills are markdown files that define specialized subagents. Unlike the current model where the main agent reads skill files, skills are now **invoked explicitly** via the `use_skill` tool and run in **isolated LLM loops** with scoped environments.
 
 This enables:
-- **API key isolation**: Skills declare needed env vars, config provides values
+- **Scoped env injection**: Skills declare non-secret env vars, config provides values
 - **Tool restrictions**: Skills can limit which tools the subagent uses
 - **Context compression**: Main agent passes relevant context, not full history
 - **Model flexibility**: Skills can specify different models (e.g., haiku for simple tasks)
@@ -34,7 +34,12 @@ skills consume those capabilities through stable public surfaces.
 
 ### MUST
 
-- Load workspace skills from `workspace/skills/`
+- Load skills from all sources in precedence order (later overrides earlier):
+  1. Bundled — built-in skills (lowest priority)
+  2. Integration — integration-provided skills (see `specs/integrations.md`)
+  3. Installed — externally installed from repos/local paths
+  4. User — `~/.ash/skills/`
+  5. Workspace — project-specific `workspace/skills/` (highest priority)
 - Load bundled skills from packaged source directories using the same parser and validation rules as other skill sources
 - Support directory format: `skills/<name>/SKILL.md` (preferred)
 - Support flat markdown: `skills/<name>.md` (convenience)
@@ -42,6 +47,7 @@ skills consume those capabilities through stable public surfaces.
 - Invoke skills via `use_skill` tool (not by reading files)
 - Run skill as subagent with isolated session
 - Inject env vars from config into skill execution
+- Block secret-like env var delivery to skills by policy
 - Support capability-mediated calls for sensitive external systems (contract in `specs/capabilities.md`)
 - Keep skill execution on public host interfaces; no direct integration hook registration path for skills
 - Treat bundled skills as regular skill surfaces (no privileged wiring semantics)
@@ -52,7 +58,7 @@ skills consume those capabilities through stable public surfaces.
 
 ### SHOULD
 
-- List available skills in system prompt (name + description only)
+- List available skills in system prompt (name + description + sandbox path when mounted)
 - Log skill invocations with iteration count
 - Support `enabled` flag in config to disable skills
 
@@ -86,7 +92,7 @@ access:
   chat_types:                   # Optional invocation chat-type allowlist
     - private
 env:                           # Env vars to inject from config
-  - PERPLEXITY_API_KEY
+  - SERVICE_ENDPOINT
 packages:                      # System packages to install (apt)
   - jq
   - curl
@@ -103,7 +109,7 @@ You are a research assistant with access to Perplexity AI.
 Given a research query, search for accurate, up-to-date information
 and return a structured summary with sources.
 
-Use the PERPLEXITY_API_KEY environment variable for API calls.
+Use the SERVICE_ENDPOINT environment variable for API calls.
 ```
 
 ### Capability-Backed Skills (Contract)
@@ -133,10 +139,10 @@ Capability IDs must be namespaced (for example `gog.email`, not `email`).
 Provider execution details are host-owned config, not skill metadata:
 
 ```toml
-[skills.gog]
+[skills.google]
 enabled = true
 
-[skills.gog.capability_provider]
+[skills.google.capability_provider]
 enabled = true
 namespace = "gog"
 command = ["gogcli", "bridge"]
@@ -153,7 +159,7 @@ declare container/command wiring.
 # ~/.ash/config.toml
 
 [skills.research]
-PERPLEXITY_API_KEY = "pplx-..."  # Direct match - injected as $PERPLEXITY_API_KEY
+SERVICE_ENDPOINT = "https://api.example.com"  # Direct match - injected as $SERVICE_ENDPOINT
 model = "haiku"                   # Override skill's default model
 enabled = true                    # Can disable without removing file
 allow_chat_ids = ["12345"]        # Optional per-skill chat allowlist override
@@ -161,10 +167,10 @@ allow_chat_ids = ["12345"]        # Optional per-skill chat allowlist override
 [skills.defaults]
 allow_chat_ids = ["12345"]        # Optional global default allowlist for all skills
 
-[skills.gog]
-enabled = true                    # Enables bundled gog skill and provider auto-wiring
+[skills.google]
+enabled = true                    # Enables bundled google skill and provider auto-wiring
 
-[skills.gog.capability_provider]
+[skills.google.capability_provider]
 enabled = true
 namespace = "gog"
 command = ["gogcli", "bridge"]
@@ -176,12 +182,13 @@ enabled = false                   # Disabled
 
 Config keys match env var names exactly (UPPER_CASE). No case conversion.
 `allow_chat_ids` can be set globally in `[skills.defaults]` and overridden per skill.
+Secret-like env var names are blocked by policy and must use host-managed capability/proxy auth.
 
-`[skills.gog].enabled = true` applies default `gog` provider wiring.
-`[skills.gog.capability_provider]` can override provider command/namespace/timeout
+`[skills.google].enabled = true` applies default `gog` provider wiring.
+`[skills.google.capability_provider]` can override provider command/namespace/timeout
 from the same skill section.
 
-Explicit `[skills.gog]` / `[capabilities.providers.gog]` values override preset defaults.
+Explicit `[skills.google]` / `[capabilities.providers.gog]` values override preset defaults.
 
 ### System Prompt Listing
 

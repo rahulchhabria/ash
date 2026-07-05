@@ -6,14 +6,22 @@ Spec contract: specs/capabilities.md.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import secrets
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
+from ash.capabilities.auth_normalization import (
+    AuthNormalizationError,
+    normalize_auth_completion,
+)
 from ash.capabilities.providers import (
     CapabilityAuthBeginResult,
+    CapabilityAuthCompleteInput,
     CapabilityAuthCompleteResult,
+    CapabilityAuthPollResult,
     CapabilityCallContext,
     CapabilityProvider,
 )
@@ -23,6 +31,8 @@ from ash.capabilities.types import (
     CapabilityDefinition,
     CapabilityInvokeResult,
 )
+from ash.chats import ChatStateManager
+from ash.config.paths import get_ash_home
 
 _NAMESPACED_CAPABILITY_ID = re.compile(r"^[a-z0-9][a-z0-9_-]*\.[a-z0-9][a-z0-9_-]*$")
 _NAMESPACE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
@@ -59,7 +69,7 @@ class CapabilityManager:
     def __init__(
         self,
         *,
-        auth_flow_ttl_seconds: int = 600,
+        auth_flow_ttl_seconds: int = 1800,
     ) -> None:
         self._lock = asyncio.Lock()
         self._definitions: dict[str, CapabilityDefinition] = {}
@@ -191,6 +201,11 @@ class CapabilityManager:
                 allowed = _is_chat_type_allowed(definition, normalized_chat_type)
                 if not include_unavailable and not allowed:
                     continue
+                linked_accounts = _linked_accounts_locked(
+                    self._accounts,
+                    user_id=normalized_user_id,
+                    capability_id=definition.id,
+                )
                 requires_auth = any(
                     operation.requires_auth
                     for operation in definition.operations.values()
@@ -203,11 +218,8 @@ class CapabilityManager:
                         "allowed_chat_types": _effective_allowed_chat_types(definition),
                         "available": allowed,
                         "requires_auth": requires_auth,
-                        "authenticated": _has_account_locked(
-                            self._accounts,
-                            user_id=normalized_user_id,
-                            capability_id=definition.id,
-                        ),
+                        "authenticated": bool(linked_accounts),
+                        "linked_accounts": linked_accounts,
                         "operations": sorted(definition.operations),
                     }
                 )
@@ -249,6 +261,13 @@ class CapabilityManager:
                 normalized_capability_id
             )
             _assert_chat_type_allowed(definition, normalized_chat_type)
+            existing_flow = self._find_pending_auth_flow_locked(
+                user_id=normalized_user_id,
+                capability_id=normalized_capability_id,
+                account_hint=normalized_account_hint,
+            )
+            if existing_flow is not None:
+                return _auth_begin_response(existing_flow)
 
         call_context = CapabilityCallContext(
             user_id=normalized_user_id,
@@ -271,21 +290,62 @@ class CapabilityManager:
         expires_at = begin_result.expires_at or (
             datetime.now(UTC) + timedelta(seconds=self._auth_flow_ttl_seconds)
         )
+        flow_type = begin_result.flow_type or "authorization_code"
+        flow = CapabilityAuthFlow(
+            flow_id=flow_id,
+            capability_id=normalized_capability_id,
+            user_id=normalized_user_id,
+            account_hint=normalized_account_hint,
+            expires_at=expires_at,
+            auth_url=begin_result.auth_url,
+            flow_state=dict(begin_result.flow_state),
+            flow_type=flow_type,
+            user_code=begin_result.user_code,
+            poll_interval_seconds=begin_result.poll_interval_seconds,
+            expected_callback_state=begin_result.expected_callback_state,
+        )
         async with self._lock:
-            self._auth_flows[flow_id] = CapabilityAuthFlow(
-                flow_id=flow_id,
-                capability_id=normalized_capability_id,
-                user_id=normalized_user_id,
-                account_hint=normalized_account_hint,
-                expires_at=expires_at,
-                flow_state=dict(begin_result.flow_state),
-            )
+            self._auth_flows[flow_id] = flow
 
-        return {
-            "flow_id": flow_id,
-            "auth_url": begin_result.auth_url,
-            "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
-        }
+        return _auth_begin_response(flow)
+
+    async def list_auth_flows(
+        self,
+        *,
+        user_id: str,
+        capability_id: str | None = None,
+        account_hint: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List pending auth flows for the caller."""
+        normalized_user_id = _required_text(
+            value=user_id,
+            code="capability_invalid_input",
+            message="user_id is required",
+        )
+        normalized_capability_id = (
+            _required_capability_id(capability_id)
+            if capability_id is not None
+            else None
+        )
+        normalized_account_hint = _optional_text(account_hint)
+
+        async with self._lock:
+            self._prune_expired_flows_locked()
+            matches = [
+                flow
+                for flow in self._auth_flows.values()
+                if flow.user_id == normalized_user_id
+                and (
+                    normalized_capability_id is None
+                    or flow.capability_id == normalized_capability_id
+                )
+                and (
+                    normalized_account_hint is None
+                    or flow.account_hint == normalized_account_hint
+                )
+            ]
+            matches.sort(key=lambda flow: flow.expires_at, reverse=True)
+            return [_auth_begin_response(flow) for flow in matches]
 
     async def auth_complete(
         self,
@@ -322,11 +382,6 @@ class CapabilityManager:
         normalized_source_display_name = _optional_text(source_display_name)
         normalized_callback_url = _optional_text(callback_url)
         normalized_code = _optional_text(code)
-        if not normalized_callback_url and not normalized_code:
-            raise CapabilityError(
-                "capability_invalid_input",
-                "either callback_url or code is required",
-            )
 
         async with self._lock:
             self._prune_expired_flows_locked()
@@ -344,6 +399,14 @@ class CapabilityManager:
             _, provider_impl = self._get_definition_and_provider_locked(
                 flow.capability_id
             )
+        try:
+            normalized_completion = normalize_auth_completion(
+                callback_url=normalized_callback_url,
+                code=normalized_code,
+                expected_state=flow.expected_callback_state,
+            )
+        except AuthNormalizationError as e:
+            raise CapabilityError(e.code, str(e)) from e
 
         call_context = CapabilityCallContext(
             user_id=normalized_user_id,
@@ -359,8 +422,11 @@ class CapabilityManager:
             provider_impl,
             capability_id=flow.capability_id,
             flow_state=dict(flow.flow_state),
-            callback_url=normalized_callback_url,
-            code=normalized_code,
+            completion=CapabilityAuthCompleteInput(
+                authorization_code=normalized_completion.authorization_code,
+                raw_callback_url=normalized_completion.raw_callback_url,
+                state=normalized_completion.state,
+            ),
             account_hint=flow.account_hint,
             context=call_context,
         )
@@ -370,6 +436,12 @@ class CapabilityManager:
             code="capability_invalid_output",
             message="auth completion must return account_ref",
         )
+        credential_material = dict(complete_result.credential_material)
+        if _find_sensitive_key_path(credential_material, path="credential_material"):
+            raise CapabilityError(
+                "capability_invalid_output",
+                "provider auth completion returned credential material",
+            )
         now = datetime.now(UTC)
         async with self._lock:
             self._accounts[(flow.user_id, flow.capability_id, account_ref)] = (
@@ -378,13 +450,230 @@ class CapabilityManager:
                     user_id=flow.user_id,
                     account_ref=account_ref,
                     created_at=now,
-                    credential_material=dict(complete_result.credential_material),
+                    credential_material=credential_material,
                     metadata=dict(complete_result.metadata),
                 )
             )
             del self._auth_flows[normalized_flow_id]
 
         return {"ok": True, "account_ref": account_ref}
+
+    async def auth_complete_callback(
+        self,
+        *,
+        user_id: str,
+        callback_url: str | None = None,
+        code: str | None = None,
+        capability_id: str | None = None,
+        account_hint: str | None = None,
+        chat_id: str | None = None,
+        chat_type: str | None = None,
+        provider: str | None = None,
+        thread_id: str | None = None,
+        session_key: str | None = None,
+        source_username: str | None = None,
+        source_display_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Complete pending auth by callback URL/code with host-side flow resolution.
+
+        Prefers deterministic state matching when callback state is present.
+        """
+        normalized_user_id = _required_text(
+            value=user_id,
+            code="capability_invalid_input",
+            message="user_id is required",
+        )
+        normalized_capability_id = (
+            _required_capability_id(capability_id)
+            if capability_id is not None
+            else None
+        )
+        normalized_account_hint = _optional_text(account_hint)
+        normalized_chat_id = _optional_text(chat_id)
+        normalized_chat_type = _optional_text(chat_type)
+        normalized_provider = _optional_text(provider)
+        normalized_thread_id = _optional_text(thread_id)
+        normalized_session_key = _optional_text(session_key)
+        normalized_source_username = _optional_text(source_username)
+        normalized_source_display_name = _optional_text(source_display_name)
+
+        try:
+            normalized_completion = normalize_auth_completion(
+                callback_url=_optional_text(callback_url),
+                code=_optional_text(code),
+                expected_state=None,
+            )
+        except AuthNormalizationError as e:
+            raise CapabilityError(e.code, str(e)) from e
+
+        callback_state = _optional_text(normalized_completion.state)
+
+        async with self._lock:
+            self._prune_expired_flows_locked()
+            eligible = [
+                flow
+                for flow in self._auth_flows.values()
+                if flow.user_id == normalized_user_id
+                and (
+                    normalized_capability_id is None
+                    or flow.capability_id == normalized_capability_id
+                )
+                and (
+                    normalized_account_hint is None
+                    or flow.account_hint == normalized_account_hint
+                )
+            ]
+
+            if not eligible:
+                raise CapabilityError(
+                    "capability_auth_flow_invalid",
+                    "no pending auth flows match caller scope",
+                )
+
+            selected: CapabilityAuthFlow | None = None
+            if callback_state is not None:
+                state_matches = [
+                    flow
+                    for flow in eligible
+                    if _optional_text(flow.expected_callback_state) == callback_state
+                ]
+                if not state_matches:
+                    raise CapabilityError(
+                        "capability_auth_state_mismatch",
+                        "callback_url state does not match auth flow",
+                    )
+                if len(state_matches) > 1:
+                    raise CapabilityError(
+                        "capability_auth_flow_ambiguous",
+                        "multiple pending auth flows matched callback state",
+                    )
+                selected = state_matches[0]
+            elif len(eligible) == 1:
+                selected = eligible[0]
+            else:
+                raise CapabilityError(
+                    "capability_auth_flow_ambiguous",
+                    "multiple pending auth flows; callback state is required",
+                )
+
+        result = await self.auth_complete(
+            flow_id=selected.flow_id,
+            user_id=normalized_user_id,
+            chat_id=normalized_chat_id,
+            chat_type=normalized_chat_type,
+            provider=normalized_provider,
+            thread_id=normalized_thread_id,
+            session_key=normalized_session_key,
+            source_username=normalized_source_username,
+            source_display_name=normalized_source_display_name,
+            callback_url=normalized_completion.raw_callback_url,
+            code=normalized_completion.authorization_code,
+        )
+        return {
+            "ok": bool(result.get("ok")),
+            "account_ref": result.get("account_ref"),
+            "flow_id": selected.flow_id,
+            "capability": selected.capability_id,
+            "account_hint": selected.account_hint,
+        }
+
+    async def auth_poll(
+        self,
+        *,
+        flow_id: str,
+        user_id: str,
+        chat_id: str | None = None,
+        chat_type: str | None = None,
+        provider: str | None = None,
+        thread_id: str | None = None,
+        session_key: str | None = None,
+        source_username: str | None = None,
+        source_display_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Poll a pending device code auth flow."""
+        normalized_user_id = _required_text(
+            value=user_id,
+            code="capability_invalid_input",
+            message="user_id is required",
+        )
+        normalized_flow_id = _required_text(
+            value=flow_id,
+            code="capability_invalid_input",
+            message="flow_id is required",
+        )
+
+        async with self._lock:
+            self._prune_expired_flows_locked()
+            flow = self._auth_flows.get(normalized_flow_id)
+            if flow is None:
+                raise CapabilityError(
+                    "capability_auth_flow_invalid",
+                    f"auth flow is invalid or expired: {normalized_flow_id}",
+                )
+            if flow.user_id != normalized_user_id:
+                raise CapabilityError(
+                    "capability_auth_flow_invalid",
+                    "auth flow does not belong to caller",
+                )
+            if flow.flow_type != "device_code":
+                raise CapabilityError(
+                    "capability_invalid_input",
+                    "auth_poll is only supported for device_code flows",
+                )
+            _, provider_impl = self._get_definition_and_provider_locked(
+                flow.capability_id
+            )
+
+        call_context = CapabilityCallContext(
+            user_id=normalized_user_id,
+            chat_id=_optional_text(chat_id),
+            chat_type=_optional_text(chat_type),
+            provider=_optional_text(provider),
+            thread_id=_optional_text(thread_id),
+            session_key=_optional_text(session_key),
+            source_username=_optional_text(source_username),
+            source_display_name=_optional_text(source_display_name),
+        )
+        poll_result = await self._provider_auth_poll(
+            provider_impl,
+            capability_id=flow.capability_id,
+            flow_state=dict(flow.flow_state),
+            context=call_context,
+        )
+
+        if poll_result.status == "complete":
+            account_ref = _required_text(
+                value=poll_result.account_ref,
+                code="capability_invalid_output",
+                message="auth poll completion must return account_ref",
+            )
+            credential_material = dict(poll_result.credential_material)
+            if _find_sensitive_key_path(
+                credential_material, path="credential_material"
+            ):
+                raise CapabilityError(
+                    "capability_invalid_output",
+                    "provider auth poll returned credential material",
+                )
+            now = datetime.now(UTC)
+            async with self._lock:
+                self._accounts[(flow.user_id, flow.capability_id, account_ref)] = (
+                    CapabilityAccount(
+                        capability_id=flow.capability_id,
+                        user_id=flow.user_id,
+                        account_ref=account_ref,
+                        created_at=now,
+                        credential_material=credential_material,
+                        metadata=dict(poll_result.metadata),
+                    )
+                )
+                del self._auth_flows[normalized_flow_id]
+            return {"ok": True, "account_ref": account_ref}
+
+        return {
+            "status": "pending",
+            "retry_after_seconds": poll_result.retry_after_seconds,
+        }
 
     async def invoke(
         self,
@@ -401,6 +690,9 @@ class CapabilityManager:
         source_username: str | None = None,
         source_display_name: str | None = None,
         idempotency_key: str | None = None,
+        account_ref: str | None = None,
+        mutation_plan_id: str | None = None,
+        target_fingerprint: str | None = None,
     ) -> CapabilityInvokeResult:
         """Invoke one capability operation under caller scope."""
         normalized_user_id = _required_text(
@@ -422,6 +714,9 @@ class CapabilityManager:
         normalized_source_username = _optional_text(source_username)
         normalized_source_display_name = _optional_text(source_display_name)
         normalized_idempotency_key = _optional_text(idempotency_key)
+        normalized_account_ref = _optional_text(account_ref)
+        normalized_mutation_plan_id = _optional_text(mutation_plan_id)
+        normalized_target_fingerprint = _optional_text(target_fingerprint)
 
         account_ref: str | None = None
         provider_impl: CapabilityProvider | None = None
@@ -443,17 +738,37 @@ class CapabilityManager:
                 )
 
             if op.requires_auth:
-                account_ref = _first_account_ref_locked(
+                account_refs = _account_refs_locked(
                     self._accounts,
                     user_id=normalized_user_id,
                     capability_id=normalized_capability_id,
                 )
-                if account_ref is None:
+                if not account_refs:
                     raise CapabilityError(
                         "capability_auth_required",
                         (
                             "capability requires auth for caller scope; run "
                             "capability.auth.begin and capability.auth.complete first"
+                        ),
+                    )
+                if normalized_account_ref is not None:
+                    if normalized_account_ref not in account_refs:
+                        raise CapabilityError(
+                            "capability_auth_required",
+                            (
+                                "capability account is not linked for caller scope: "
+                                f"{normalized_account_ref}"
+                            ),
+                        )
+                    account_ref = normalized_account_ref
+                elif len(account_refs) == 1:
+                    account_ref = account_refs[0]
+                else:
+                    raise CapabilityError(
+                        "capability_account_ambiguous",
+                        (
+                            "multiple linked accounts for caller scope; "
+                            f"specify account_ref from: {', '.join(account_refs)}"
                         ),
                     )
 
@@ -467,6 +782,22 @@ class CapabilityManager:
             source_username=normalized_source_username,
             source_display_name=normalized_source_display_name,
         )
+        confirmed_plan_id: str | None = None
+        if _requires_mutation_confirmation(
+            capability_id=normalized_capability_id,
+            operation=normalized_operation,
+            provider=normalized_provider,
+            mutating=bool(op.mutating),
+        ):
+            confirmed_plan_id = _assert_mutation_confirmation_proof(
+                chat_id=normalized_chat_id,
+                thread_id=normalized_thread_id,
+                capability_id=normalized_capability_id,
+                operation=normalized_operation,
+                mutation_plan_id=normalized_mutation_plan_id,
+                target_fingerprint=normalized_target_fingerprint,
+            )
+
         raw_output = await self._provider_invoke(
             provider_impl,
             capability_id=normalized_capability_id,
@@ -484,6 +815,11 @@ class CapabilityManager:
             )
 
         request_id = f"cap_{secrets.token_hex(8)}"
+        if confirmed_plan_id and normalized_chat_id:
+            _mark_mutation_plan_executed(
+                chat_id=normalized_chat_id,
+                plan_id=confirmed_plan_id,
+            )
 
         return CapabilityInvokeResult(
             request_id=request_id,
@@ -514,6 +850,24 @@ class CapabilityManager:
         provider_impl = self._providers.get(provider_name) if provider_name else None
         return definition, provider_impl
 
+    def _find_pending_auth_flow_locked(
+        self,
+        *,
+        user_id: str,
+        capability_id: str,
+        account_hint: str | None,
+    ) -> CapabilityAuthFlow | None:
+        matches = [
+            flow
+            for flow in self._auth_flows.values()
+            if flow.user_id == user_id
+            and flow.capability_id == capability_id
+            and flow.account_hint == account_hint
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda flow: flow.expires_at)
+
     async def _provider_auth_begin(
         self,
         provider_impl: CapabilityProvider | None,
@@ -543,6 +897,29 @@ class CapabilityManager:
             auth_url=auth_url,
             expires_at=result.expires_at,
             flow_state=dict(result.flow_state),
+            flow_type=result.flow_type or "authorization_code",
+            user_code=result.user_code,
+            poll_interval_seconds=result.poll_interval_seconds,
+            expected_callback_state=result.expected_callback_state,
+        )
+
+    async def _provider_auth_poll(
+        self,
+        provider_impl: CapabilityProvider | None,
+        *,
+        capability_id: str,
+        flow_state: dict[str, Any],
+        context: CapabilityCallContext,
+    ) -> CapabilityAuthPollResult:
+        if provider_impl is None:
+            raise CapabilityError(
+                "capability_invalid_input",
+                "auth_poll requires a provider-backed capability",
+            )
+        return await provider_impl.auth_poll(
+            capability_id=capability_id,
+            flow_state=flow_state,
+            context=context,
         )
 
     async def _provider_auth_complete(
@@ -551,8 +928,7 @@ class CapabilityManager:
         *,
         capability_id: str,
         flow_state: dict[str, Any],
-        callback_url: str | None,
-        code: str | None,
+        completion: CapabilityAuthCompleteInput,
         account_hint: str | None,
         context: CapabilityCallContext,
     ) -> CapabilityAuthCompleteResult:
@@ -563,8 +939,7 @@ class CapabilityManager:
         return await provider_impl.auth_complete(
             capability_id=capability_id,
             flow_state=flow_state,
-            callback_url=callback_url,
-            code=code,
+            completion=completion,
             context=context,
         )
 
@@ -617,6 +992,12 @@ def _optional_text(value: str | None) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _stringish(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
 
 
 def _required_text(*, value: str | None, code: str, message: str) -> str:
@@ -702,20 +1083,60 @@ def _has_account_locked(
     return False
 
 
-def _first_account_ref_locked(
+def _account_refs_locked(
     accounts: dict[tuple[str, str, str], CapabilityAccount],
     *,
     user_id: str,
     capability_id: str,
-) -> str | None:
+) -> list[str]:
     refs = [
         account_ref
         for account_user, account_capability, account_ref in accounts
         if account_user == user_id and account_capability == capability_id
     ]
-    if not refs:
-        return None
-    return sorted(refs)[0]
+    return sorted(refs)
+
+
+def _linked_accounts_locked(
+    accounts: dict[tuple[str, str, str], CapabilityAccount],
+    *,
+    user_id: str,
+    capability_id: str,
+) -> list[dict[str, Any]]:
+    linked: list[dict[str, Any]] = []
+    for (account_user, account_capability, account_ref), account in sorted(
+        accounts.items(), key=lambda item: item[0][2]
+    ):
+        if account_user != user_id or account_capability != capability_id:
+            continue
+        metadata = account.metadata
+        account_name = _optional_text(_stringish(metadata.get("account_name")))
+        account_email = _optional_text(_stringish(metadata.get("account_email")))
+        linked.append(
+            {
+                "account_ref": account_ref,
+                "account_name": account_name,
+                "account_email": account_email,
+                "created_at": account.created_at.isoformat().replace("+00:00", "Z"),
+            }
+        )
+    return linked
+
+
+def _auth_begin_response(flow: CapabilityAuthFlow) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "flow_id": flow.flow_id,
+        "capability": flow.capability_id,
+        "account_hint": flow.account_hint,
+        "auth_url": flow.auth_url,
+        "expires_at": flow.expires_at.isoformat().replace("+00:00", "Z"),
+        "flow_type": flow.flow_type,
+    }
+    if flow.user_code is not None:
+        result["user_code"] = flow.user_code
+    if flow.poll_interval_seconds is not None:
+        result["poll_interval_seconds"] = flow.poll_interval_seconds
+    return result
 
 
 def _find_sensitive_key_path(value: Any, path: str = "output") -> str | None:
@@ -743,6 +1164,72 @@ def _find_sensitive_key_path(value: Any, path: str = "output") -> str | None:
     return None
 
 
+def _requires_mutation_confirmation(
+    *,
+    capability_id: str,
+    operation: str,
+    provider: str | None,
+    mutating: bool,
+) -> bool:
+    if not mutating:
+        return False
+    if provider != "telegram":
+        return False
+    return capability_id == "gog.email" and operation in {
+        "archive_messages",
+        "update_labels",
+    }
+
+
+def _assert_mutation_confirmation_proof(
+    *,
+    chat_id: str | None,
+    thread_id: str | None,
+    capability_id: str,
+    operation: str,
+    mutation_plan_id: str | None,
+    target_fingerprint: str | None,
+) -> str:
+    normalized_chat_id = _optional_text(chat_id)
+    if normalized_chat_id is None:
+        raise CapabilityError(
+            "capability_mutation_not_confirmed",
+            "mutating operation requires chat-scoped confirmation proof",
+        )
+
+    manager = ChatStateManager(provider="telegram", chat_id=normalized_chat_id)
+    state = manager.load()
+    state.prune_expired_mutation_confirmations()
+    confirmed = state.find_confirmed_mutation(
+        capability_id=capability_id,
+        operation=operation,
+        target_fingerprint=target_fingerprint,
+        thread_id=thread_id,
+    )
+    if confirmed is None:
+        raise CapabilityError(
+            "capability_mutation_not_confirmed",
+            (
+                "mutation requires prior confirmation in chat history; "
+                "show targets and get explicit user confirm first"
+            ),
+        )
+    if mutation_plan_id and mutation_plan_id != confirmed.plan_id:
+        raise CapabilityError(
+            "capability_mutation_plan_mismatch",
+            "provided mutation_plan_id does not match confirmed chat plan",
+        )
+    manager.save()
+    return confirmed.plan_id
+
+
+def _mark_mutation_plan_executed(*, chat_id: str, plan_id: str) -> None:
+    manager = ChatStateManager(provider="telegram", chat_id=chat_id)
+    state = manager.load()
+    if state.mark_mutation_executed(plan_id=plan_id):
+        manager.save()
+
+
 async def create_capability_manager(
     *,
     providers: list[CapabilityProvider] | None = None,
@@ -751,4 +1238,76 @@ async def create_capability_manager(
     manager = CapabilityManager()
     for provider in providers or []:
         await manager.register_provider(provider)
+    _restore_persisted_gog_accounts(manager)
     return manager
+
+
+def _restore_persisted_gog_accounts(manager: CapabilityManager) -> None:
+    """Hydrate persisted gog account links so auth survives service restarts."""
+    if not any(capability_id.startswith("gog.") for capability_id in manager._definitions):
+        return
+
+    state_path = get_ash_home() / "gogcli" / "state.json"
+    state = _load_json_file(state_path)
+    raw_accounts = state.get("accounts")
+    if not isinstance(raw_accounts, dict):
+        return
+
+    for raw_key, raw_account in raw_accounts.items():
+        if not isinstance(raw_key, str) or not isinstance(raw_account, dict):
+            continue
+        try:
+            user_id, capability_id, account_ref = raw_key.split(":", 2)
+        except ValueError:
+            continue
+        if not capability_id.startswith("gog.") or capability_id not in manager._definitions:
+            continue
+
+        manager._accounts[(user_id, capability_id, account_ref)] = CapabilityAccount(
+            capability_id=capability_id,
+            user_id=user_id,
+            account_ref=account_ref,
+            created_at=_restore_account_created_at(raw_account),
+            credential_material={},
+            metadata={
+                "account_name": raw_account.get("account_name"),
+                "account_email": raw_account.get("account_email"),
+                "google_sub": raw_account.get("google_sub"),
+                "provider": raw_account.get("provider"),
+                "vault_ref": raw_account.get("vault_ref"),
+            },
+        )
+
+
+def _load_json_file(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _restore_account_created_at(raw_account: dict[str, Any]) -> datetime:
+    for key in ("updated_at", "created_at"):
+        value = raw_account.get(key)
+        parsed = _parse_account_timestamp(value)
+        if parsed is not None:
+            return parsed
+    return datetime.now(UTC)
+
+
+def _parse_account_timestamp(value: Any) -> datetime | None:
+    if isinstance(value, int | float):
+        try:
+            return datetime.fromtimestamp(float(value), UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(UTC)
+        except ValueError:
+            return None
+    return None

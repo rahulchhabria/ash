@@ -7,8 +7,11 @@ from typing import Any
 import pytest
 
 from ash.capabilities import (
+    CapabilityAccount,
     CapabilityAuthBeginResult,
+    CapabilityAuthCompleteInput,
     CapabilityAuthCompleteResult,
+    CapabilityAuthPollResult,
     CapabilityCallContext,
     CapabilityDefinition,
     CapabilityError,
@@ -16,6 +19,8 @@ from ash.capabilities import (
     create_capability_manager,
 )
 from ash.capabilities.types import CapabilityOperation
+from ash.chats import ChatStateManager
+from ash.config.paths import get_ash_home
 
 
 @dataclass
@@ -68,22 +73,20 @@ class _RecordingProvider:
         *,
         capability_id: str,
         flow_state: dict[str, Any],
-        callback_url: str | None,
-        code: str | None,
+        completion: CapabilityAuthCompleteInput,
         context: CapabilityCallContext,
     ) -> CapabilityAuthCompleteResult:
         self.complete_calls.append(
             {
                 "capability_id": capability_id,
                 "flow_state": flow_state,
-                "callback_url": callback_url,
-                "code": code,
+                "completion": completion,
                 "context": context,
             }
         )
         return CapabilityAuthCompleteResult(
             account_ref="acct_work",
-            credential_material={"refresh_token": "rt-provider-only"},
+            credential_material={"credential_key": "cred-provider-only"},
             metadata={"account_name": "Work"},
         )
 
@@ -117,6 +120,15 @@ class _RecordingProvider:
             "context_user": context.user_id,
         }
 
+    async def auth_poll(
+        self,
+        *,
+        capability_id: str,
+        flow_state: dict[str, Any],
+        context: CapabilityCallContext,
+    ) -> CapabilityAuthPollResult:
+        return CapabilityAuthPollResult(status="pending", retry_after_seconds=5)
+
 
 class _PartiallyInvalidProvider(_RecordingProvider):
     async def definitions(self) -> list[CapabilityDefinition]:
@@ -145,6 +157,68 @@ class _PartiallyInvalidProvider(_RecordingProvider):
                 },
             ),
         ]
+
+
+@dataclass
+class _MutatingRecordingProvider(_RecordingProvider):
+    async def definitions(self) -> list[CapabilityDefinition]:
+        return [
+            CapabilityDefinition(
+                id=self.capability_id,
+                description="Provider-backed email operations",
+                sensitive=True,
+                operations={
+                    "list_messages": CapabilityOperation(
+                        name="list_messages",
+                        description="List inbox messages",
+                        requires_auth=True,
+                    ),
+                    "archive_messages": CapabilityOperation(
+                        name="archive_messages",
+                        description="Archive inbox messages",
+                        requires_auth=True,
+                        mutating=True,
+                    ),
+                    "update_labels": CapabilityOperation(
+                        name="update_labels",
+                        description="Update message labels",
+                        requires_auth=True,
+                        mutating=True,
+                    ),
+                },
+            )
+        ]
+
+
+@dataclass
+class _SensitivePollProvider(_RecordingProvider):
+    async def auth_begin(
+        self,
+        *,
+        capability_id: str,
+        account_hint: str | None,
+        context: CapabilityCallContext,
+    ) -> CapabilityAuthBeginResult:
+        _ = (capability_id, account_hint, context)
+        return CapabilityAuthBeginResult(
+            auth_url="https://auth.example/device",
+            flow_type="device_code",
+            flow_state={"flow_nonce": "nonce-2"},
+        )
+
+    async def auth_poll(
+        self,
+        *,
+        capability_id: str,
+        flow_state: dict[str, Any],
+        context: CapabilityCallContext,
+    ) -> CapabilityAuthPollResult:
+        _ = (capability_id, flow_state, context)
+        return CapabilityAuthPollResult(
+            status="complete",
+            account_ref="acct_work",
+            credential_material={"refresh_token": "leak"},
+        )
 
 
 @pytest.fixture
@@ -295,6 +369,377 @@ async def test_invoke_requires_auth_and_enforces_user_isolation(
 
 
 @pytest.mark.asyncio
+async def test_invoke_requires_explicit_account_when_multiple_are_linked() -> None:
+    manager = CapabilityManager(auth_flow_ttl_seconds=300)
+    await manager.register_provider(_RecordingProvider(namespace="gog"))
+
+    begin_work = await manager.auth_begin(
+        capability_id="gog.email",
+        user_id="user-1",
+        chat_type="private",
+        account_hint="work",
+    )
+    await manager.auth_complete(
+        flow_id=begin_work["flow_id"],
+        user_id="user-1",
+        callback_url="https://localhost/callback?code=abc",
+        code=None,
+    )
+
+    manager._accounts[("user-1", "gog.email", "acct_personal")] = CapabilityAccount(
+        capability_id="gog.email",
+        user_id="user-1",
+        account_ref="acct_personal",
+        created_at=datetime.now(UTC),
+        metadata={"account_name": "Personal"},
+    )
+
+    with pytest.raises(CapabilityError) as exc_info:
+        await manager.invoke(
+            capability_id="gog.email",
+            operation="list_messages",
+            input_data={"folder": "inbox"},
+            user_id="user-1",
+            chat_type="private",
+        )
+    assert exc_info.value.code == "capability_account_ambiguous"
+
+    result = await manager.invoke(
+        capability_id="gog.email",
+        operation="list_messages",
+        input_data={"folder": "inbox"},
+        user_id="user-1",
+        chat_type="private",
+        account_ref="acct_work",
+    )
+    assert result.output["account_ref"] == "acct_work"
+
+
+@pytest.mark.asyncio
+async def test_create_capability_manager_restores_gog_accounts_from_state(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ASH_HOME", str(tmp_path))
+    get_ash_home.cache_clear()
+    state_dir = tmp_path / "gogcli"
+    state_dir.mkdir(parents=True)
+    (state_dir / "state.json").write_text(
+        """
+{
+  "accounts": {
+    "user-1:gog.email:default": {
+      "account_email": "parent@example.com",
+      "account_name": "Parent",
+      "created_at": 1773525614,
+      "google_sub": "google-sub-1",
+      "provider": "telegram",
+      "updated_at": 1773525614,
+      "vault_ref": "vault:v1:gog.credentials:abc123"
+    }
+  }
+}
+""".strip()
+        + "\n"
+    )
+    provider = _RecordingProvider(namespace="gog")
+
+    try:
+        manager = await create_capability_manager(providers=[provider])
+        result = await manager.invoke(
+            capability_id="gog.email",
+            operation="list_messages",
+            input_data={"folder": "inbox"},
+            user_id="user-1",
+            chat_type="private",
+            account_ref="default",
+        )
+    finally:
+        get_ash_home.cache_clear()
+
+    assert result.output["account_ref"] == "default"
+    assert provider.invoke_calls[-1]["context"].user_id == "user-1"
+
+
+@pytest.mark.asyncio
+async def test_list_capabilities_includes_linked_account_metadata() -> None:
+    manager = CapabilityManager(auth_flow_ttl_seconds=300)
+    await manager.register_provider(_RecordingProvider(namespace="gog"))
+
+    begin = await manager.auth_begin(
+        capability_id="gog.email",
+        user_id="user-1",
+        chat_type="private",
+        account_hint="work",
+    )
+    await manager.auth_complete(
+        flow_id=begin["flow_id"],
+        user_id="user-1",
+        callback_url="https://localhost/callback?code=abc",
+        code=None,
+    )
+
+    capabilities = await manager.list_capabilities(
+        user_id="user-1",
+        chat_type="private",
+    )
+    email = next(row for row in capabilities if row["id"] == "gog.email")
+    assert email["authenticated"] is True
+    assert email["linked_accounts"] == [
+        {
+            "account_ref": "acct_work",
+            "account_name": "Work",
+            "account_email": None,
+            "created_at": email["linked_accounts"][0]["created_at"],
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_auth_complete_requires_code_or_callback_code() -> None:
+    manager = CapabilityManager(auth_flow_ttl_seconds=300)
+    await manager.register_provider(_RecordingProvider(namespace="gog"))
+    begin = await manager.auth_begin(
+        capability_id="gog.email",
+        user_id="user-1",
+        chat_type="private",
+        account_hint="work",
+    )
+
+    with pytest.raises(CapabilityError) as exc_info:
+        await manager.auth_complete(
+            flow_id=begin["flow_id"],
+            user_id="user-1",
+            callback_url=None,
+            code=None,
+        )
+    assert exc_info.value.code == "capability_auth_code_missing"
+
+
+@pytest.mark.asyncio
+async def test_auth_complete_rejects_conflicting_code_sources() -> None:
+    manager = CapabilityManager(auth_flow_ttl_seconds=300)
+    await manager.register_provider(_RecordingProvider(namespace="gog"))
+    begin = await manager.auth_begin(
+        capability_id="gog.email",
+        user_id="user-1",
+        chat_type="private",
+        account_hint="work",
+    )
+
+    with pytest.raises(CapabilityError) as exc_info:
+        await manager.auth_complete(
+            flow_id=begin["flow_id"],
+            user_id="user-1",
+            callback_url="https://localhost/callback?code=abc",
+            code="def",
+        )
+    assert exc_info.value.code == "capability_auth_code_conflict"
+
+
+@pytest.mark.asyncio
+async def test_auth_complete_rejects_callback_state_mismatch() -> None:
+    manager = CapabilityManager(auth_flow_ttl_seconds=300)
+    await manager.register_provider(_RecordingProvider(namespace="gog"))
+    begin = await manager.auth_begin(
+        capability_id="gog.email",
+        user_id="user-1",
+        chat_type="private",
+        account_hint="work",
+    )
+
+    flow_id = str(begin["flow_id"])
+    manager._auth_flows[flow_id].expected_callback_state = "expected-state"
+
+    with pytest.raises(CapabilityError) as exc_info:
+        await manager.auth_complete(
+            flow_id=flow_id,
+            user_id="user-1",
+            callback_url="https://localhost/callback?state=other&code=abc",
+            code=None,
+        )
+    assert exc_info.value.code == "capability_auth_state_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_auth_complete_accepts_callback_url_in_code_field() -> None:
+    manager = CapabilityManager(auth_flow_ttl_seconds=300)
+    provider = _RecordingProvider(namespace="gog")
+    await manager.register_provider(provider)
+    begin = await manager.auth_begin(
+        capability_id="gog.email",
+        user_id="user-1",
+        chat_type="private",
+        account_hint="work",
+    )
+
+    flow_id = str(begin["flow_id"])
+    manager._auth_flows[flow_id].expected_callback_state = "expected-state"
+    callback = "http://localhost/?state=expected-state&code=abc123&scope=mail"
+
+    result = await manager.auth_complete(
+        flow_id=flow_id,
+        user_id="user-1",
+        callback_url=None,
+        code=callback,
+    )
+
+    assert result["ok"] is True
+    completion = provider.complete_calls[0]["completion"]
+    assert completion.authorization_code == "abc123"
+    assert completion.raw_callback_url == callback
+
+
+@pytest.mark.asyncio
+async def test_auth_complete_accepts_code_query_fragment_in_code_field() -> None:
+    manager = CapabilityManager(auth_flow_ttl_seconds=300)
+    provider = _RecordingProvider(namespace="gog")
+    await manager.register_provider(provider)
+    begin = await manager.auth_begin(
+        capability_id="gog.email",
+        user_id="user-1",
+        chat_type="private",
+        account_hint="work",
+    )
+
+    flow_id = str(begin["flow_id"])
+    manager._auth_flows[flow_id].expected_callback_state = "expected-state"
+
+    result = await manager.auth_complete(
+        flow_id=flow_id,
+        user_id="user-1",
+        callback_url=None,
+        code="?state=expected-state&code=abc123",
+    )
+
+    assert result["ok"] is True
+    completion = provider.complete_calls[0]["completion"]
+    assert completion.authorization_code == "abc123"
+    assert completion.state == "expected-state"
+
+
+@pytest.mark.asyncio
+async def test_auth_complete_callback_resolves_flow_by_state() -> None:
+    manager = CapabilityManager(auth_flow_ttl_seconds=300)
+    provider = _RecordingProvider(namespace="gog")
+    await manager.register_provider(provider)
+
+    begin_work = await manager.auth_begin(
+        capability_id="gog.email",
+        user_id="user-1",
+        chat_type="private",
+        account_hint="work",
+    )
+    begin_default = await manager.auth_begin(
+        capability_id="gog.email",
+        user_id="user-1",
+        chat_type="private",
+        account_hint="default",
+    )
+    manager._auth_flows[
+        str(begin_work["flow_id"])
+    ].expected_callback_state = "state-work"
+    manager._auth_flows[
+        str(begin_default["flow_id"])
+    ].expected_callback_state = "state-default"
+
+    result = await manager.auth_complete_callback(
+        user_id="user-1",
+        callback_url="http://localhost/?state=state-default&code=abc",
+    )
+
+    assert result["ok"] is True
+    assert result["flow_id"] == begin_default["flow_id"]
+    assert result["capability"] == "gog.email"
+    completion = provider.complete_calls[0]["completion"]
+    assert completion.state == "state-default"
+
+
+@pytest.mark.asyncio
+async def test_auth_complete_callback_rejects_ambiguous_flows_without_state() -> None:
+    manager = CapabilityManager(auth_flow_ttl_seconds=300)
+    provider = _RecordingProvider(namespace="gog")
+    await manager.register_provider(provider)
+
+    await manager.auth_begin(
+        capability_id="gog.email",
+        user_id="user-1",
+        chat_type="private",
+        account_hint="work",
+    )
+    await manager.auth_begin(
+        capability_id="gog.email",
+        user_id="user-1",
+        chat_type="private",
+        account_hint="default",
+    )
+
+    with pytest.raises(CapabilityError) as exc_info:
+        await manager.auth_complete_callback(user_id="user-1", code="abc-only")
+    assert exc_info.value.code == "capability_auth_flow_ambiguous"
+
+
+@pytest.mark.asyncio
+async def test_auth_begin_reuses_pending_flow_for_same_scope() -> None:
+    manager = CapabilityManager(auth_flow_ttl_seconds=300)
+    provider = _RecordingProvider(namespace="gog")
+    await manager.register_provider(provider)
+
+    first = await manager.auth_begin(
+        capability_id="gog.email",
+        user_id="user-1",
+        chat_type="private",
+        account_hint="work",
+    )
+    second = await manager.auth_begin(
+        capability_id="gog.email",
+        user_id="user-1",
+        chat_type="private",
+        account_hint="work",
+    )
+
+    assert first["flow_id"] == second["flow_id"]
+    assert len(provider.begin_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_list_auth_flows_filters_and_scopes_by_user() -> None:
+    manager = CapabilityManager(auth_flow_ttl_seconds=300)
+    provider = _RecordingProvider(namespace="gog")
+    await manager.register_provider(provider)
+
+    user_one_work = await manager.auth_begin(
+        capability_id="gog.email",
+        user_id="user-1",
+        chat_type="private",
+        account_hint="work",
+    )
+    await manager.auth_begin(
+        capability_id="gog.email",
+        user_id="user-1",
+        chat_type="private",
+        account_hint="personal",
+    )
+    await manager.auth_begin(
+        capability_id="gog.email",
+        user_id="user-2",
+        chat_type="private",
+        account_hint="work",
+    )
+
+    user_one_flows = await manager.list_auth_flows(user_id="user-1")
+    assert len(user_one_flows) == 2
+    assert {flow["account_hint"] for flow in user_one_flows} == {"work", "personal"}
+    assert all(flow["capability"] == "gog.email" for flow in user_one_flows)
+
+    filtered = await manager.list_auth_flows(
+        user_id="user-1",
+        capability_id="gog.email",
+        account_hint="work",
+    )
+    assert [flow["flow_id"] for flow in filtered] == [user_one_work["flow_id"]]
+
+
+@pytest.mark.asyncio
 async def test_provider_registration_enforces_namespace_prefix() -> None:
     manager = CapabilityManager()
     provider = _RecordingProvider(namespace="gog", capability_id="other.email")
@@ -373,6 +818,10 @@ async def test_provider_delegation_uses_trusted_context_and_stores_account_mater
     assert complete["account_ref"] == "acct_work"
     complete_call = provider.complete_calls[0]
     assert complete_call["flow_state"] == {"flow_nonce": "nonce-1"}
+    completion = complete_call["completion"]
+    assert isinstance(completion, CapabilityAuthCompleteInput)
+    assert completion.authorization_code == "abc"
+    assert completion.raw_callback_url == "https://localhost/callback?code=abc"
 
     result = await manager.invoke(
         capability_id="gog.email",
@@ -398,7 +847,7 @@ async def test_provider_delegation_uses_trusted_context_and_stores_account_mater
     assert invoke_context.session_key == "session-xyz"
 
     account = manager._accounts[("user-1", "gog.email", "acct_work")]
-    assert account.credential_material == {"refresh_token": "rt-provider-only"}
+    assert account.credential_material == {"credential_key": "cred-provider-only"}
     assert account.metadata == {"account_name": "Work"}
 
 
@@ -426,6 +875,193 @@ async def test_provider_output_rejects_sensitive_material() -> None:
             capability_id="gog.email",
             operation="list_messages",
             input_data={"folder": "inbox"},
+            user_id="user-1",
+            chat_type="private",
+        )
+    assert exc_info.value.code == "capability_invalid_output"
+
+
+@pytest.mark.asyncio
+async def test_mutating_gmail_requires_confirmed_chat_proof() -> None:
+    manager = CapabilityManager(auth_flow_ttl_seconds=300)
+    provider = _MutatingRecordingProvider(namespace="gog")
+    await manager.register_provider(provider)
+
+    begin = await manager.auth_begin(
+        capability_id="gog.email",
+        user_id="user-1",
+        chat_id="chat-1",
+        chat_type="private",
+        provider="telegram",
+        thread_id="thread-1",
+        account_hint="default",
+    )
+    await manager.auth_complete(
+        flow_id=begin["flow_id"],
+        user_id="user-1",
+        chat_id="chat-1",
+        chat_type="private",
+        provider="telegram",
+        thread_id="thread-1",
+        callback_url="https://localhost/callback?code=abc",
+        code=None,
+    )
+
+    with pytest.raises(CapabilityError) as exc_info:
+        await manager.invoke(
+            capability_id="gog.email",
+            operation="archive_messages",
+            input_data={"ids": ["m1"], "archive": True},
+            user_id="user-1",
+            chat_id="chat-1",
+            chat_type="private",
+            provider="telegram",
+            thread_id="thread-1",
+            account_ref="acct_work",
+        )
+    assert exc_info.value.code == "capability_mutation_not_confirmed"
+
+    state_manager = ChatStateManager(provider="telegram", chat_id="chat-1")
+    state = state_manager.load()
+    state.add_mutation_confirmation(
+        plan_id="plan-1",
+        capability_id="gog.email",
+        operation="archive_messages",
+        thread_id="thread-1",
+        summary="confirm archive candidates",
+    )
+    state.confirm_latest_mutation(thread_id="thread-1")
+    state_manager.save()
+
+    result = await manager.invoke(
+        capability_id="gog.email",
+        operation="archive_messages",
+        input_data={"ids": ["m1"], "archive": True},
+        user_id="user-1",
+        chat_id="chat-1",
+        chat_type="private",
+        provider="telegram",
+        thread_id="thread-1",
+        account_ref="acct_work",
+    )
+    assert result.output["status"] == "ok"
+
+    saved_state = ChatStateManager(provider="telegram", chat_id="chat-1").load()
+    executed = [
+        item for item in saved_state.mutation_confirmations if item.plan_id == "plan-1"
+    ]
+    assert executed
+    assert executed[0].status == "executed"
+
+
+@pytest.mark.asyncio
+async def test_mutating_gmail_rejects_mismatched_plan_id() -> None:
+    manager = CapabilityManager(auth_flow_ttl_seconds=300)
+    provider = _MutatingRecordingProvider(namespace="gog")
+    await manager.register_provider(provider)
+
+    begin = await manager.auth_begin(
+        capability_id="gog.email",
+        user_id="user-1",
+        chat_id="chat-2",
+        chat_type="private",
+        provider="telegram",
+        thread_id="thread-2",
+        account_hint="default",
+    )
+    await manager.auth_complete(
+        flow_id=begin["flow_id"],
+        user_id="user-1",
+        chat_id="chat-2",
+        chat_type="private",
+        provider="telegram",
+        thread_id="thread-2",
+        callback_url="https://localhost/callback?code=abc",
+        code=None,
+    )
+
+    state_manager = ChatStateManager(provider="telegram", chat_id="chat-2")
+    state = state_manager.load()
+    state.add_mutation_confirmation(
+        plan_id="plan-good",
+        capability_id="gog.email",
+        operation="update_labels",
+        thread_id="thread-2",
+    )
+    state.confirm_latest_mutation(thread_id="thread-2")
+    state_manager.save()
+
+    with pytest.raises(CapabilityError) as exc_info:
+        await manager.invoke(
+            capability_id="gog.email",
+            operation="update_labels",
+            input_data={"ids": ["m1"], "add_label_ids": ["IMPORTANT"]},
+            user_id="user-1",
+            chat_id="chat-2",
+            chat_type="private",
+            provider="telegram",
+            thread_id="thread-2",
+            account_ref="acct_work",
+            mutation_plan_id="plan-bad",
+        )
+    assert exc_info.value.code == "capability_mutation_plan_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_provider_auth_completion_rejects_sensitive_credential_material() -> None:
+    manager = CapabilityManager(auth_flow_ttl_seconds=300)
+    provider = _RecordingProvider(namespace="gog")
+    await manager.register_provider(provider)
+
+    begin = await manager.auth_begin(
+        capability_id="gog.email",
+        user_id="user-1",
+        chat_type="private",
+        account_hint="work",
+    )
+    provider.complete_calls.clear()
+
+    async def _bad_auth_complete(
+        *,
+        capability_id: str,
+        flow_state: dict[str, Any],
+        completion: CapabilityAuthCompleteInput,
+        context: CapabilityCallContext,
+    ) -> CapabilityAuthCompleteResult:
+        _ = (capability_id, flow_state, completion, context)
+        return CapabilityAuthCompleteResult(
+            account_ref="acct_work",
+            credential_material={"refresh_token": "leak"},
+        )
+
+    provider.auth_complete = _bad_auth_complete  # type: ignore[assignment]
+
+    with pytest.raises(CapabilityError) as exc_info:
+        await manager.auth_complete(
+            flow_id=begin["flow_id"],
+            user_id="user-1",
+            callback_url="https://localhost/callback?code=abc",
+            code=None,
+        )
+    assert exc_info.value.code == "capability_invalid_output"
+
+
+@pytest.mark.asyncio
+async def test_provider_auth_poll_rejects_sensitive_credential_material() -> None:
+    manager = CapabilityManager(auth_flow_ttl_seconds=300)
+    provider = _SensitivePollProvider(namespace="gog")
+    await manager.register_provider(provider)
+
+    begin = await manager.auth_begin(
+        capability_id="gog.email",
+        user_id="user-1",
+        chat_type="private",
+        account_hint="work",
+    )
+
+    with pytest.raises(CapabilityError) as exc_info:
+        await manager.auth_poll(
+            flow_id=begin["flow_id"],
             user_id="user-1",
             chat_type="private",
         )

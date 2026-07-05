@@ -35,12 +35,24 @@ DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 class OpenAIProvider(LLMProvider):
     """OpenAI provider using the Responses API."""
 
-    def __init__(self, api_key: str | None = None):
-        self._client = openai.AsyncOpenAI(api_key=api_key)
+    def __init__(
+        self,
+        api_key: str | None = None,
+        *,
+        base_url: str | None = None,
+        default_headers: dict[str, str] | None = None,
+        provider_name: str = "openai",
+    ):
+        self._provider_name = provider_name
+        self._client = openai.AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            default_headers=default_headers,
+        )
 
     @property
     def name(self) -> str:
-        return "openai"
+        return self._provider_name
 
     @property
     def default_model(self) -> str:
@@ -224,7 +236,7 @@ class OpenAIProvider(LLMProvider):
 
         usage = response.usage
         extra: dict[str, object] = {
-            "provider": "openai",
+            "provider": self.name,
             "model": model_name,
             "duration_ms": duration_ms,
         }

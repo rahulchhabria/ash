@@ -13,6 +13,7 @@ from ash.core.prompt_keys import (
     RESERVED_PROMPT_EXTENSION_KEYS,
     TOOL_ROUTING_RULES_KEY,
 )
+from ash.skills.types import compute_sandbox_skill_dir as _sandbox_skill_dir
 
 
 class PromptMode(str, Enum):
@@ -413,7 +414,7 @@ class SystemPromptBuilder:
             "",
             "When a request matches a skill, invoke it with `use_skill` instead of doing that work yourself.",
             "Use normal direct replies when no skill is a clear fit.",
-            "If the user asks you to create or update a skill and `skill-writer` is available, invoke it instead of claiming you cannot make skills.",
+            "If the user asks you to **write**, **create**, or **build** a new skill and `skill-writer` is available, invoke it. Do not route to skill-writer when the user wants to set up, configure, enable, or use an existing skill — invoke that skill directly instead.",
             "Only inspect a skill's instructions when you decide to use that skill.",
             "",
             "You may also invoke skills proactively — for example, use debug-self when you encounter tool errors or unexpected behavior, even if the user didn't ask you to debug.",
@@ -429,7 +430,11 @@ class SystemPromptBuilder:
         ]
 
         for skill in sorted(available_skills, key=lambda s: s.name):
-            lines.append(f"- **{skill.name}**: {skill.description}")
+            sb_dir = _sandbox_skill_dir(skill, self._config.sandbox.mount_prefix)
+            if sb_dir:
+                lines.append(f"- **{skill.name}**: {skill.description} (`{sb_dir}/`)")
+            else:
+                lines.append(f"- **{skill.name}**: {skill.description}")
 
         lines.append("")
 
@@ -560,13 +565,13 @@ class SystemPromptBuilder:
             f"Working directory: /workspace. Network: {network_status}.",
             "Commands execute in a sandboxed environment.",
             "For security, several mounted paths are read-only; write only under `/workspace`.",
+            "Use `/workspace` freely for your own files — notes, scratch work, intermediate results, or anything you want to persist within the session.",
             "",
             "### Mounted Directories",
             "",
             "- `/workspace` - User's workspace (read-write)",
             f"- `{prefix}/sessions` - Conversation history (read-only)",
             f"- `{prefix}/chats` - Chat participant info (read-only)",
-            f"- `{prefix}/skills` - Bundled skill references (read-only)",
             f"- `{prefix}/logs` - Runtime logs (read-only)",
             f"- `{prefix}/source` - Ash source code, when mounted (read-only)",
             "",
@@ -719,22 +724,48 @@ class SystemPromptBuilder:
         if not memory:
             return ""
 
-        guidance = (
-            "## Memory\n\n"
-            "Memory is automatic — facts are extracted after each exchange.\n"
-            "Treat automatically retrieved memory as primary context.\n"
-            "If retrieved memory already answers the user's question, answer from it using the appropriate trust posture.\n"
-            "Do not ask for details that are already present in retrieved memory.\n"
-            "When users explicitly ask to remember something, run `ash-sb memory extract` "
-            "(no arguments needed — it processes the current message through the full pipeline).\n"
-            "Always use `ash-sb memory extract` — never use `ash-sb memory add`.\n"
-            'When users ask about "what you learned in this chat" or "from this conversation", '
-            "use `--this-chat` to filter to memories learned in the current chat.\n"
-            "Do not use `--this-chat` unless the user explicitly asks for chat-scoped memory.\n"
-            "Run `ash-sb memory search` only when injected memory is insufficient.\n"
-            "Memories marked [hearsay] were stated by someone other than the subject — "
-            'use hedging language ("according to...", "X mentioned that...") when citing them.'
+        # Detect whether first-class memory tools are registered.
+        has_memory_tools = (
+            self._tools.has("remember")
+            and self._tools.has("list_memories")
+            and self._tools.has("search_memories")
+            and self._tools.has("forget_memory")
         )
+
+        if has_memory_tools:
+            guidance = (
+                "## Memory\n\n"
+                "Memory is automatic — facts are extracted after each exchange.\n"
+                "Treat automatically retrieved memory as primary context.\n"
+                "If retrieved memory already answers the user's question, answer from it using the appropriate trust posture.\n"
+                "Do not ask for details that are already present in retrieved memory.\n"
+                "\n"
+                "Use these memory tools when needed:\n"
+                "- `remember` — when the user explicitly asks you to remember something.\n"
+                "- `list_memories` — when the user asks what you remember about them, or to show stored memories.\n"
+                "- `search_memories` — when injected memory is insufficient for the current query.\n"
+                "- `forget_memory` — when the user explicitly asks you to forget something (use the id from list/search).\n"
+                "\n"
+                "Memories marked [hearsay] were stated by someone other than the subject — "
+                'use hedging language ("according to...", "X mentioned that...") when citing them.'
+            )
+        else:
+            guidance = (
+                "## Memory\n\n"
+                "Memory is automatic — facts are extracted after each exchange.\n"
+                "Treat automatically retrieved memory as primary context.\n"
+                "If retrieved memory already answers the user's question, answer from it using the appropriate trust posture.\n"
+                "Do not ask for details that are already present in retrieved memory.\n"
+                "When users explicitly ask to remember something, run `ash-sb memory extract` "
+                "(no arguments needed — it processes the current message through the full pipeline).\n"
+                "Always use `ash-sb memory extract` — never use `ash-sb memory add`.\n"
+                'When users ask about "what you learned in this chat" or "from this conversation", '
+                "use `--this-chat` to filter to memories learned in the current chat.\n"
+                "Do not use `--this-chat` unless the user explicitly asks for chat-scoped memory.\n"
+                "Run `ash-sb memory search` only when injected memory is insufficient.\n"
+                "Memories marked [hearsay] were stated by someone other than the subject — "
+                'use hedging language ("according to...", "X mentioned that...") when citing them.'
+            )
 
         if not memory.memories:
             return guidance
@@ -767,7 +798,7 @@ class SystemPromptBuilder:
         retrieved_header = (
             "\n\n### Relevant Context from Memory\n\n"
             "The following has been automatically retrieved. "
-            "Use it directly. For additional searches, use `ash-sb memory search`.\n\n"
+            "Use it directly. For additional searches, call `search_memories`.\n\n"
         )
 
         return guidance + retrieved_header + "\n".join(context_items)

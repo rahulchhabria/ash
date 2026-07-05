@@ -10,8 +10,10 @@ Tests key behaviors from specs/telegram.md:
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiogram.enums import ParseMode
 
 from ash.providers.base import OutgoingMessage
+from ash.providers.telegram.formatting import rendered_text_length
 from ash.providers.telegram.handlers import (
     ProgressMessageTool,
     ToolTracker,
@@ -66,6 +68,7 @@ class TestMessageConversion:
         assert incoming.username == "testuser"
         assert incoming.display_name == "Test User"
         assert incoming.metadata["chat_type"] == "private"
+        assert incoming.metadata["is_reply_to_bot"] is False
         assert incoming.images == []
 
     def test_to_incoming_message_with_reply(self, provider):
@@ -85,9 +88,11 @@ class TestMessageConversion:
             user_id=789,
             username="testuser",
             text="Replying to you",
+            is_reply_to_bot=True,
         )
 
         assert incoming.reply_to_message_id == "100"
+        assert incoming.metadata["is_reply_to_bot"] is True
 
     def test_to_incoming_message_group_with_thread(self, provider):
         """Test group message conversion includes thread_id for forum topics."""
@@ -388,28 +393,31 @@ class TestGroupProcessingMode:
             msg.reply_to_message = None
         return msg
 
-    @patch("ash.chats.ChatHistoryWriter")
-    def test_reply_to_bot_is_active(self, _mock_writer, provider):
+    @pytest.mark.asyncio
+    async def test_reply_to_bot_is_active(self, provider):
         """Reply to bot's message in group → active processing."""
-        msg = self._make_group_message(reply_from_id=999)
-        result = provider._should_process_message(msg)
+        with patch("ash.chats.ChatHistoryWriter"):
+            msg = self._make_group_message(reply_from_id=999)
+            result = await provider._should_process_message(msg)
         assert result is not None
         assert result[0] == "active"
 
-    @patch("ash.chats.ChatHistoryWriter")
-    def test_reply_to_other_user_is_skipped(self, _mock_writer, provider):
+    @pytest.mark.asyncio
+    async def test_reply_to_other_user_is_skipped(self, provider):
         """Reply to another user in group → skipped (no passive handler)."""
-        msg = self._make_group_message(reply_from_id=123)
-        result = provider._should_process_message(msg)
+        with patch("ash.chats.ChatHistoryWriter"):
+            msg = self._make_group_message(reply_from_id=123)
+            result = await provider._should_process_message(msg)
         assert result is None
 
-    @patch("ash.chats.ChatHistoryWriter")
-    def test_mention_plus_reply_to_other_is_active(self, _mock_writer, provider):
+    @pytest.mark.asyncio
+    async def test_mention_plus_reply_to_other_is_active(self, provider):
         """@mention + reply to another user → active (mention takes priority)."""
-        msg = self._make_group_message(
-            text="@testbot what do you think?", reply_from_id=123
-        )
-        result = provider._should_process_message(msg)
+        with patch("ash.chats.ChatHistoryWriter"):
+            msg = self._make_group_message(
+                text="@testbot what do you think?", reply_from_id=123
+            )
+            result = await provider._should_process_message(msg)
         assert result is not None
         assert result[0] == "active"
 
@@ -521,6 +529,30 @@ class TestToolTracker:
         sent = mock_provider.send.call_args[0][0]
         assert sent.image_path == "/workspace/screenshot.png"
         assert sent.text == "screenshot attached"
+
+    async def test_tool_complete_sends_document_from_metadata(
+        self, tracker, mock_provider
+    ):
+        await tracker.on_tool_complete(
+            "use_agent",
+            {"agent": "research"},
+            ToolResult.success(
+                "done",
+                document_path="/workspace/report.md",
+                document_caption="Research report attached.",
+            ),
+        )
+
+        mock_provider.send.assert_called()
+        sent = mock_provider.send.call_args[0][0]
+        assert sent.document_path == "/workspace/report.md"
+        assert sent.text == "Research report attached."
+
+    def test_display_truncation_uses_rendered_markdown_v2_length(self, tracker):
+        tracker.progress_messages = ["." * 3000, "." * 3000]
+        display = tracker._build_display_message()
+
+        assert rendered_text_length(display, ParseMode.MARKDOWN_V2) <= 4096
 
 
 class TestProgressResponseMerge:

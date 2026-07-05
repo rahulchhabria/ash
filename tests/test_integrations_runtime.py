@@ -76,6 +76,14 @@ class _StubContributor(IntegrationContributor):
     ) -> None:
         self._events.append(("postprocess", self.name))
 
+    def augment_skill_instructions(
+        self,
+        skill_name: str,
+        context: IntegrationContext,
+    ) -> list[str]:
+        self._events.append(("skill_instructions", self.name))
+        return [f"extra from {self.name}"]
+
     async def preprocess_incoming_message(
         self,
         message,
@@ -151,6 +159,15 @@ class _FailingContributor(_StubContributor):
         await super().on_message_postprocess(
             user_message, session, effective_user_id, context
         )
+
+    def augment_skill_instructions(
+        self,
+        skill_name: str,
+        context: IntegrationContext,
+    ) -> list[str]:
+        if self._fail_in == "augment_skill_instructions":
+            raise RuntimeError("skill instructions failure")
+        return super().augment_skill_instructions(skill_name, context)
 
     async def preprocess_incoming_message(
         self,
@@ -337,6 +354,7 @@ async def test_integration_runtime_setup_failure_disables_only_failing_contribut
     await runtime.on_startup(context)
     runtime.register_rpc_methods(cast(Any, object()), context)
     await runtime.on_shutdown(context)
+    health = runtime.health_snapshot()
 
     assert [contributor.name for contributor in runtime.active_contributors] == ["ok"]
     assert events == [
@@ -345,6 +363,8 @@ async def test_integration_runtime_setup_failure_disables_only_failing_contribut
         ("rpc", "ok"),
         ("shutdown", "ok"),
     ]
+    assert health.is_degraded is True
+    assert health.failed_setup == ("bad",)
 
 
 @pytest.mark.asyncio
@@ -379,8 +399,11 @@ async def test_integration_runtime_isolates_hook_failures_after_setup() -> None:
     for hook in runtime.message_postprocess_hooks(context):
         await hook("remember this", session, "user-123")
     await runtime.on_shutdown(context)
+    health = runtime.health_snapshot()
 
     assert ("postprocess", "ok") in events
+    assert health.is_degraded is True
+    assert health.hook_failures.get("bad.on_message_postprocess") == 1
 
 
 @pytest.mark.asyncio
@@ -667,3 +690,126 @@ async def test_compose_integrations_refreshes_subagent_shared_prompt() -> None:
 
     assert "integration route line" in (tool_registry.get("use_agent").prompt or "")
     assert "integration route line" in (tool_registry.get("use_skill").prompt or "")
+
+
+@pytest.mark.asyncio
+async def test_compose_integrations_wires_skill_instruction_augmenter() -> None:
+    class _FakeAgent:
+        def install_integration_hooks(
+            self,
+            *,
+            prompt_context_augmenters=None,
+            sandbox_env_augmenters=None,
+            incoming_message_preprocessors=None,
+            message_postprocess_hooks=None,
+        ) -> None:
+            _ = (
+                prompt_context_augmenters,
+                sandbox_env_augmenters,
+                incoming_message_preprocessors,
+                message_postprocess_hooks,
+            )
+
+    class _FakeUseSkillTool:
+        def __init__(self) -> None:
+            self.augmenter = None
+            self.prompt: str | None = None
+
+        def set_shared_prompt(self, prompt: str | None) -> None:
+            self.prompt = prompt
+
+        def set_skill_instruction_augmenter(self, augmenter) -> None:
+            self.augmenter = augmenter
+
+    class _FakeToolRegistry:
+        def __init__(self) -> None:
+            self._tools: dict[str, Any] = {
+                "use_skill": _FakeUseSkillTool(),
+            }
+
+        def has(self, name: str) -> bool:
+            return name in self._tools
+
+        def get(self, name: str):
+            return self._tools[name]
+
+    class _TodoInstructionContributor(IntegrationContributor):
+        name = "todo_helper"
+        priority = 10
+
+        def augment_skill_instructions(
+            self,
+            skill_name: str,
+            context: IntegrationContext,
+        ) -> list[str]:
+            if skill_name == "todo":
+                return ["Extra todo guidance"]
+            return []
+
+    config = AshConfig(
+        workspace=Path("tmp-workspace"),
+        models={"default": ModelConfig(provider="openai", model="gpt-5-mini")},
+    )
+    tool_registry = _FakeToolRegistry()
+    components = cast(
+        Any,
+        SimpleNamespace(
+            agent=_FakeAgent(),
+            tool_registry=tool_registry,
+        ),
+    )
+
+    await compose_integrations(
+        config=config,
+        components=components,
+        mode="eval",
+        contributors=[_TodoInstructionContributor()],
+    )
+
+    use_skill_tool = tool_registry.get("use_skill")
+    assert use_skill_tool.augmenter is not None
+    # Verify the augmenter actually works when called
+    lines = use_skill_tool.augmenter("todo")
+    assert lines == ["Extra todo guidance"]
+    assert use_skill_tool.augmenter("other") == []
+
+
+def test_skill_instruction_augmenter_collects_from_contributors() -> None:
+    events: list[tuple[str, str]] = []
+    runtime = IntegrationRuntime(
+        [
+            _StubContributor(name="a", priority=10, events=events),
+            _StubContributor(name="b", priority=20, events=events),
+        ]
+    )
+    context = _context()
+    augmenter = runtime.skill_instruction_augmenter(context)
+    lines = augmenter("todo")
+
+    assert lines == ["extra from a", "extra from b"]
+    assert events == [
+        ("skill_instructions", "a"),
+        ("skill_instructions", "b"),
+    ]
+
+
+def test_skill_instruction_augmenter_isolates_contributor_errors() -> None:
+    events: list[tuple[str, str]] = []
+    runtime = IntegrationRuntime(
+        [
+            _FailingContributor(
+                name="bad",
+                priority=10,
+                events=events,
+                fail_in="augment_skill_instructions",
+            ),
+            _StubContributor(name="ok", priority=20, events=events),
+        ]
+    )
+    context = _context()
+    augmenter = runtime.skill_instruction_augmenter(context)
+    lines = augmenter("todo")
+
+    assert lines == ["extra from ok"]
+    health = runtime.health_snapshot()
+    assert health.hook_failures.get("bad.augment_skill_instructions") == 1

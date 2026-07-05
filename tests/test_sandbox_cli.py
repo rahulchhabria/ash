@@ -15,6 +15,7 @@ def _context_token(
     *,
     effective_user_id: str = "user123",
     chat_id: str | None = "chat456",
+    chat_type: str | None = "private",
     provider: str | None = "telegram",
     source_username: str | None = "testuser",
     timezone: str | None = "UTC",
@@ -22,6 +23,7 @@ def _context_token(
     return get_default_context_token_service().issue(
         effective_user_id=effective_user_id,
         chat_id=chat_id,
+        chat_type=chat_type,
         provider=provider,
         source_username=source_username,
         timezone=timezone,
@@ -82,6 +84,7 @@ class TestScheduleCreate:
         params = call_args[1]
         assert params["message"] == "Test reminder"
         assert params["chat_id"] == "chat456"
+        assert params["chat_type"] == "private"
         assert params["provider"] == "telegram"
 
     def test_create_periodic(self, cli_runner, mock_rpc):
@@ -141,6 +144,22 @@ class TestScheduleCreate:
         assert result.exit_code == 1
         assert "requires provider and chat routing context" in result.output
         mock_rpc.assert_not_called()
+
+    def test_create_expired_context_token_shows_reauth_guidance(
+        self, cli_runner, mock_rpc
+    ):
+        """Expired context token errors should include actionable remediation."""
+        future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        mock_rpc.side_effect = RPCError(
+            code=-32000,
+            message="Invalid context token (claims): context token expired",
+        )
+
+        result = cli_runner.invoke(app, ["create", "Test reminder", "--at", future])
+
+        assert result.exit_code == 1
+        assert "ASH_CONTEXT_TOKEN expired" in result.output
+        assert "Refresh/re-auth" in result.output
 
 
 class TestScheduleList:
@@ -382,7 +401,17 @@ class TestNaturalLanguageTime:
         self, cli_runner_with_tz, _mock_create_rpc, time_input, message
     ):
         """Test creating tasks with various clock time formats."""
-        result = cli_runner_with_tz.invoke(app, ["create", message, "--at", time_input])
+        import time_machine
+
+        # Freeze at 1am Pacific so all bare clock times (9am, noon, 3pm,
+        # midnight) are in the future relative to the frozen local time.
+        with time_machine.travel(
+            datetime(2026, 6, 15, 8, 0, tzinfo=UTC),  # 2026-06-15 01:00 PDT
+            tick=False,
+        ):
+            result = cli_runner_with_tz.invoke(
+                app, ["create", message, "--at", time_input]
+            )
 
         assert result.exit_code == 0
         assert "Scheduled reminder" in result.stdout
@@ -437,15 +466,57 @@ class TestNaturalLanguageTime:
         assert result.exit_code == 0
         assert "Scheduled reminder" in result.stdout
 
+    def test_create_with_naive_iso_uses_local_timezone(
+        self, cli_runner_with_tz, _mock_create_rpc
+    ):
+        """Naive ISO values should be treated as local timezone, not UTC-naive."""
+        result = cli_runner_with_tz.invoke(
+            app, ["create", "Local naive ISO", "--at", "2030-01-02 14:00"]
+        )
+
+        assert result.exit_code == 0
+        params = _mock_create_rpc.call_args[0][1]
+        assert params["trigger_at"].endswith("Z")
+
     def test_create_rejects_invalid_time(self, cli_runner_with_tz, mock_rpc):
         """Test that invalid time strings are rejected."""
+        mock_rpc.return_value = {"trigger_at": None}
         result = cli_runner_with_tz.invoke(
             app, ["create", "Bad time", "--at", "not a valid time string xyz123"]
         )
 
         assert result.exit_code == 1
         assert "Could not parse time" in result.output
-        mock_rpc.assert_not_called()
+        assert mock_rpc.call_args_list[0].args[0] == "schedule.parse_time"
+        assert not any(
+            call.args[0] == "schedule.create" for call in mock_rpc.call_args_list
+        )
+
+    def test_create_uses_rpc_parse_fallback_when_local_parse_fails(
+        self, cli_runner_with_tz, mock_rpc
+    ):
+        """If local parser fails, CLI should use host LLM parse fallback."""
+
+        def _rpc_side_effect(method: str, params: dict[str, str]):
+            if method == "schedule.parse_time":
+                return {"trigger_at": "2030-01-02T22:00:00Z"}
+            if method == "schedule.create":
+                entry = dict(params)
+                entry["id"] = "llmparse1"
+                return {"id": "llmparse1", "entry": entry}
+            raise AssertionError(f"Unexpected RPC method: {method}")
+
+        mock_rpc.side_effect = _rpc_side_effect
+        with patch("dateparser.parse", return_value=None):
+            result = cli_runner_with_tz.invoke(
+                app,
+                ["create", "Fallback parse", "--at", "not-a-real-time-format"],
+            )
+
+        assert result.exit_code == 0
+        assert "Scheduled reminder" in result.stdout
+        assert mock_rpc.call_args_list[0].args[0] == "schedule.parse_time"
+        assert mock_rpc.call_args_list[1].args[0] == "schedule.create"
 
     def test_output_shows_local_time(self, cli_runner_with_tz, _mock_create_rpc):
         """Test that output shows time in local timezone."""
