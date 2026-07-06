@@ -13,6 +13,7 @@ from ash.integrations.deepagents import DeepAgentsIntegration
 from ash.integrations.email_forward_summary import EmailForwardSummaryIntegration
 from ash.integrations.image import ImageIntegration
 from ash.integrations.memory import MemoryIntegration
+from ash.integrations.reactive_workflows import ReactiveWorkflowIntegration
 from ash.integrations.runtime import IntegrationMode
 from ash.integrations.runtime_rpc import RuntimeRPCIntegration
 from ash.integrations.scheduling import SchedulingIntegration
@@ -53,6 +54,7 @@ def _create_chat_integrations(
         contributors.append(MemoryIntegration())
     contributors.append(EmailForwardSummaryIntegration())
     contributors.append(CloseGameAlertIntegration())
+    contributors.append(ReactiveWorkflowIntegration())
     return DefaultIntegrations(contributors=contributors)
 
 
@@ -78,6 +80,7 @@ def _create_eval_integrations(
         contributors.append(MemoryIntegration())
     contributors.append(EmailForwardSummaryIntegration())
     contributors.append(CloseGameAlertIntegration())
+    contributors.append(ReactiveWorkflowIntegration())
     return DefaultIntegrations(contributors=contributors, scheduling=scheduling)
 
 
@@ -120,6 +123,7 @@ def _create_serve_integrations(
         contributors.append(MemoryIntegration())
     contributors.append(EmailForwardSummaryIntegration())
     contributors.append(CloseGameAlertIntegration())
+    contributors.append(ReactiveWorkflowIntegration())
     contributors.append(scheduling)
     return DefaultIntegrations(contributors=contributors, scheduling=scheduling)
 

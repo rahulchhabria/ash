@@ -1809,3 +1809,179 @@ class TestHandlerNoReply:
         # Both agent and sender should be called
         mock_agent.process_message.assert_called_once()
         mock_sender.assert_called_once()
+
+
+class TestScheduleEntryReliabilityFields:
+    """Serialization round-trip for retry/notify policy fields (#9)."""
+
+    def test_defaults_are_not_serialized(self):
+        entry = ScheduleEntry(
+            message="Task",
+            trigger_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        data = entry.to_dict()
+        assert "max_retries" not in data
+        assert "retry_count" not in data
+        assert "retry_backoff_seconds" not in data
+        assert "notify_on_failure" not in data
+        assert "last_error" not in data
+
+    def test_policy_round_trip(self):
+        entry = ScheduleEntry(
+            message="Task",
+            trigger_at=datetime(2026, 1, 1, tzinfo=UTC),
+            max_retries=3,
+            retry_count=1,
+            retry_backoff_seconds=30,
+            notify_on_failure=True,
+            last_error="boom",
+        )
+        restored = ScheduleEntry.from_line(entry.to_json_line())
+        assert restored is not None
+        assert restored.max_retries == 3
+        assert restored.retry_count == 1
+        assert restored.retry_backoff_seconds == 30
+        assert restored.notify_on_failure is True
+        assert restored.last_error == "boom"
+
+
+class TestScheduledTaskReliability:
+    """Retry-with-backoff and failure notification (#9)."""
+
+    def _failing_agent(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        agent = MagicMock()
+        agent.process_message = AsyncMock(side_effect=RuntimeError("upstream down"))
+        return agent
+
+    @pytest.mark.asyncio
+    async def test_failure_without_policy_does_not_retry_or_notify(self, tmp_path):
+        from unittest.mock import AsyncMock
+
+        from ash.scheduling import ScheduledTaskHandler
+        from ash.scheduling.store import ScheduleStore
+
+        store = ScheduleStore(tmp_path / "graph")
+        sender = AsyncMock(return_value="m1")
+        handler = ScheduledTaskHandler(
+            agent=self._failing_agent(),
+            senders={"telegram": sender},
+            store=store,
+        )
+        entry = ScheduleEntry(
+            message="Sync",
+            trigger_at=datetime.now(UTC),
+            provider="telegram",
+            chat_id="123",
+            user_id="456",
+        )
+        await handler.handle(entry)
+
+        assert store.get_entries() == []  # no retry enqueued
+        sender.assert_not_called()  # no notification
+
+    @pytest.mark.asyncio
+    async def test_failure_enqueues_retry_entry(self, tmp_path):
+        from unittest.mock import AsyncMock
+
+        from ash.scheduling import ScheduledTaskHandler
+        from ash.scheduling.store import ScheduleStore
+
+        store = ScheduleStore(tmp_path / "graph")
+        sender = AsyncMock(return_value="m1")
+        handler = ScheduledTaskHandler(
+            agent=self._failing_agent(),
+            senders={"telegram": sender},
+            store=store,
+        )
+        entry = ScheduleEntry(
+            id="orig1234",
+            message="Sync",
+            trigger_at=datetime.now(UTC),
+            provider="telegram",
+            chat_id="123",
+            user_id="456",
+            max_retries=2,
+            retry_backoff_seconds=30,
+            notify_on_failure=True,
+        )
+        await handler.handle(entry)
+
+        entries = store.get_entries()
+        assert len(entries) == 1
+        retry = entries[0]
+        assert retry.id != "orig1234"
+        assert retry.retry_count == 1
+        assert retry.max_retries == 2
+        assert retry.trigger_at is not None
+        assert retry.trigger_at > datetime.now(UTC)
+        assert retry.last_error == "upstream down"
+        # Retry attempts are silent — no failure notice yet.
+        sender.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_exhausted_retries_notify_on_failure(self, tmp_path):
+        from unittest.mock import AsyncMock
+
+        from ash.scheduling import ScheduledTaskHandler
+        from ash.scheduling.store import ScheduleStore
+
+        store = ScheduleStore(tmp_path / "graph")
+        sender = AsyncMock(return_value="m1")
+        handler = ScheduledTaskHandler(
+            agent=self._failing_agent(),
+            senders={"telegram": sender},
+            store=store,
+        )
+        # retry_count already at max => exhausted
+        entry = ScheduleEntry(
+            message="Sync",
+            trigger_at=datetime.now(UTC),
+            provider="telegram",
+            chat_id="123",
+            user_id="456",
+            max_retries=2,
+            retry_count=2,
+            notify_on_failure=True,
+        )
+        await handler.handle(entry)
+
+        assert store.get_entries() == []  # no further retry
+        sender.assert_called_once()
+        sent_text = sender.call_args.args[1]
+        assert "failed" in sent_text.lower()
+        assert "Sync" in sent_text
+
+
+class TestScheduledTaskRetrievalQuery:
+    """#8 — memory retrieval is pinned to the real task text, not the wrapper."""
+
+    @pytest.mark.asyncio
+    async def test_retrieval_query_is_raw_task_message(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ash.scheduling import ScheduledTaskHandler
+
+        agent = MagicMock()
+        response = MagicMock()
+        response.text = "done"
+        agent.process_message = AsyncMock(return_value=response)
+        handler = ScheduledTaskHandler(
+            agent=agent, senders={"telegram": AsyncMock(return_value="m1")}
+        )
+        entry = ScheduleEntry(
+            message="Summarize my unread email",
+            trigger_at=datetime.now(UTC),
+            provider="telegram",
+            chat_id="123",
+            user_id="456",
+        )
+        await handler.handle(entry)
+
+        kwargs = agent.process_message.call_args.kwargs
+        assert kwargs["retrieval_query"] == "Summarize my unread email"
+        # The message actually sent to the model is the wrapped prompt.
+        sent_prompt = agent.process_message.call_args.args[0]
+        assert "Summarize my unread email" in sent_prompt
+        assert sent_prompt != "Summarize my unread email"

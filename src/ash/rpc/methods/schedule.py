@@ -75,6 +75,11 @@ def register_schedule_methods(
             username=params.get("username"),
             timezone=params.get("timezone", "UTC"),
             created_at=datetime.now(UTC),
+            max_retries=max(0, int(params.get("max_retries") or 0)),
+            retry_backoff_seconds=max(
+                1, int(params.get("retry_backoff_seconds") or 60)
+            ),
+            notify_on_failure=bool(params.get("notify_on_failure", False)),
         )
 
         store.add_entry(entry)

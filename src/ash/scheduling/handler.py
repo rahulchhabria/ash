@@ -2,7 +2,8 @@
 
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -16,6 +17,7 @@ if TYPE_CHECKING:
     from ash.agents.executor import AgentExecutor
     from ash.agents.types import StackFrame
     from ash.core.agent import Agent
+    from ash.scheduling.store import ScheduleStore
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +138,7 @@ class ScheduledTaskHandler:
         persisters: dict[str, MessagePersister] | None = None,
         timezone: str = "UTC",
         agent_executor: "AgentExecutor | None" = None,
+        store: "ScheduleStore | None" = None,
     ):
         """Initialize the handler.
 
@@ -146,6 +149,7 @@ class ScheduledTaskHandler:
             persisters: Map of provider name -> message persistence callback.
             timezone: Fallback IANA timezone for computing fire times.
             agent_executor: Optional executor for running subagent skill loops.
+            store: Optional schedule store used to enqueue retry attempts on failure.
         """
         self._agent = agent
         self._senders = senders
@@ -153,6 +157,7 @@ class ScheduledTaskHandler:
         self._persisters = persisters or {}
         self._timezone = timezone
         self._agent_executor = agent_executor
+        self._store = store
 
     async def handle(self, entry: ScheduleEntry) -> None:
         """Process a scheduled task.
@@ -238,11 +243,14 @@ class ScheduledTaskHandler:
 
         try:
             # Process through agent
-            # Note: ToolContext is created internally by agent using session fields
+            # Note: ToolContext is created internally by agent using session fields.
+            # retrieval_query pins memory/people retrieval to the real task text so
+            # the ~2KB scheduling wrapper never pollutes autonomous-run personalization.
             response = await self._agent.process_message(
                 prefixed_message,
                 session,
                 user_id=entry.user_id,
+                retrieval_query=entry.message,
             )
 
             if response.text and not is_no_reply(response.text):
@@ -260,11 +268,85 @@ class ScheduledTaskHandler:
                     await self._send_response(entry, session, result_text)
             else:
                 logger.error("scheduled_task_no_executor")
+                await self._handle_failure(entry, "no agent executor available")
 
         except Exception as e:
             logger.error(
                 "scheduled_task_failed", extra={"error.message": str(e)}, exc_info=True
             )
+            await self._handle_failure(entry, str(e))
+
+    async def _handle_failure(self, entry: ScheduleEntry, error: str) -> None:
+        """React to a failed scheduled task: retry with backoff, else notify.
+
+        Retries are enqueued as a fresh one-shot entry (new id) so the watcher's
+        removal of the original one-shot does not cancel the retry. Periodic tasks
+        are not retried here — their next cron occurrence is the natural retry — but
+        they still notify on failure when configured. Preserves legacy no-retry
+        behavior when ``max_retries`` is 0. See specs/schedule.md (Reliability).
+        """
+        entry.last_error = error
+
+        can_retry = (
+            self._store is not None
+            and not entry.is_periodic
+            and entry.retry_count < entry.max_retries
+        )
+        if can_retry:
+            attempt = entry.retry_count + 1
+            backoff = entry.retry_backoff_seconds * (2 ** (attempt - 1))
+            retry_at = datetime.now(UTC) + timedelta(seconds=backoff)
+            retry_entry = replace(
+                entry,
+                id=uuid4().hex[:8],
+                trigger_at=retry_at,
+                cron=None,
+                last_run=None,
+                retry_count=attempt,
+                created_at=datetime.now(UTC),
+                line_number=0,
+            )
+            assert self._store is not None
+            self._store.add_entry(retry_entry)
+            logger.info(
+                "scheduled_task_retry_scheduled",
+                extra={
+                    "schedule.entry_id": entry.id,
+                    "schedule.retry_entry_id": retry_entry.id,
+                    "schedule.retry_attempt": attempt,
+                    "schedule.retry_at": retry_at.isoformat(),
+                    "schedule.backoff_seconds": backoff,
+                },
+            )
+            return
+
+        if entry.notify_on_failure:
+            attempts = entry.retry_count + 1
+            plural = "attempt" if attempts == 1 else "attempts"
+            notice = (
+                f"⚠️ Scheduled task failed after {attempts} {plural} and will not "
+                f"run again automatically.\n\nTask: {entry.message}\nError: {error}"
+            )
+            try:
+                await self._send_response(entry, self._failure_session(entry), notice)
+            except Exception as send_error:  # pragma: no cover - defensive
+                logger.error(
+                    "scheduled_failure_notify_failed",
+                    extra={
+                        "schedule.entry_id": entry.id,
+                        "error.message": str(send_error),
+                    },
+                )
+
+    @staticmethod
+    def _failure_session(entry: ScheduleEntry) -> SessionState:
+        """Minimal session for delivering a failure notice (no reply threading)."""
+        return SessionState(
+            session_id=f"scheduled_fail_{uuid4().hex[:8]}",
+            provider=entry.provider or "scheduled",
+            chat_id=entry.chat_id or "",
+            user_id=entry.user_id or "",
+        )
 
     async def _send_response(
         self,

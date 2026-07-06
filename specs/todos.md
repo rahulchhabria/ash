@@ -95,6 +95,16 @@ Single-process strong semantics:
 - shared todo mutation requires chat scope (`TODO_SHARED_IN` edge target matches caller chat)
 - listing defaults to caller-visible records only
 
+## Autonomous Follow-Through
+
+The subsystem stays a simple ledger; it does not sweep, escalate, or act on
+todos (see Non-Goals). Autonomous follow-through is **orchestration-owned**: the
+bundled `todo-sweep` skill composes `ash-sb todo` (read/nudge/remind) with
+`ash-sb schedule` (recurring runs) to review open/overdue items and drive them
+forward. It never auto-completes or deletes todos — those remain user decisions
+and reminder execution does not auto-complete (v1). This keeps workflow behavior
+out of the canonical todo state while still enabling recurring, hands-off review.
+
 ## Scheduling Linkage
 
 - Reminder linkage is an internal todo subsystem detail.
