@@ -57,7 +57,9 @@ class ReactiveWorkflowIntegration(IntegrationContributor):
     """Route matching inbound messages to a skill/agent via structured context."""
 
     name = "reactive_workflows"
-    # After the bespoke context injectors so a specific match wins if both fire.
+    # Runs after the bespoke context injectors (email_forward_summary=170,
+    # close_game_alert=175). Hooks run in ascending priority, so any block this
+    # integration adds is prepended on top of theirs; the blocks coexist.
     priority = 180
 
     def __init__(self) -> None:

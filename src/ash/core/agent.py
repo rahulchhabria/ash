@@ -1071,11 +1071,14 @@ class Agent:
         get_steering_messages: GetSteeringMessagesCallback | None = None,
         session_manager: Any = None,  # Type: SessionManager | None
         tool_overrides: dict[str, Any] | None = None,
+        retrieval_query: str | None = None,
     ) -> AsyncIterator[str]:
         from ash.logging import log_context
         from ash.observability import set_sentry_conversation_id
 
-        setup = await self._prepare_message_context(user_message, session, user_id)
+        setup = await self._prepare_message_context(
+            user_message, session, user_id, retrieval_query=retrieval_query
+        )
         session.add_user_message(user_message)
         await self._maybe_compact(session)
 

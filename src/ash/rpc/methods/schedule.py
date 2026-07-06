@@ -76,9 +76,7 @@ def register_schedule_methods(
             timezone=params.get("timezone", "UTC"),
             created_at=datetime.now(UTC),
             max_retries=max(0, int(params.get("max_retries") or 0)),
-            retry_backoff_seconds=max(
-                1, int(params.get("retry_backoff_seconds") or 60)
-            ),
+            retry_backoff_seconds=_coerce_backoff(params.get("retry_backoff_seconds")),
             notify_on_failure=bool(params.get("notify_on_failure", False)),
         )
 
@@ -196,6 +194,17 @@ def register_schedule_methods(
     server.register("schedule.parse_time", schedule_parse_time)
 
     logger.debug("Registered schedule RPC methods")
+
+
+def _coerce_backoff(raw: Any) -> int:
+    """Resolve retry backoff seconds, honoring an explicit value over the default.
+
+    Uses an ``is None`` check (not ``or``) so an explicit 0 is not silently
+    swallowed; the floor of 1 second is still enforced.
+    """
+    if raw is None:
+        return 60
+    return max(1, int(raw))
 
 
 def _entry_to_dict(entry: ScheduleEntry) -> dict[str, Any]:

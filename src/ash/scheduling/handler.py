@@ -21,6 +21,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Upper bound on exponential retry backoff (24h). Caps the retry horizon and
+# keeps timedelta arithmetic well-defined for large attempt counts.
+_MAX_RETRY_BACKOFF_SECONDS = 24 * 60 * 60
+
 SCHEDULED_TASK_WRAPPER = """\
 You are executing a scheduled task. Before running the task, evaluate whether it's still relevant given the delay.
 
@@ -241,9 +245,52 @@ class ScheduledTaskHandler:
         if entry.chat_title:
             session.context.chat_title = entry.chat_title
 
+        # Retry/notify only cover TASK EXECUTION failures. Delivery failures are
+        # handled separately below and never retried — re-running the whole task
+        # would duplicate any side effects (tool calls) that already succeeded.
         try:
-            # Process through agent
-            # Note: ToolContext is created internally by agent using session fields.
+            outcome = await self._execute_task(entry, prefixed_message, session)
+        except Exception as e:
+            logger.error(
+                "scheduled_task_failed", extra={"error.message": str(e)}, exc_info=True
+            )
+            await self._handle_failure(entry, str(e))
+            return
+
+        # Success: clear any stale error carried on a persisted (periodic) entry so
+        # a recovered task doesn't look permanently broken to introspection/UI.
+        entry.last_error = None
+
+        if not outcome or is_no_reply(outcome):
+            logger.info("scheduled_task_no_response")
+            return
+
+        try:
+            await self._send_response(entry, session, outcome)
+        except Exception as e:
+            # Task already executed; do not retry delivery (avoids duplicate side
+            # effects). Surface the delivery failure in logs only.
+            logger.error(
+                "scheduled_response_send_failed",
+                extra={"schedule.entry_id": entry.id, "error.message": str(e)},
+                exc_info=True,
+            )
+
+    async def _execute_task(
+        self,
+        entry: ScheduleEntry,
+        prefixed_message: str,
+        session: SessionState,
+    ) -> str | None:
+        """Run the task through the agent, returning its text (or None).
+
+        Handles the skill/subagent (`ChildActivated`) path internally so that a
+        failure there propagates to the caller's uniform failure handling rather
+        than escaping a sibling ``except`` block (skill-based scheduled tasks are
+        the primary target of the retry/notify feature).
+        """
+        try:
+            # ToolContext is created internally by the agent from session fields.
             # retrieval_query pins memory/people retrieval to the real task text so
             # the ~2KB scheduling wrapper never pollutes autonomous-run personalization.
             response = await self._agent.process_message(
@@ -252,29 +299,15 @@ class ScheduledTaskHandler:
                 user_id=entry.user_id,
                 retrieval_query=entry.message,
             )
-
-            if response.text and not is_no_reply(response.text):
-                await self._send_response(entry, session, response.text)
-            else:
-                logger.info("scheduled_task_no_response")
-
+            return response.text
         except ChildActivated as ca:
-            # A skill was invoked — run the subagent loop to completion
             if self._agent_executor and ca.main_frame and ca.child_frame:
-                result_text = await self._run_skill_loop(
+                return await self._run_skill_loop(
                     ca.main_frame, ca.child_frame, session
                 )
-                if result_text and not is_no_reply(result_text):
-                    await self._send_response(entry, session, result_text)
-            else:
-                logger.error("scheduled_task_no_executor")
-                await self._handle_failure(entry, "no agent executor available")
-
-        except Exception as e:
-            logger.error(
-                "scheduled_task_failed", extra={"error.message": str(e)}, exc_info=True
-            )
-            await self._handle_failure(entry, str(e))
+            raise RuntimeError(
+                "no agent executor available for scheduled skill task"
+            ) from None
 
     async def _handle_failure(self, entry: ScheduleEntry, error: str) -> None:
         """React to a failed scheduled task: retry with backoff, else notify.
@@ -287,14 +320,24 @@ class ScheduledTaskHandler:
         """
         entry.last_error = error
 
-        can_retry = (
-            self._store is not None
-            and not entry.is_periodic
-            and entry.retry_count < entry.max_retries
-        )
-        if can_retry:
+        wants_retry = not entry.is_periodic and entry.retry_count < entry.max_retries
+        if wants_retry and self._store is None:
+            # Policy asked for retries but no store was wired to enqueue them.
+            logger.warning(
+                "scheduled_retry_unavailable",
+                extra={
+                    "schedule.entry_id": entry.id,
+                    "schedule.max_retries": entry.max_retries,
+                },
+            )
+        if wants_retry and self._store is not None:
             attempt = entry.retry_count + 1
-            backoff = entry.retry_backoff_seconds * (2 ** (attempt - 1))
+            # Cap backoff to keep timedelta arithmetic well-defined for large
+            # attempt counts and to bound the retry horizon.
+            backoff = min(
+                entry.retry_backoff_seconds * (2 ** (attempt - 1)),
+                _MAX_RETRY_BACKOFF_SECONDS,
+            )
             retry_at = datetime.now(UTC) + timedelta(seconds=backoff)
             retry_entry = replace(
                 entry,
@@ -306,7 +349,6 @@ class ScheduledTaskHandler:
                 created_at=datetime.now(UTC),
                 line_number=0,
             )
-            assert self._store is not None
             self._store.add_entry(retry_entry)
             logger.info(
                 "scheduled_task_retry_scheduled",
@@ -321,22 +363,36 @@ class ScheduledTaskHandler:
             return
 
         if entry.notify_on_failure:
+            await self._notify_failure(entry, error)
+
+    async def _notify_failure(self, entry: ScheduleEntry, error: str) -> None:
+        """Send a failure notice to the originating chat.
+
+        Wording differs by schedule type: a periodic task will still fire on its
+        next cron occurrence, so it must not claim it "will not run again".
+        """
+        if entry.is_periodic:
+            notice = (
+                f"⚠️ Recurring scheduled task failed.\n\nTask: {entry.message}\n"
+                f"Error: {error}\n\nIt will run again at its next scheduled time."
+            )
+        else:
             attempts = entry.retry_count + 1
             plural = "attempt" if attempts == 1 else "attempts"
             notice = (
                 f"⚠️ Scheduled task failed after {attempts} {plural} and will not "
                 f"run again automatically.\n\nTask: {entry.message}\nError: {error}"
             )
-            try:
-                await self._send_response(entry, self._failure_session(entry), notice)
-            except Exception as send_error:  # pragma: no cover - defensive
-                logger.error(
-                    "scheduled_failure_notify_failed",
-                    extra={
-                        "schedule.entry_id": entry.id,
-                        "error.message": str(send_error),
-                    },
-                )
+        try:
+            await self._send_response(entry, self._failure_session(entry), notice)
+        except Exception as send_error:  # pragma: no cover - defensive
+            logger.error(
+                "scheduled_failure_notify_failed",
+                extra={
+                    "schedule.entry_id": entry.id,
+                    "error.message": str(send_error),
+                },
+            )
 
     @staticmethod
     def _failure_session(entry: ScheduleEntry) -> SessionState:

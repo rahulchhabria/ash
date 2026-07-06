@@ -248,10 +248,11 @@ Updated reminder (id=a1b2c3d4)
 Failure handling is opt-in and defaults to legacy no-retry behavior (`max_retries = 0`):
 
 - **Default (`max_retries = 0`):** Failed tasks are still marked as processed — one-shot entries are deleted, periodic entries get `last_run` updated. No automatic retry. Prevents infinite retry loops for tasks that consistently fail.
-- **Retry (`max_retries > 0`, one-shot only):** On failure the handler enqueues a fresh one-shot retry entry (new `id`, `retry_count` incremented, `trigger_at = now + retry_backoff_seconds * 2^(attempt-1)`). The watcher still removes the original one-shot; the retry survives because it is a distinct entry. Retries stop once `retry_count` reaches `max_retries`. Periodic tasks are **not** retried this way — their next cron occurrence is the natural retry.
-- **Failure notification (`notify_on_failure = true`):** When a task ultimately fails (retries exhausted, or a periodic run fails), the handler sends a short failure notice to the originating chat including the task text and `last_error`. Retry attempts in between are silent.
+- **Retry (`max_retries > 0`, one-shot only):** On **task-execution** failure the handler enqueues a fresh one-shot retry entry (new `id`, `retry_count` incremented, `trigger_at = now + retry_backoff_seconds * 2^(attempt-1)`, capped at 24h). The watcher still removes the original one-shot; the retry survives because it is a distinct entry. Retries stop once `retry_count` reaches `max_retries`. Periodic tasks are **not** retried this way — their next cron occurrence is the natural retry.
+- **Delivery failures are not retried:** Retry covers only task execution (the agent run). If the task executed but sending the response fails, the failure is logged and **not** retried — re-running the task could duplicate side effects (tool calls) that already succeeded.
+- **Failure notification (`notify_on_failure = true`):** When a task ultimately fails (one-shot retries exhausted, or a periodic run fails), the handler sends a short failure notice to the originating chat including the task text and `last_error`. Wording differs by type: a periodic notice states the task will run again at its next scheduled time; a one-shot notice states it will not run again automatically. Retry attempts in between are silent.
 
-`last_error` records the most recent failure text for diagnostics.
+`last_error` records the most recent failure text for diagnostics and is cleared on a subsequent successful run (so a recovered periodic task does not appear permanently broken). Retry policy is set at creation; there is currently no update path to change it afterward.
 
 ### Ownership Rules
 

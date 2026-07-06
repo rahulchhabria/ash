@@ -3,6 +3,7 @@
 import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -1985,3 +1986,167 @@ class TestScheduledTaskRetrievalQuery:
         sent_prompt = agent.process_message.call_args.args[0]
         assert "Summarize my unread email" in sent_prompt
         assert sent_prompt != "Summarize my unread email"
+
+
+class TestScheduledTaskReliabilityFixes:
+    """Regression coverage for review findings on the retry/notify path."""
+
+    @pytest.mark.asyncio
+    async def test_skill_loop_failure_is_retried(self, tmp_path, monkeypatch):
+        """A failure inside the ChildActivated skill loop must reach _handle_failure."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ash.agents.types import ChildActivated
+        from ash.scheduling import ScheduledTaskHandler
+        from ash.scheduling.store import ScheduleStore
+
+        async def _boom(*_a, **_k):
+            raise RuntimeError("skill loop exploded")
+
+        monkeypatch.setattr("ash.agents.executor.run_to_completion", _boom)
+
+        agent = MagicMock()
+        agent.process_message = AsyncMock(
+            side_effect=ChildActivated(
+                child_frame=cast(Any, object()), main_frame=cast(Any, object())
+            )
+        )
+        store = ScheduleStore(tmp_path / "graph")
+        sender = AsyncMock(return_value="m1")
+        handler = ScheduledTaskHandler(
+            agent=agent,
+            senders={"telegram": sender},
+            agent_executor=MagicMock(),  # truthy executor so the skill path is taken
+            store=store,
+        )
+        entry = ScheduleEntry(
+            message="Run the briefing skill",
+            trigger_at=datetime.now(UTC),
+            provider="telegram",
+            chat_id="123",
+            user_id="456",
+            max_retries=1,
+        )
+        await handler.handle(entry)
+
+        entries = store.get_entries()
+        assert len(entries) == 1  # retry was enqueued, not silently dropped
+        assert entries[0].retry_count == 1
+        assert entries[0].last_error == "skill loop exploded"
+
+    @pytest.mark.asyncio
+    async def test_delivery_failure_is_not_retried(self, tmp_path):
+        """Execution succeeded; a send failure must NOT re-run the task."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ash.scheduling import ScheduledTaskHandler
+        from ash.scheduling.store import ScheduleStore
+
+        agent = MagicMock()
+        response = MagicMock()
+        response.text = "booked the meeting"
+        agent.process_message = AsyncMock(return_value=response)
+        store = ScheduleStore(tmp_path / "graph")
+        sender = AsyncMock(side_effect=RuntimeError("network down"))
+        handler = ScheduledTaskHandler(
+            agent=agent, senders={"telegram": sender}, store=store
+        )
+        entry = ScheduleEntry(
+            message="Book meeting and confirm",
+            trigger_at=datetime.now(UTC),
+            provider="telegram",
+            chat_id="123",
+            user_id="456",
+            max_retries=3,
+        )
+        await handler.handle(entry)
+
+        # No retry enqueued despite max_retries=3 — delivery is not task execution.
+        assert store.get_entries() == []
+
+    @pytest.mark.asyncio
+    async def test_periodic_failure_notice_wording(self, tmp_path):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ash.scheduling import ScheduledTaskHandler
+        from ash.scheduling.store import ScheduleStore
+
+        agent = MagicMock()
+        agent.process_message = AsyncMock(side_effect=RuntimeError("cron boom"))
+        store = ScheduleStore(tmp_path / "graph")
+        sender = AsyncMock(return_value="m1")
+        handler = ScheduledTaskHandler(
+            agent=agent, senders={"telegram": sender}, store=store
+        )
+        entry = ScheduleEntry(
+            message="Daily sync",
+            cron="0 8 * * *",
+            provider="telegram",
+            chat_id="123",
+            user_id="456",
+            notify_on_failure=True,
+        )
+        await handler.handle(entry)
+
+        sender.assert_called_once()
+        text = sender.call_args.args[1]
+        assert "run again at its next scheduled time" in text
+        assert "will not run again" not in text
+
+    @pytest.mark.asyncio
+    async def test_last_error_cleared_on_success(self, tmp_path):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ash.scheduling import ScheduledTaskHandler
+
+        agent = MagicMock()
+        response = MagicMock()
+        response.text = "all good"
+        agent.process_message = AsyncMock(return_value=response)
+        handler = ScheduledTaskHandler(
+            agent=agent, senders={"telegram": AsyncMock(return_value="m1")}
+        )
+        entry = ScheduleEntry(
+            message="Daily sync",
+            cron="0 8 * * *",
+            provider="telegram",
+            chat_id="123",
+            user_id="456",
+            last_error="previous failure",
+        )
+        await handler.handle(entry)
+
+        assert entry.last_error is None
+
+    @pytest.mark.asyncio
+    async def test_backoff_is_capped_no_overflow(self, tmp_path):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ash.scheduling import ScheduledTaskHandler
+        from ash.scheduling.handler import _MAX_RETRY_BACKOFF_SECONDS
+        from ash.scheduling.store import ScheduleStore
+
+        agent = MagicMock()
+        agent.process_message = AsyncMock(side_effect=RuntimeError("down"))
+        store = ScheduleStore(tmp_path / "graph")
+        handler = ScheduledTaskHandler(
+            agent=agent, senders={"telegram": AsyncMock()}, store=store
+        )
+        # A high retry_count that would overflow timedelta without the cap.
+        entry = ScheduleEntry(
+            message="Sync",
+            trigger_at=datetime.now(UTC),
+            provider="telegram",
+            chat_id="123",
+            user_id="456",
+            max_retries=100,
+            retry_count=60,
+        )
+        await handler.handle(entry)  # must not raise OverflowError
+
+        entries = store.get_entries()
+        assert len(entries) == 1
+        retry = entries[0]
+        assert retry.trigger_at is not None
+        delta = (retry.trigger_at - datetime.now(UTC)).total_seconds()
+        assert delta <= _MAX_RETRY_BACKOFF_SECONDS + 5
