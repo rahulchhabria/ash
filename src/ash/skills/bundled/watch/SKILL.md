@@ -18,7 +18,7 @@ Scheduled runs arrive wrapped with timing context (`<timing>`, `<decision-guidan
 
 1. **Check the condition** — run the read command for what you're watching (e.g. `gh pr checks`, a curl to a status endpoint, a metric query). Read-only.
 2. **Compare to last known state** — the scheduled task message should carry the last observed value (see re-arm step). If the current value equals the last, this is a no-change tick.
-3. **Report only on meaningful change** — if changed (or first observation, or a terminal state like success/failure), report it. If unchanged, stay silent: return a terse no-op via `complete()`.
+3. **Report only on meaningful change** — if changed (or first observation, or a terminal state like success/failure), report it. If unchanged, stay truly silent: `complete()` with exactly `[NO_REPLY]`. The scheduler drops `[NO_REPLY]` responses, so no message is sent. Do NOT emit a "no change" status line — that defeats the anti-spam rule.
 4. **Re-arm** — schedule the next check, embedding the current value so the next run can compare:
 
 ```bash
@@ -37,22 +37,22 @@ Stop re-arming once a terminal condition is reached (build passed/failed, PR mer
 Format your `complete()` output exactly as below.
 
 **On meaningful change:**
-```
+```text
 Build main: FAILING (was passing) — 2 checks red: lint, e2e. Next check in 15m.
 ```
 
 **Terminal — stop:**
-```
+```text
 PR #482 merged. Stopping the watch.
 ```
 
-**No change (silent tick):**
-```
-No change (build still passing). Next check in 15m.
+**No change (silent tick)** — emit exactly this and nothing else, so the scheduler suppresses the message:
+```text
+[NO_REPLY]
 ```
 
 **Skipped stale run:**
-```
+```text
 Skipped stale check — next scheduled run is imminent.
 ```
 
