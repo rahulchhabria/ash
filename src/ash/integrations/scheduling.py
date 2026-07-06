@@ -66,6 +66,7 @@ class SchedulingIntegration(IntegrationContributor):
                 self._persisters,
                 timezone=self._timezone,
                 agent_executor=self._agent_executor,
+                store=self._store,
             )
             self._watcher.add_handler(schedule_handler.handle)
 

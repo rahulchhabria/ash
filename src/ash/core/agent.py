@@ -499,10 +499,14 @@ class Agent:
         user_message: str,
         session: SessionState,
         user_id: str | None,
+        retrieval_query: str | None = None,
     ) -> _MessageSetup:
         effective_user_id = user_id or session.user_id
 
-        # Use ContextGatherer to retrieve memory and people context
+        # Use ContextGatherer to retrieve memory and people context.
+        # retrieval_query lets callers (e.g. the scheduled-task handler) drive
+        # memory/people retrieval from the real task text instead of a wrapped
+        # prompt, so autonomous runs stay personalized. Defaults to user_message.
         ctx = session.context
         context_gatherer = ContextGatherer(
             self._memory,
@@ -512,7 +516,7 @@ class Agent:
         )
         gathered = await context_gatherer.gather(
             user_id=effective_user_id,
-            user_message=user_message,
+            user_message=retrieval_query or user_message,
             provider=session.provider,
             chat_id=session.chat_id,
             chat_type=ctx.chat_type,
@@ -920,11 +924,14 @@ class Agent:
         get_steering_messages: GetSteeringMessagesCallback | None = None,
         session_manager: Any = None,  # Type: SessionManager | None
         tool_overrides: dict[str, Any] | None = None,
+        retrieval_query: str | None = None,
     ) -> AgentResponse:
         from ash.logging import log_context
         from ash.observability import set_sentry_conversation_id
 
-        setup = await self._prepare_message_context(user_message, session, user_id)
+        setup = await self._prepare_message_context(
+            user_message, session, user_id, retrieval_query=retrieval_query
+        )
         session.add_user_message(user_message)
         compaction_info = await self._maybe_compact(session)
 
@@ -1064,11 +1071,14 @@ class Agent:
         get_steering_messages: GetSteeringMessagesCallback | None = None,
         session_manager: Any = None,  # Type: SessionManager | None
         tool_overrides: dict[str, Any] | None = None,
+        retrieval_query: str | None = None,
     ) -> AsyncIterator[str]:
         from ash.logging import log_context
         from ash.observability import set_sentry_conversation_id
 
-        setup = await self._prepare_message_context(user_message, session, user_id)
+        setup = await self._prepare_message_context(
+            user_message, session, user_id, retrieval_query=retrieval_query
+        )
         session.add_user_message(user_message)
         await self._maybe_compact(session)
 
@@ -1298,7 +1308,9 @@ async def create_agent(
 
     # Register first-class memory tools when the store is available.
     if graph_store is not None:
-        tool_registry.register(RememberTool(store=graph_store, extractor=memory_extractor))
+        tool_registry.register(
+            RememberTool(store=graph_store, extractor=memory_extractor)
+        )
         tool_registry.register(ListMemoriesTool(store=graph_store))
         tool_registry.register(SearchMemoriesTool(store=graph_store))
         tool_registry.register(ForgetMemoryTool(store=graph_store))

@@ -262,6 +262,35 @@ class CloseGameAlertConfig(BaseModel):
     alert_prefixes: list[str] = Field(default_factory=lambda: ["Close Game Alert"])
 
 
+class ReactiveWorkflowRule(BaseModel):
+    """One signal->workflow routing rule.
+
+    Spec contract: specs/reactive_workflows.md.
+    """
+
+    name: str
+    match_prefix: str | None = None
+    match_regex: str | None = None
+    skill: str | None = None
+    agent: str | None = None
+    instruction: str | None = None
+    chat_types: list[str] = Field(default_factory=list)
+
+
+class ReactiveWorkflowConfig(BaseModel):
+    """Configuration for the reactive-workflow integration.
+
+    Config-driven, deterministic signal->workflow routing: when an inbound
+    message matches a rule, a structured instruction block is prepended so the
+    agent deterministically routes to the named skill/agent.
+
+    Spec contract: specs/reactive_workflows.md.
+    """
+
+    enabled: bool = False
+    rules: list[ReactiveWorkflowRule] = Field(default_factory=list)
+
+
 class CapabilityProviderConfig(BaseModel):
     """Configuration for one capability provider plugin."""
 
@@ -549,6 +578,9 @@ class AshConfig(BaseModel):
         default_factory=EmailForwardSummaryConfig
     )
     close_game_alert: CloseGameAlertConfig = Field(default_factory=CloseGameAlertConfig)
+    reactive_workflows: ReactiveWorkflowConfig = Field(
+        default_factory=ReactiveWorkflowConfig
+    )
     capabilities: CapabilitiesConfig = Field(default_factory=CapabilitiesConfig)
     tool_output_trust: ToolOutputTrustConfig = Field(
         default_factory=ToolOutputTrustConfig

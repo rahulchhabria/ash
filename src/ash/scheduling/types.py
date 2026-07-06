@@ -37,6 +37,12 @@ class ScheduleEntry:
     username: str | None = None  # For @mentions in response
     provider: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    # Reliability policy (opt-in; defaults preserve legacy no-retry behavior)
+    max_retries: int = 0  # Number of automatic retries on failure (0 = no retry)
+    retry_count: int = 0  # Retries already attempted for this task lineage
+    retry_backoff_seconds: int = 60  # Base backoff; doubled per attempt
+    notify_on_failure: bool = False  # Message the chat when a task ultimately fails
+    last_error: str | None = None  # Error text from the most recent failed attempt
     # Internal tracking
     line_number: int = 0
     _extra: dict[str, Any] = field(default_factory=dict)  # Preserve unknown fields
@@ -254,6 +260,18 @@ class ScheduleEntry:
             data["provider"] = self.provider
         data["created_at"] = self.created_at.isoformat()
 
+        # Reliability policy (only serialize non-default values to keep lines lean)
+        if self.max_retries:
+            data["max_retries"] = self.max_retries
+        if self.retry_count:
+            data["retry_count"] = self.retry_count
+        if self.retry_backoff_seconds != 60:
+            data["retry_backoff_seconds"] = self.retry_backoff_seconds
+        if self.notify_on_failure:
+            data["notify_on_failure"] = self.notify_on_failure
+        if self.last_error:
+            data["last_error"] = self.last_error
+
         return data
 
     @classmethod
@@ -306,6 +324,11 @@ class ScheduleEntry:
             "username",
             "provider",
             "created_at",
+            "max_retries",
+            "retry_count",
+            "retry_backoff_seconds",
+            "notify_on_failure",
+            "last_error",
         }
         extra = {k: v for k, v in data.items() if k not in known_fields}
 
@@ -323,6 +346,11 @@ class ScheduleEntry:
             username=data.get("username"),
             provider=data.get("provider"),
             created_at=created_at,
+            max_retries=int(data.get("max_retries", 0)),
+            retry_count=int(data.get("retry_count", 0)),
+            retry_backoff_seconds=int(data.get("retry_backoff_seconds", 60)),
+            notify_on_failure=bool(data.get("notify_on_failure", False)),
+            last_error=data.get("last_error"),
             line_number=line_number,
             _extra=extra,
         )
