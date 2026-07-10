@@ -1158,10 +1158,15 @@ class AgentExecutor:
                             "interactive_turn_tool_error",
                             extra={"error.message": str(e)},
                         )
+                        failure_result = ToolResult.error(f"Tool error: {e}")
+                        if on_tool_complete:
+                            await on_tool_complete(
+                                tool_use.name, tool_use.input, failure_result
+                            )
                         error_result = self._sanitize_tool_result(
                             tool_name=tool_use.name,
                             tool_use_id=tool_use.id,
-                            result=ToolResult.error(f"Tool error: {e}"),
+                            result=failure_result,
                         )
                         session.add_tool_result(
                             tool_use.id,

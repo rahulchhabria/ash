@@ -134,9 +134,15 @@ class SendMessageTool(Tool):
             session_manager = self._get_session_manager(
                 context.chat_id, context.user_id, context.thread_id
             )
+            persisted_content = message
+            if not persisted_content:
+                if document_path:
+                    persisted_content = f"[sent document: {document_path}]"
+                elif image_path:
+                    persisted_content = f"[sent image: {image_path}]"
             await session_manager.add_assistant_message(
-                content=message,
-                token_count=estimate_tokens(message),
+                content=persisted_content,
+                token_count=estimate_tokens(persisted_content),
                 metadata={
                     "external_id": sent_id,
                     "from_tool": "send_message",

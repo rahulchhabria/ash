@@ -198,6 +198,7 @@ class Agent:
         self._memory_context_limit = max(1, memory_context_limit)
         self._memory_retrieval_limit = max(1, memory_retrieval_limit)
         self._config = config or AgentConfig()
+        self._user_env = dict(getattr(self._config, "env", {}) or {})
         self._mount_prefix = mount_prefix
         self._prompt_context_augmenters = tuple(prompt_context_augmenters or [])
         self._sandbox_env_augmenters = tuple(sandbox_env_augmenters or [])
@@ -802,6 +803,7 @@ class Agent:
                     mount_prefix=self._mount_prefix,
                 )
             )
+            per_tool_env.update(self._user_env)
             per_tool_context = replace(
                 tool_context,
                 tool_use_id=tool_use.id,

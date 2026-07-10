@@ -20,6 +20,7 @@ _SECRET_ENV_NAME_PATTERNS = (
     r"(?i)(?:^|_)(?:api[_-]?key|token|secret|password|passwd|auth)(?:$|_)",
 )
 _SECRET_ENV_NAME_ALLOWLIST = {
+    # Public transit skill config: "511" is a service brand, not a secret prefix.
     "511_API_KEY",
 }
 _OAUTH_CALLBACK_URL_PATTERN = re.compile(r"https?://localhost[^\s]*[?&]code=")
@@ -32,10 +33,6 @@ GOOGLE_EMAIL_MODEL_KEYWORDS = (
     "gmail",
     "inbox",
     "mail",
-    "message",
-    "messages",
-    "thread",
-    "threads",
 )
 
 # Wrapper guidance prepended to all skill system prompts

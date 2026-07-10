@@ -25,6 +25,9 @@ def create_llm_provider(
     access_token: str | None = None,
     account_id: str | None = None,
     auth_storage: AuthStorage | None = None,
+    base_url: str | None = None,
+    default_headers: dict[str, str] | None = None,
+    provider_name: str | None = None,
 ) -> LLMProvider:
     """Create a single LLM provider instance.
 
@@ -34,6 +37,9 @@ def create_llm_provider(
         access_token: OAuth access token (for openai-oauth).
         account_id: ChatGPT account ID (for openai-oauth).
         auth_storage: Auth storage for token refresh (for openai-oauth).
+        base_url: Optional OpenAI-compatible API base URL.
+        default_headers: Optional default headers for OpenAI-compatible providers.
+        provider_name: Optional provider identity reported by OpenAIProvider.
 
     Returns:
         LLM provider instance.
@@ -46,9 +52,19 @@ def create_llm_provider(
     if provider == "anthropic":
         return AnthropicProvider(api_key=key)
     if provider == "openai":
-        return OpenAIProvider(api_key=key)
+        return OpenAIProvider(
+            api_key=key,
+            base_url=base_url,
+            default_headers=default_headers,
+            provider_name=provider_name or provider,
+        )
     if provider == "pioneer":
-        return PioneerProvider(api_key=key)
+        return PioneerProvider(
+            api_key=key,
+            base_url=base_url,
+            default_headers=default_headers,
+            provider_name=provider_name or provider,
+        )
     if provider == "openai-oauth":
         if not access_token or not account_id:
             raise ValueError(

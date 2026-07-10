@@ -259,7 +259,7 @@ requires-dist = [
     { name = "ash-rpc-protocol", editable = "packages/ash-rpc-protocol" },
     { name = "cachetools", specifier = ">=5.3.0" },
     { name = "croniter", specifier = ">=6.0.0" },
-    { name = "deepagents", marker = "extra == 'deepagents'", specifier = ">=0.1.0" },
+    { name = "deepagents", marker = "extra == 'deepagents'", specifier = ">=0.6.0,<0.8" },
     { name = "docker", specifier = ">=7.0.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "filelock", specifier = ">=3.13.0" },

@@ -18,9 +18,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-PARALLEL_SEARCH_URL = "https://api.parallel.ai/v1/search"
-
-
 def _extract_domains(response: SearchResponse) -> list[str]:
     domains: list[str] = []
     seen: set[str] = set()

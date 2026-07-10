@@ -41,6 +41,9 @@ class ModelConfig(BaseModel):
     max_tokens: int = 4096
     thinking: Literal["off", "minimal", "low", "medium", "high"] | None = None
     reasoning: Literal["low", "medium", "high"] | None = None
+    base_url: str | None = None
+    default_headers: dict[str, str] | None = None
+    provider_name: str | None = None
 
 
 class ProviderConfig(BaseModel):
@@ -275,6 +278,21 @@ class ReactiveWorkflowRule(BaseModel):
     agent: str | None = None
     instruction: str | None = None
     chat_types: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_routing_rule(self) -> "ReactiveWorkflowRule":
+        def _present(value: str | None) -> bool:
+            return isinstance(value, str) and bool(value.strip())
+
+        if not (_present(self.match_prefix) or _present(self.match_regex)):
+            raise ValueError("reactive workflow rule requires match_prefix or match_regex")
+        if not (
+            _present(self.skill) or _present(self.agent) or _present(self.instruction)
+        ):
+            raise ValueError(
+                "reactive workflow rule requires skill, agent, or instruction"
+            )
+        return self
 
 
 class ReactiveWorkflowConfig(BaseModel):
@@ -767,6 +785,9 @@ class AshConfig(BaseModel):
         return create_llm_provider(
             model_config.provider,
             api_key=api_key.get_secret_value() if api_key else None,
+            base_url=model_config.base_url,
+            default_headers=model_config.default_headers,
+            provider_name=model_config.provider_name,
         )
 
     def create_llm_provider_for_provider(

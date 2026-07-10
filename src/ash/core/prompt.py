@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from ash.core.prompt_keys import (
@@ -16,7 +16,7 @@ from ash.core.prompt_keys import (
 from ash.skills.types import compute_sandbox_skill_dir as _sandbox_skill_dir
 
 
-class PromptMode(str, Enum):
+class PromptMode(StrEnum):
     FULL = "full"  # Main agent — all sections
     MINIMAL = "minimal"  # Subagents — tool guidance + sandbox + runtime
     NONE = "none"  # Bare identity — SOUL only (or fallback line)
@@ -795,10 +795,15 @@ class SystemPromptBuilder:
                 f"- [Memory{trust_attr}{subject_attr}]{semantic_attr} {item.content}"
             )
 
+        search_guidance = (
+            "For additional searches, call `search_memories`."
+            if has_memory_tools
+            else "For additional searches, run `ash-sb memory search`."
+        )
         retrieved_header = (
             "\n\n### Relevant Context from Memory\n\n"
             "The following has been automatically retrieved. "
-            "Use it directly. For additional searches, call `search_memories`.\n\n"
+            f"Use it directly. {search_guidance}\n\n"
         )
 
         return guidance + retrieved_header + "\n".join(context_items)

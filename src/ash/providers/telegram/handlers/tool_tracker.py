@@ -246,17 +246,18 @@ class ToolTracker:
         """Record tool completion data for final user-visible provenance."""
         document_path = str(result.metadata.get("document_path") or "").strip()
         if document_path:
+            document_message = str(
+                result.metadata.get("document_caption")
+                or result.metadata.get("message")
+                or "Attached file."
+            ).strip()
             sent_id = await self.send_direct_document(
-                message=str(
-                    result.metadata.get("document_caption")
-                    or result.metadata.get("message")
-                    or "Attached file."
-                ).strip(),
+                message=document_message,
                 document_path=document_path,
                 reply_to_message_id=self._reply_to,
             )
             self.record_direct_send(
-                str(result.metadata.get("document_caption") or "Attached file."),
+                document_message,
                 sent_id,
                 has_image=False,
             )

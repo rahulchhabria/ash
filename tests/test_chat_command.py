@@ -79,6 +79,7 @@ def test_validate_model_credentials_raises_when_api_key_missing(
 ) -> None:
     messages: list[str] = []
     monkeypatch.setattr("ash.cli.commands.chat.error", lambda msg: messages.append(msg))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     cfg = _config("anthropic")
 
     with pytest.raises(typer.Exit):

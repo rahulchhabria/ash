@@ -67,7 +67,7 @@ sentry = [
     "sentry-sdk[fastapi]>=2.60.0",
 ]
 deepagents = [
-    "deepagents>=0.1.0",
+    "deepagents>=0.6.0,<0.8",
     "langsmith>=0.2.0",
 ]
 

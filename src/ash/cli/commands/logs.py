@@ -264,7 +264,7 @@ def _entry_matches_search(entry: dict[str, Any], search_pattern: str) -> bool:
         return True
 
     try:
-        structured = json.dumps(entry, sort_keys=True, default=str)
+        structured = json.dumps(list(entry.values()), sort_keys=True, default=str)
     except TypeError:
         structured = str(entry)
     return needle in structured.lower()
