@@ -95,6 +95,66 @@ class TestAgentExecutorModelResolution:
         assert call_kwargs.kwargs["model"] == "gpt-5.2-codex"
 
     @pytest.mark.asyncio
+    async def test_execute_turn_switches_provider_for_frame_model_alias(
+        self, mock_tools
+    ):
+        """Interactive child frames should use the provider for their model alias."""
+        default_llm = MagicMock()
+        default_llm.name = "openai"
+        default_llm.complete = AsyncMock()
+
+        alt_llm = MagicMock()
+        alt_llm.name = "anthropic"
+        alt_llm.complete = AsyncMock(
+            return_value=CompletionResponse(
+                message=Message(
+                    role=Role.ASSISTANT,
+                    content=[TextContent(text="email summary")],
+                ),
+                model="job_school_email",
+                usage=MagicMock(input_tokens=10, output_tokens=5),
+            )
+        )
+
+        config = MagicMock(spec=AshConfig)
+        config.models = {
+            "school_email": ModelConfig(
+                provider="anthropic",
+                model="job_school_email",
+            ),
+        }
+        config.get_model.side_effect = lambda alias: config.models[alias]
+        config.create_llm_provider_for_model.return_value = alt_llm
+
+        executor = AgentExecutor(default_llm, mock_tools, config)
+        session = SessionState(
+            session_id="s-1",
+            provider="telegram",
+            chat_id="c-1",
+            user_id="u-1",
+        )
+        session.add_user_message("summarize my inbox")
+        frame = StackFrame(
+            frame_id="f-1",
+            agent_name="skill:google",
+            agent_type="skill",
+            session=session,
+            system_prompt="system",
+            context=AgentContext(),
+            model_alias="school_email",
+            model="job_school_email",
+            max_iterations=1,
+            is_skill_agent=True,
+        )
+
+        result = await executor.execute_turn(frame)
+
+        assert result.action == TurnAction.SEND_TEXT
+        alt_llm.complete.assert_called_once()
+        default_llm.complete.assert_not_called()
+        assert alt_llm.complete.call_args.kwargs["model"] == "job_school_email"
+
+    @pytest.mark.asyncio
     async def test_agent_without_model_uses_none(
         self, mock_llm, mock_tools, config_with_models
     ):
@@ -285,3 +345,85 @@ async def test_execute_turn_uses_tool_overrides() -> None:
     assert result.action == TurnAction.SEND_TEXT
     assert result.text == "done"
     tools.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_execute_turn_invokes_tool_completion_callback_for_overrides() -> None:
+    llm = MagicMock()
+    llm.complete = AsyncMock(
+        side_effect=[
+            CompletionResponse(
+                message=Message(
+                    role=Role.ASSISTANT,
+                    content=[
+                        ToolUse(
+                            id="tool-1",
+                            name="send_message",
+                            input={"message": "progress"},
+                        )
+                    ],
+                ),
+                model="gpt-5.2",
+                usage=MagicMock(input_tokens=10, output_tokens=5),
+            ),
+            CompletionResponse(
+                message=Message(
+                    role=Role.ASSISTANT,
+                    content=[TextContent(text="done")],
+                ),
+                model="gpt-5.2",
+                usage=MagicMock(input_tokens=10, output_tokens=5),
+            ),
+        ]
+    )
+    tools = MagicMock()
+    tools.get_definitions.return_value = []
+    config = MagicMock(spec=AshConfig)
+    config.tool_output_trust = None
+
+    class _OverrideTool:
+        async def execute(
+            self, input_data: dict[str, object], context: object
+        ) -> ToolResult:
+            _ = input_data
+            _ = context
+            return ToolResult.success("ok", document_path="/workspace/report.md")
+
+    on_tool_complete = AsyncMock()
+
+    executor = AgentExecutor(llm, tools, config)
+    session = SessionState(
+        session_id="sess-1",
+        provider="telegram",
+        chat_id="chat-1",
+        user_id="user-1",
+    )
+    frame = StackFrame(
+        frame_id="frame-1",
+        agent_name="skill:test",
+        agent_type="skill",
+        session=session,
+        system_prompt="system",
+        context=AgentContext(
+            session_id="sess-1",
+            user_id="user-1",
+            chat_id="chat-1",
+            provider="telegram",
+        ),
+        effective_tools=["send_message"],
+        max_iterations=3,
+    )
+
+    result = await executor.execute_turn(
+        frame,
+        user_message="start",
+        tool_overrides={"send_message": _OverrideTool()},
+        on_tool_complete=on_tool_complete,
+    )
+
+    assert result.action == TurnAction.SEND_TEXT
+    on_tool_complete.assert_awaited_once()
+    call = on_tool_complete.await_args
+    assert call is not None
+    assert call.args[0] == "send_message"
+    assert call.args[2].metadata["document_path"] == "/workspace/report.md"

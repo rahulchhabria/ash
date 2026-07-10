@@ -60,6 +60,9 @@ class SkillDefinition:
     capabilities: list[str] = field(
         default_factory=list
     )  # Required namespaced capabilities (e.g. "gog.email")
+    triggers: list[str] = field(
+        default_factory=list
+    )  # Explicit slash-command triggers (e.g. "/research")
 
     # Subagent execution settings
     env: list[str] = field(default_factory=list)  # Env vars to inject from config

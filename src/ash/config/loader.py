@@ -14,7 +14,7 @@ ENV_VAR_MAPPINGS = {
     "anthropic": ("api_key", "ANTHROPIC_API_KEY"),
     "openai": ("api_key", "OPENAI_API_KEY"),
     "telegram": ("bot_token", "TELEGRAM_BOT_TOKEN"),
-    "brave_search": ("api_key", "BRAVE_SEARCH_API_KEY"),
+    "parallel_search": ("api_key", "PARALLEL_API_KEY"),
     "sentry": ("dsn", "SENTRY_DSN"),
     "browser.kernel": ("api_key", "KERNEL_API_KEY"),
 }

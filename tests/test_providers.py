@@ -27,6 +27,7 @@ class TestTelegramProvider:
             mock_bot = MagicMock()
             mock_bot.send_message = AsyncMock()
             mock_bot.send_photo = AsyncMock()
+            mock_bot.send_document = AsyncMock()
             mock_bot.send_chat_action = AsyncMock()
             mock_bot.edit_message_text = AsyncMock()
             mock_bot.delete_message = AsyncMock()
@@ -77,6 +78,22 @@ class TestTelegramProvider:
         assert msg_id == "321"
         fs_input.assert_called_once_with(image_path)
         provider._bot.send_photo.assert_awaited_once()
+
+    async def test_send_document_uses_send_document(self, provider):
+        document_path = "artifacts/report.md"
+        provider._bot.send_document.return_value = MagicMock(message_id=654)
+        with patch("ash.providers.telegram.provider.FSInputFile") as fs_input:
+            msg_id = await provider.send(
+                OutgoingMessage(
+                    chat_id="123",
+                    text="Research report attached",
+                    document_path=document_path,
+                )
+            )
+
+        assert msg_id == "654"
+        fs_input.assert_called_once_with(document_path)
+        provider._bot.send_document.assert_awaited_once()
 
     async def test_send_ignores_non_numeric_reply_to_message_id(self, provider):
         provider._bot.send_message.return_value = MagicMock(message_id=123)

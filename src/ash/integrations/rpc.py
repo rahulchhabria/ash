@@ -27,7 +27,8 @@ async def active_rpc_server(
         yield None
         return
 
-    server = RPCServer(socket_path)
+    tcp_bind_host = os.environ.get("ASH_RPC_TCP_BIND_HOST", "0.0.0.0").strip()
+    server = RPCServer(socket_path, tcp_host=tcp_bind_host or "0.0.0.0")
     runtime.register_rpc_methods(server, context)
     await server.start()
 

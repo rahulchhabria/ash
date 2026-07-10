@@ -117,6 +117,20 @@ def _coerce_chat_types(name: str, value: Any) -> list[str]:
     return [item.lower() for item in items if item]
 
 
+def _coerce_triggers(name: str, value: Any) -> list[str]:
+    """Normalize slash-command triggers."""
+    items = _coerce_str_list(name, value)
+    normalized: list[str] = []
+    for item in items:
+        text = item.strip().lower()
+        if not text:
+            continue
+        if not text.startswith("/"):
+            text = f"/{text}"
+        normalized.append(text)
+    return sorted(set(normalized))
+
+
 def _coerce_capability_ids(name: str, value: Any) -> list[str]:
     items = _coerce_str_list(name, value)
     invalid = [item for item in items if not _NAMESPACED_CAPABILITY_ID.match(item)]
@@ -156,6 +170,7 @@ class SkillRegistry:
     def __init__(self, skill_config: dict[str, SkillConfig] | None = None) -> None:
         self._skills: dict[str, SkillDefinition] = {}
         self._skill_sources: dict[str, Path] = {}
+        self._trigger_map: dict[str, str] = {}
         self._skill_config = skill_config or {}
 
     def discover(
@@ -342,6 +357,7 @@ class SkillRegistry:
             capabilities=_coerce_capability_ids(
                 "capabilities", data.get("capabilities")
             ),
+            triggers=_coerce_triggers("triggers", data.get("triggers")),
             source_type=source_type,
             source_repo=source_repo,
             source_ref=source_ref,
@@ -397,9 +413,15 @@ class SkillRegistry:
                     f"Skill '{skill.name}' from {existing_source} "
                     f"overridden by {source_path}"
                 )
+            existing_skill = self._skills[skill.name]
+            for trigger in existing_skill.triggers:
+                if self._trigger_map.get(trigger) == skill.name:
+                    self._trigger_map.pop(trigger, None)
 
         self._skills[skill.name] = skill
         self._skill_sources[skill.name] = source_path
+        for trigger in skill.triggers:
+            self._trigger_map[trigger] = skill.name
         logger.debug(f"Loaded skill: {skill.name} from {source_path}")
 
     def _load_markdown_skill(
@@ -453,6 +475,18 @@ class SkillRegistry:
     def list_available(self) -> list[SkillDefinition]:
         return list(self._skills.values())
 
+    def find_by_trigger(self, trigger: str) -> SkillDefinition | None:
+        """Return the skill registered for an explicit slash-command trigger."""
+        normalized = trigger.strip().lower()
+        if not normalized:
+            return None
+        if not normalized.startswith("/"):
+            normalized = f"/{normalized}"
+        skill_name = self._trigger_map.get(normalized)
+        if not skill_name:
+            return None
+        return self._skills.get(skill_name)
+
     def reload_workspace(self, workspace_path: Path) -> int:
         """Reload workspace skills only (preserves other sources)."""
         count_before = len(self._skills)
@@ -479,6 +513,7 @@ class SkillRegistry:
         """
         self._skills.clear()
         self._skill_sources.clear()
+        self._trigger_map.clear()
         self.discover(
             workspace_path,
             include_bundled=include_bundled,

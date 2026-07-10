@@ -7,6 +7,8 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
+from docker.errors import NotFound
+
 from ash.config.paths import get_ash_home, get_run_path
 from ash.sandbox.manager import SandboxConfig, SandboxManager
 
@@ -108,6 +110,41 @@ class SandboxExecutor:
                 timed_out=exit_code == -1 and "timed out" in stderr.lower(),
             )
         except Exception as e:
+            # Recover once when a cached/reused container id is stale.
+            if reuse_container and self._is_stale_container_error(e):
+                logger.warning(
+                    "sandbox_stale_container_retry",
+                    extra={
+                        "container.id": (container_id or "")[:12],
+                        "error.message": str(e),
+                    },
+                )
+                self._reset_managed_container_binding()
+                try:
+                    retry_container_id = await self._get_or_create_container(
+                        reuse_container
+                    )
+                    exit_code, stdout, stderr = await self._manager.exec_command(
+                        retry_container_id,
+                        command,
+                        timeout=timeout,
+                        environment=merged_env if merged_env else None,
+                    )
+                    return ExecutionResult(
+                        exit_code=exit_code,
+                        stdout=stdout,
+                        stderr=stderr,
+                        timed_out=exit_code == -1 and "timed out" in stderr.lower(),
+                    )
+                except Exception as retry_error:
+                    logger.error(
+                        "sandbox_execution_failed_after_retry",
+                        extra={"error.message": str(retry_error)},
+                        exc_info=True,
+                    )
+                    return ExecutionResult(
+                        exit_code=-1, stdout="", stderr=str(retry_error)
+                    )
             logger.error(
                 "sandbox_execution_failed",
                 extra={"error.message": str(e)},
@@ -265,6 +302,18 @@ class SandboxExecutor:
         path = self._managed_state_path()
         if path.exists():
             path.unlink()
+
+    def _reset_managed_container_binding(self) -> None:
+        self._container_id = None
+        self._container_setup_done = False
+        self._clear_managed_container_state()
+
+    @staticmethod
+    def _is_stale_container_error(error: Exception) -> bool:
+        if isinstance(error, NotFound):
+            return True
+        message = str(error)
+        return "No such container" in message or "/containers/" in message
 
     async def _resolve_managed_container(self, managed_name: str | None) -> str | None:
         if not managed_name:

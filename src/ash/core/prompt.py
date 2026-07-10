@@ -724,22 +724,48 @@ class SystemPromptBuilder:
         if not memory:
             return ""
 
-        guidance = (
-            "## Memory\n\n"
-            "Memory is automatic — facts are extracted after each exchange.\n"
-            "Treat automatically retrieved memory as primary context.\n"
-            "If retrieved memory already answers the user's question, answer from it using the appropriate trust posture.\n"
-            "Do not ask for details that are already present in retrieved memory.\n"
-            "When users explicitly ask to remember something, run `ash-sb memory extract` "
-            "(no arguments needed — it processes the current message through the full pipeline).\n"
-            "Always use `ash-sb memory extract` — never use `ash-sb memory add`.\n"
-            'When users ask about "what you learned in this chat" or "from this conversation", '
-            "use `--this-chat` to filter to memories learned in the current chat.\n"
-            "Do not use `--this-chat` unless the user explicitly asks for chat-scoped memory.\n"
-            "Run `ash-sb memory search` only when injected memory is insufficient.\n"
-            "Memories marked [hearsay] were stated by someone other than the subject — "
-            'use hedging language ("according to...", "X mentioned that...") when citing them.'
+        # Detect whether first-class memory tools are registered.
+        has_memory_tools = (
+            self._tools.has("remember")
+            and self._tools.has("list_memories")
+            and self._tools.has("search_memories")
+            and self._tools.has("forget_memory")
         )
+
+        if has_memory_tools:
+            guidance = (
+                "## Memory\n\n"
+                "Memory is automatic — facts are extracted after each exchange.\n"
+                "Treat automatically retrieved memory as primary context.\n"
+                "If retrieved memory already answers the user's question, answer from it using the appropriate trust posture.\n"
+                "Do not ask for details that are already present in retrieved memory.\n"
+                "\n"
+                "Use these memory tools when needed:\n"
+                "- `remember` — when the user explicitly asks you to remember something.\n"
+                "- `list_memories` — when the user asks what you remember about them, or to show stored memories.\n"
+                "- `search_memories` — when injected memory is insufficient for the current query.\n"
+                "- `forget_memory` — when the user explicitly asks you to forget something (use the id from list/search).\n"
+                "\n"
+                "Memories marked [hearsay] were stated by someone other than the subject — "
+                'use hedging language ("according to...", "X mentioned that...") when citing them.'
+            )
+        else:
+            guidance = (
+                "## Memory\n\n"
+                "Memory is automatic — facts are extracted after each exchange.\n"
+                "Treat automatically retrieved memory as primary context.\n"
+                "If retrieved memory already answers the user's question, answer from it using the appropriate trust posture.\n"
+                "Do not ask for details that are already present in retrieved memory.\n"
+                "When users explicitly ask to remember something, run `ash-sb memory extract` "
+                "(no arguments needed — it processes the current message through the full pipeline).\n"
+                "Always use `ash-sb memory extract` — never use `ash-sb memory add`.\n"
+                'When users ask about "what you learned in this chat" or "from this conversation", '
+                "use `--this-chat` to filter to memories learned in the current chat.\n"
+                "Do not use `--this-chat` unless the user explicitly asks for chat-scoped memory.\n"
+                "Run `ash-sb memory search` only when injected memory is insufficient.\n"
+                "Memories marked [hearsay] were stated by someone other than the subject — "
+                'use hedging language ("according to...", "X mentioned that...") when citing them.'
+            )
 
         if not memory.memories:
             return guidance
@@ -772,7 +798,7 @@ class SystemPromptBuilder:
         retrieved_header = (
             "\n\n### Relevant Context from Memory\n\n"
             "The following has been automatically retrieved. "
-            "Use it directly. For additional searches, use `ash-sb memory search`.\n\n"
+            "Use it directly. For additional searches, call `search_memories`.\n\n"
         )
 
         return guidance + retrieved_header + "\n".join(context_items)

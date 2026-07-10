@@ -1,121 +1,81 @@
 # Research Agent
 
-> Built-in agent for deep web research with multi-source synthesis
+> Built-in agent for DeepAgents-backed research with optional GLiNER extraction and Codex review
 
-Files: src/ash/agents/builtin/research.py
+Files: src/ash/agents/builtin/research.py, src/ash/research/service.py, src/ash/cli/commands/research.py
 
 ## Requirements
 
 ### MUST
 
 - Be invocable via `use_agent` tool with agent="research"
-- Use web_search tool for querying multiple search angles
-- Use web_fetch tool for reading authoritative sources
-- Produce inline citations [1], [2], [3] throughout response
-- Include numbered source list at end with URLs
-- Provide a summary section with key findings
-- Limit tool iterations to prevent runaway searches (default 15)
-- Restrict tools to only web_search and web_fetch
+- Run as a passthrough agent rather than an LLM tool loop
+- Create a timestamped job directory under `~/.ash/research/jobs/`
+- Persist `request.md`, `report.md`, `brief.md`, `facts.json`, and `metadata.json`
+- Return structured artifact metadata from the research agent result so integrations can deterministically deliver the generated report without requiring an LLM to scrape paths from prose
+- Attempt to run a local DeepAgents research workflow when available
+- Degrade gracefully when DeepAgents is unavailable by writing a fallback report
+- Attempt GLiNER extraction over the normalized research artifacts
+- Support optional final review using an Ash model alias such as `codex`
+- Expose a direct CLI entrypoint via `ash research`
 
 ### SHOULD
 
-- Prefer official documentation over blog posts
-- Cross-reference information across multiple sources
-- Note when sources disagree
-- Include publication dates when available
-- Support focus parameter to guide research direction
+- Copy backend notes, transcript, and sources into the Ash job directory when available
+- Support `mode` values `smoke`, `demo`, and `full`
+- Support DeepAgents model and max-search-result overrides
 
 ### MAY
 
-- Support depth parameter for controlling research thoroughness
-- Track and report methodology (queries used, sources analyzed)
-- Cache research results
+- Include actionable next steps in `actions.json`
+- Support custom GLiNER label schemas per request
 
 ## Interface
 
 ```python
-# Invoked via use_agent tool
 use_agent(
     agent="research",
     message="Research modern AI agent architectures",
-    input={"focus": "tool use patterns"}  # optional
+    input={
+        "mode": "demo",
+        "deepagents_model": "gpt-5.2-codex",
+        "max_search_results": 5,
+        "codex_review": True,
+    },
 )
 
-class ResearchAgent(Agent):
-    @property
-    def config(self) -> AgentConfig:
-        return AgentConfig(
-            name="research",
-            description="Research a topic using web search",
-            system_prompt=RESEARCH_SYSTEM_PROMPT,
-            allowed_tools=["web_search", "web_fetch"],
-            max_iterations=15,
-        )
-
-    def build_system_prompt(self, context: AgentContext) -> str:
-        """Build prompt with optional focus area."""
-```
-
-## Configuration
-
-```python
-AgentConfig(
-    name="research",
-    description="Research a topic using web search to find authoritative sources",
-    allowed_tools=["web_search", "web_fetch"],
-    max_iterations=15,
-)
-```
-
-## Output Format
-
-The agent produces markdown output:
-
-```markdown
-## Summary
-[2-3 sentence executive summary of key findings]
-
-## Findings
-[Detailed analysis with inline citations [1][2]]
-
-## Sources
-[1] Title - https://example.com/article1
-[2] Title - https://example.org/article2
+ash research "Research modern AI agent architectures" --mode demo
 ```
 
 ## Behaviors
 
 | Input | Output | Notes |
 |-------|--------|-------|
-| Message only | Research report | Agent chooses search strategy |
-| Message + focus | Focused research | Focus guides query generation |
-| Topic with few sources | Report with available sources | Agent adapts to what's found |
+| Message only | Job directory + brief/report paths | Uses default `demo` mode |
+| `use_agent("research", ...)` in provider flows | Structured metadata includes `document_path` for `report.md` | Provider integration may auto-send the report artifact |
+| DeepAgents available | Copied backend report + notes + sources | Normalized into Ash artifact layout |
+| DeepAgents unavailable | Fallback report | No external research performed |
+| GLiNER available | `facts.json` with extracted entities | Operates on combined report/source text |
+| Codex alias available | `brief.md` and `actions.json` | Uses Ash model config |
 
 ## Errors
 
 | Condition | Response |
 |-----------|----------|
-| web_search unavailable | Error: tool not in allowed list |
-| All searches fail | Agent reports inability to find sources |
-| Max iterations reached | Returns partial findings |
-
-## Design Notes
-
-The research agent uses an agentic approach where the LLM decides:
-- Which queries to run
-- Which sources to fetch
-- How to synthesize findings
-
-This is simpler than a multi-phase orchestrator but relies on LLM reasoning
-to produce quality research. The system prompt guides best practices.
+| Empty message | `ValueError("question is required")` |
+| DeepAgents runner missing | Fallback report with backend error |
+| DeepAgents timeout | Partial/failed run with timeout recorded in metadata |
+| GLiNER failure | `facts.json` records extractor unavailability/failure |
+| Codex review unavailable | Brief falls back to report excerpt |
 
 ## Verification
 
 ```bash
-uv run ash chat "Use the research agent to find info about Python async"
+uv run ash research "Compare Sentry and Honeycomb for AI debugging relevance" --mode smoke
+uv run ash chat "Use the research agent to compare Sentry and Honeycomb"
 ```
 
-- Agent invoked via use_agent tool
-- Multiple web_search queries executed
-- Sources fetched and cited
-- Coherent report produced
+- `use_agent` can invoke `research`
+- `ash research` creates a timestamped job directory
+- `report.md`, `brief.md`, `facts.json`, and `metadata.json` are written
+- When DeepAgents is configured locally, backend artifacts are copied into the Ash job

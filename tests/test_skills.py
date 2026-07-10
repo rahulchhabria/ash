@@ -251,6 +251,10 @@ Run triggered behavior.
         registry.discover(tmp_path, include_bundled=False)
 
         assert registry.has("triggered")
+        skill = registry.get("triggered")
+        assert skill.triggers == ["/research"]
+        assert registry.find_by_trigger("/research") is skill
+        assert registry.find_by_trigger("research") is skill
 
     def test_discover_skill_with_provenance(self, tmp_path: Path):
         """Test that authors and rationale fields are parsed."""

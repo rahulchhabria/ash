@@ -4,7 +4,11 @@ from ash.tools.base import Tool, ToolContext, ToolResult, build_sandbox_manager_
 from ash.tools.builtin import (
     BashTool,
     BrowserTool,
+    ForgetMemoryTool,
+    ListMemoriesTool,
     ReadFileTool,
+    RememberTool,
+    SearchMemoriesTool,
     WebFetchTool,
     WebSearchTool,
     WriteFileTool,
@@ -35,7 +39,11 @@ __all__ = [
     # Built-in tools
     "BashTool",
     "BrowserTool",
+    "ForgetMemoryTool",
+    "ListMemoriesTool",
     "ReadFileTool",
+    "RememberTool",
+    "SearchMemoriesTool",
     "WebFetchTool",
     "WebSearchTool",
     "WriteFileTool",

@@ -10,7 +10,7 @@ A personal assistant agent with customizable personality, memory, and sandboxed 
 - **Multi-LLM Support**: Anthropic Claude and OpenAI
 - **Telegram Integration**: Chat with your assistant via Telegram
 - **Sandboxed Tools**: Execute bash commands in Docker containers
-- **Web Search**: Built-in Brave Search integration
+- **Web Search**: Built-in Parallel Search integration
 
 ## Documentation
 
@@ -19,7 +19,7 @@ Full documentation at **https://dcramer.github.io/ash/**
 ## Development
 
 ```bash
-make setup  # Install deps + dotagents + prek hooks
+make setup  # Install deps + prek hooks
 ```
 
 | Command | Purpose |
@@ -46,18 +46,8 @@ This project is built with [Claude Code](https://claude.com/code). Agent instruc
 Install required plugins:
 
 ```bash
-claude plugin add getsentry/sentry-skills
 claude plugin add anthropics/code-simplifier
 ```
-
-**Skills from [getsentry/sentry-skills](https://github.com/getsentry/sentry-skills)**:
-
-| Skill | Purpose |
-|-------|---------|
-| `/commit` | Create commits with proper attribution |
-| `/create-pr` | Open pull requests |
-| `/find-bugs` | Audit local changes before merging |
-| `/deslop` | Remove AI-generated code slop |
 
 **From [anthropics/code-simplifier](https://github.com/anthropics/claude-plugins-official/tree/main/plugins/code-simplifier)**:
 

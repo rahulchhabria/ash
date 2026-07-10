@@ -89,9 +89,9 @@ def register(app: typer.Typer) -> None:
                     else "[dim]not configured[/dim]",
                 )
                 table.add_row(
-                    "Brave Search",
+                    "Parallel Search",
                     "configured"
-                    if config_obj.brave_search and config_obj.brave_search.api_key
+                    if config_obj.parallel_search and config_obj.parallel_search.api_key
                     else "[dim]not configured[/dim]",
                 )
                 from ash.config.paths import get_graph_dir

@@ -553,6 +553,7 @@ class StackFrameMeta(BaseModel):
     agent_session_id: str | None = None  # Links to AgentSessionEntry in context.jsonl
     agent_name: str
     agent_type: str  # "skill" | "agent" | "main"
+    model_alias: str | None = None
     model: str | None = None
     iteration: int = 0
     max_iterations: int = 25

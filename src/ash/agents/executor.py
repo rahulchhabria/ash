@@ -26,6 +26,7 @@ from ash.tools.trust import (
 
 if TYPE_CHECKING:
     from ash.config import AshConfig
+    from ash.core.types import OnToolCompleteCallback, OnToolStartCallback
     from ash.llm.base import LLMProvider
     from ash.sessions.manager import SessionManager
     from ash.tools import ToolExecutor
@@ -314,6 +315,7 @@ class AgentExecutor:
         self._llm = llm_provider
         self._tools = tool_executor
         self._config = config
+        self._llm_by_alias: dict[str, LLMProvider] = {}
         trust_config = getattr(config, "tool_output_trust", None)
         self._tool_output_trust_policy = ToolOutputTrustPolicy(
             mode=getattr(trust_config, "mode", "warn_sanitize"),
@@ -324,6 +326,20 @@ class AgentExecutor:
             injection_patterns=ToolOutputTrustPolicy.defaults().injection_patterns,
             redact_patterns=ToolOutputTrustPolicy.defaults().redact_patterns,
         )
+
+    def _llm_for_model_alias(self, model_alias: str | None) -> "LLMProvider":
+        """Return the LLM provider for a configured model alias."""
+        if not model_alias:
+            return self._llm
+        model_config = self._config.get_model(model_alias)
+        current_provider = getattr(self._llm, "name", None)
+        if not isinstance(current_provider, str) or current_provider == model_config.provider:
+            return self._llm
+        if model_alias not in self._llm_by_alias:
+            self._llm_by_alias[model_alias] = self._config.create_llm_provider_for_model(
+                model_alias
+            )
+        return self._llm_by_alias[model_alias]
 
     def _sanitize_tool_result(
         self,
@@ -630,6 +646,7 @@ class AgentExecutor:
             from ash.logging import _log_model
 
             _log_model.set(resolved_model)
+        llm = self._llm_for_model_alias(model_alias)
 
         system_prompt = agent.build_system_prompt(context)
         effective_tools = agent_config.get_effective_tools()
@@ -647,7 +664,7 @@ class AgentExecutor:
             )
 
             try:
-                response = await self._llm.complete(
+                response = await llm.complete(
                     messages=session.get_messages_for_llm(),
                     model=resolved_model,
                     system=system_prompt,
@@ -905,6 +922,8 @@ class AgentExecutor:
         tool_result: tuple[str, str, bool] | None = None,
         session_manager: "SessionManager | None" = None,
         tool_overrides: dict[str, Any] | None = None,
+        on_tool_start: "OnToolStartCallback | None" = None,
+        on_tool_complete: "OnToolCompleteCallback | None" = None,
     ) -> TurnResult:
         """Run one logical turn for a stack frame.
 
@@ -920,6 +939,8 @@ class AgentExecutor:
             session_manager: Optional session manager for logging to context.jsonl.
             tool_overrides: Optional map of tool name -> tool implementation to use
                 for this turn instead of the shared executor registry.
+            on_tool_start: Optional callback invoked before each tool runs.
+            on_tool_complete: Optional callback invoked after each tool completes.
 
         Returns:
             TurnResult indicating what happened.
@@ -997,7 +1018,8 @@ class AgentExecutor:
                 if not unresolved:
                     # Need LLM call
                     try:
-                        response = await self._llm.complete(
+                        llm = self._llm_for_model_alias(frame.model_alias)
+                        response = await llm.complete(
                             messages=session.get_messages_for_llm(),
                             model=frame.model,
                             system=frame.system_prompt,
@@ -1071,6 +1093,8 @@ class AgentExecutor:
                         continue
 
                     try:
+                        if on_tool_start:
+                            await on_tool_start(tool_use.name, tool_use.input)
                         per_tool_env = dict(tool_context.env)
                         _refresh_context_token_env(frame, session, per_tool_env)
                         frame.environment = dict(per_tool_env)
@@ -1095,6 +1119,8 @@ class AgentExecutor:
                             result = await self._tools.execute(
                                 tool_use.name, tool_use.input, per_tool_context
                             )
+                        if on_tool_complete:
+                            await on_tool_complete(tool_use.name, tool_use.input, result)
                         sanitized = self._sanitize_tool_result(
                             tool_name=tool_use.name,
                             tool_use_id=tool_use.id,

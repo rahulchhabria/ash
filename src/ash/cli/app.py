@@ -13,6 +13,7 @@ from ash.cli.commands import (
     logs,
     memory,
     people,
+    research,
     sandbox,
     schedule,
     serve,
@@ -58,6 +59,7 @@ service.register(app)
 skill.register(app)
 stats.register(app)
 todo.register(app)
+research.register(app)
 
 if __name__ == "__main__":
     app()

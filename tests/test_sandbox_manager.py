@@ -160,6 +160,24 @@ async def test_create_container_sets_ash_skill_dirs_env(tmp_path: Path) -> None:
     assert "/ash/integrations/todo/skills" in skill_dirs
 
 
+async def test_create_container_adds_host_gateway_alias_in_bridge_mode() -> None:
+    manager = SandboxManager(config=SandboxConfig(network_mode="bridge"))
+    fake_client = _FakeDockerClient()
+    manager._client = cast(Any, fake_client)
+
+    async def _ensure_client():
+        return fake_client
+
+    manager._ensure_client = _ensure_client  # type: ignore[method-assign]
+
+    await manager.create_container()
+
+    assert fake_client.containers.last_create_kwargs is not None
+    assert fake_client.containers.last_create_kwargs["extra_hosts"] == {
+        "host.docker.internal": "host-gateway"
+    }
+
+
 class _FakeExecAPI:
     def __init__(self) -> None:
         self.last_exec_create_kwargs: dict[str, Any] | None = None

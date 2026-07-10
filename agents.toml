@@ -1,5 +1,5 @@
 version = 1
-# Managed skills are gitignored; collaborators must run 'dotagents install'.
+# Managed skills are gitignored.
 gitignore = true
 # Skills always fetch the latest version; lockfile tracks names only.
 pin = false
@@ -9,25 +9,5 @@ agents = ["claude", "cursor", "codex"]
 allow_all = true
 
 [[skills]]
-name = "dotagents"
-source = "getsentry/dotagents"
-
-[[skills]]
-name = "skill-writer"
-source = "getsentry/skills"
-
-[[skills]]
-name = "pr-writer"
-source = "getsentry/skills"
-
-[[skills]]
-name = "agents-md"
-source = "getsentry/skills"
-
-[[skills]]
 name = "*"
 source = "dcramer/dex"
-
-[[skills]]
-name = "brand-guidelines"
-source = "getsentry/skills"

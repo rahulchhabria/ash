@@ -759,6 +759,8 @@ class TelegramProvider(Provider):
 
     async def send(self, message: OutgoingMessage) -> str:
         """Send a message via Telegram, splitting long messages into chunks."""
+        if message.document_path:
+            return await self._send_document(message)
         if message.image_path:
             return await self._send_image(message)
 
@@ -799,6 +801,42 @@ class TelegramProvider(Provider):
         sent = await self._bot.send_photo(
             chat_id=int(message.chat_id),
             photo=FSInputFile(image_path),
+            caption=rendered_caption_head or None,
+            reply_to_message_id=reply_to,
+            parse_mode=parse_mode if rendered_caption_head else None,
+            reply_markup=message.reply_markup,
+        )
+
+        if caption_tail:
+            await self._send_single(
+                OutgoingMessage(
+                    chat_id=message.chat_id,
+                    text=caption_tail,
+                    reply_to_message_id=str(sent.message_id),
+                    parse_mode=message.parse_mode,
+                )
+            )
+
+        return str(sent.message_id)
+
+    async def _send_document(self, message: OutgoingMessage) -> str:
+        """Send a document (optionally with caption) via Telegram."""
+        parse_mode = _get_parse_mode(message.parse_mode)
+        reply_to = _coerce_reply_to_message_id(message.reply_to_message_id)
+        document_path = str(message.document_path or "").strip()
+        if not document_path:
+            raise ValueError("document_path is required for document messages")
+
+        caption = message.text or ""
+        caption_head = truncate_for_rendered_limit(
+            caption, parse_mode=parse_mode, max_length=MAX_CAPTION_LENGTH
+        )
+        caption_tail = caption[len(caption_head) :]
+        rendered_caption_head = render_text_for_parse_mode(caption_head, parse_mode)
+
+        sent = await self._bot.send_document(
+            chat_id=int(message.chat_id),
+            document=FSInputFile(document_path),
             caption=rendered_caption_head or None,
             reply_to_message_id=reply_to,
             parse_mode=parse_mode if rendered_caption_head else None,

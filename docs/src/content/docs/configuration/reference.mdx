@@ -326,11 +326,14 @@ enabled = false
 response_allowed_chats = []
 response_blocked_chats = []
 
-[brave_search]
+[parallel_search]
 api_key = "..."
 
 [sentry]
 dsn = "https://..."
+traces_sample_rate = 0.1
+stream_gen_ai_spans = false
+send_default_pii = false
 
 [server]
 host = "127.0.0.1"

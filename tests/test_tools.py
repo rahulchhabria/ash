@@ -476,10 +476,10 @@ class TestWebSearchTool:
             # Check SandboxExecutor was created with environment
             call_kwargs = mock_cls.call_args[1]
             assert "environment" in call_kwargs
-            assert call_kwargs["environment"]["BRAVE_API_KEY"] == "secret-key-123"
+            assert call_kwargs["environment"]["PARALLEL_API_KEY"] == "secret-key-123"
 
     async def test_freshness_parameter(self, mock_sandbox_config, mock_executor):
-        """Test that freshness parameter is passed to Brave API."""
+        """Test that freshness parameter is passed to Parallel API."""
         import json
 
         mock_executor.execute.return_value = ExecutionResult(
@@ -513,7 +513,7 @@ class TestWebSearchTool:
         assert "pw" in call_args[0][0]
 
     async def test_country_parameter(self, mock_sandbox_config, mock_executor):
-        """Test that country parameter is passed to Brave API."""
+        """Test that country parameter is passed to Parallel API."""
         import json
 
         mock_executor.execute.return_value = ExecutionResult(

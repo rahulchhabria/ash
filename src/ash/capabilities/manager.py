@@ -6,9 +6,11 @@ Spec contract: specs/capabilities.md.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import secrets
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from ash.capabilities.auth_normalization import (
@@ -30,6 +32,7 @@ from ash.capabilities.types import (
     CapabilityInvokeResult,
 )
 from ash.chats import ChatStateManager
+from ash.config.paths import get_ash_home
 
 _NAMESPACED_CAPABILITY_ID = re.compile(r"^[a-z0-9][a-z0-9_-]*\.[a-z0-9][a-z0-9_-]*$")
 _NAMESPACE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
@@ -1235,4 +1238,76 @@ async def create_capability_manager(
     manager = CapabilityManager()
     for provider in providers or []:
         await manager.register_provider(provider)
+    _restore_persisted_gog_accounts(manager)
     return manager
+
+
+def _restore_persisted_gog_accounts(manager: CapabilityManager) -> None:
+    """Hydrate persisted gog account links so auth survives service restarts."""
+    if not any(capability_id.startswith("gog.") for capability_id in manager._definitions):
+        return
+
+    state_path = get_ash_home() / "gogcli" / "state.json"
+    state = _load_json_file(state_path)
+    raw_accounts = state.get("accounts")
+    if not isinstance(raw_accounts, dict):
+        return
+
+    for raw_key, raw_account in raw_accounts.items():
+        if not isinstance(raw_key, str) or not isinstance(raw_account, dict):
+            continue
+        try:
+            user_id, capability_id, account_ref = raw_key.split(":", 2)
+        except ValueError:
+            continue
+        if not capability_id.startswith("gog.") or capability_id not in manager._definitions:
+            continue
+
+        manager._accounts[(user_id, capability_id, account_ref)] = CapabilityAccount(
+            capability_id=capability_id,
+            user_id=user_id,
+            account_ref=account_ref,
+            created_at=_restore_account_created_at(raw_account),
+            credential_material={},
+            metadata={
+                "account_name": raw_account.get("account_name"),
+                "account_email": raw_account.get("account_email"),
+                "google_sub": raw_account.get("google_sub"),
+                "provider": raw_account.get("provider"),
+                "vault_ref": raw_account.get("vault_ref"),
+            },
+        )
+
+
+def _load_json_file(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _restore_account_created_at(raw_account: dict[str, Any]) -> datetime:
+    for key in ("updated_at", "created_at"):
+        value = raw_account.get(key)
+        parsed = _parse_account_timestamp(value)
+        if parsed is not None:
+            return parsed
+    return datetime.now(UTC)
+
+
+def _parse_account_timestamp(value: Any) -> datetime | None:
+    if isinstance(value, int | float):
+        try:
+            return datetime.fromtimestamp(float(value), UTC)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(UTC)
+        except ValueError:
+            return None
+    return None

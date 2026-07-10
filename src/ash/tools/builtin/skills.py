@@ -19,11 +19,24 @@ logger = logging.getLogger(__name__)
 _SECRET_ENV_NAME_PATTERNS = (
     r"(?i)(?:^|_)(?:api[_-]?key|token|secret|password|passwd|auth)(?:$|_)",
 )
+_SECRET_ENV_NAME_ALLOWLIST = {
+    "511_API_KEY",
+}
 _OAUTH_CALLBACK_URL_PATTERN = re.compile(r"https?://localhost[^\s]*[?&]code=")
 _OAUTH_CODE_ONLY_PATTERN = re.compile(r"^\s*4/[^\s]+\s*$")
 
 # Built-in skills that are handled specially (not loaded from SKILL.md files)
 BUILTIN_SKILLS: dict[str, str] = {}
+GOOGLE_EMAIL_MODEL_KEYWORDS = (
+    "email",
+    "gmail",
+    "inbox",
+    "mail",
+    "message",
+    "messages",
+    "thread",
+    "threads",
+)
 
 # Wrapper guidance prepended to all skill system prompts
 SKILL_AGENT_WRAPPER = """You are a skill executor. Your job is to run the skill instructions below and report results.
@@ -62,6 +75,10 @@ This is required so control returns to the parent agent.
 - Be concise - the user wants results, not a narrative
 - Preserve user-action artifacts exactly (auth URLs, user codes, callback tokens,
   IDs, one-time codes). Do not paraphrase or omit them.
+- If the skill instructions require an exact final output (for example `[NO_REPLY]`),
+  treat that as mandatory and return it exactly with no extra text.
+- If the skill instructions say to stay silent for a no-op result, do not add
+  commentary, diagnostics, or “helpful” footnotes.
 
 For long-running tasks, use `send_message` for progress updates only (e.g., "Processing file 3 of 10...").
 Never use `send_message` for the final result - the final result must go through `complete`.
@@ -242,6 +259,25 @@ class UseSkillTool(Tool):
         """Attach host capability manager for skill capability preflight checks."""
         self._capability_manager = manager
 
+    @staticmethod
+    def _resolve_model_override(
+        skill_name: str,
+        message: str,
+        skill_config: Any,
+    ) -> str | None:
+        if not skill_config:
+            return None
+        email_model = getattr(skill_config, "email_model", None)
+        if (
+            skill_name == "google"
+            and isinstance(email_model, str)
+            and email_model.strip()
+        ):
+            lowered = message.lower()
+            if any(keyword in lowered for keyword in GOOGLE_EMAIL_MODEL_KEYWORDS):
+                return email_model.strip()
+        return skill_config.model
+
     def set_skill_instruction_augmenter(
         self, augmenter: SkillInstructionAugmenter | None
     ) -> None:
@@ -312,6 +348,8 @@ class UseSkillTool(Tool):
         """Return True when an env var name matches blocked secret patterns."""
         normalized = var_name.strip()
         if not normalized:
+            return False
+        if normalized in _SECRET_ENV_NAME_ALLOWLIST:
             return False
 
         for pattern in _SECRET_ENV_NAME_PATTERNS:
@@ -584,7 +622,11 @@ class UseSkillTool(Tool):
             skill_config,
             base_env=inherited_env,
         )
-        model_override = skill_config.model if skill_config else None
+        model_override = self._resolve_model_override(
+            skill_name,
+            message,
+            skill_config,
+        )
 
         # Compute sandbox container path for this skill's directory
         from ash.skills.types import compute_sandbox_skill_dir
@@ -675,6 +717,7 @@ class UseSkillTool(Tool):
             session=child_session,
             system_prompt=system_prompt,
             context=agent_context,
+            model_alias=model_alias,
             model=resolved_model,
             environment=env,
             max_iterations=agent_config.max_iterations,

@@ -63,6 +63,10 @@ class ProgressMessageTool:
                     "type": "string",
                     "description": "Optional local image path to send directly.",
                 },
+                "document_path": {
+                    "type": "string",
+                    "description": "Optional local document path to send directly.",
+                },
             },
             "required": [],
         }
@@ -76,6 +80,7 @@ class ProgressMessageTool:
 
         message = input_data.get("message", "").strip()
         image_path = str(input_data.get("image_path") or "").strip() or None
+        document_path = str(input_data.get("document_path") or "").strip() or None
 
         # Pass-through for image sends so screenshots/files are actually delivered.
         if image_path:
@@ -93,8 +98,23 @@ class ProgressMessageTool:
                 sent_message_id=sent_id,
             )
 
+        if document_path:
+            reply_to = (
+                getattr(context, "reply_to_message_id", None) or self._tracker._reply_to
+            )
+            sent_id = await self._tracker.send_direct_document(
+                message=message,
+                document_path=document_path,
+                reply_to_message_id=reply_to,
+            )
+            self._tracker.record_direct_send(message, sent_id, has_image=False)
+            return ToolResult.success(
+                f"Message sent successfully (id: {sent_id})",
+                sent_message_id=sent_id,
+            )
+
         if not message:
-            return ToolResult.error("Message or image_path is required")
+            return ToolResult.error("Message, image_path, or document_path is required")
 
         self._tracker.add_progress_message(message)
         await self._tracker.update_display()
@@ -224,6 +244,22 @@ class ToolTracker:
         self, tool_name: str, tool_input: dict[str, Any], result: ToolResult
     ) -> None:
         """Record tool completion data for final user-visible provenance."""
+        document_path = str(result.metadata.get("document_path") or "").strip()
+        if document_path:
+            sent_id = await self.send_direct_document(
+                message=str(
+                    result.metadata.get("document_caption")
+                    or result.metadata.get("message")
+                    or "Attached file."
+                ).strip(),
+                document_path=document_path,
+                reply_to_message_id=self._reply_to,
+            )
+            self.record_direct_send(
+                str(result.metadata.get("document_caption") or "Attached file."),
+                sent_id,
+                has_image=False,
+            )
         self._provenance.add_from_tool(
             tool_name=tool_name,
             tool_input=tool_input,
@@ -284,6 +320,23 @@ class ToolTracker:
                 chat_id=self._chat_id,
                 text=message,
                 image_path=image_path,
+                reply_to_message_id=reply_to_message_id,
+            )
+        )
+
+    async def send_direct_document(
+        self,
+        *,
+        message: str,
+        document_path: str,
+        reply_to_message_id: str | None,
+    ) -> str:
+        """Send a document directly via provider."""
+        return await self._provider.send(
+            OutgoingMessage(
+                chat_id=self._chat_id,
+                text=message,
+                document_path=document_path,
                 reply_to_message_id=reply_to_message_id,
             )
         )

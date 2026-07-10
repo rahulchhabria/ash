@@ -165,6 +165,7 @@ class Agent:
         memory_context_limit: int = 10,
         memory_retrieval_limit: int = 25,
         mount_prefix: str = "/ash",
+        user_env: dict[str, str] | None = None,
         prompt_context_augmenters: list[PromptContextAugmenter] | None = None,
         sandbox_env_augmenters: list[SandboxEnvAugmenter] | None = None,
         incoming_message_preprocessors: list[IncomingMessagePreprocessor] | None = None,
@@ -181,6 +182,7 @@ class Agent:
             config: Agent configuration.
             graph_store: Unified graph store (memory + people).
             mount_prefix: Sandbox mount prefix for container paths.
+            user_env: User-configured environment variables for tool execution.
             prompt_context_augmenters: Optional hooks for prompt context augmentation.
             sandbox_env_augmenters: Optional hooks for sandbox environment augmentation.
             incoming_message_preprocessors: Optional hooks for inbound message preprocessing.
@@ -199,6 +201,7 @@ class Agent:
         self._memory_retrieval_limit = max(1, memory_retrieval_limit)
         self._config = config or AgentConfig()
         self._mount_prefix = mount_prefix
+        self._user_env = dict(user_env or {})
         self._prompt_context_augmenters = tuple(prompt_context_augmenters or [])
         self._sandbox_env_augmenters = tuple(sandbox_env_augmenters or [])
         self._incoming_message_preprocessors = tuple(
@@ -586,6 +589,7 @@ class Agent:
             timezone=self._timezone,
             mount_prefix=self._mount_prefix,
         )
+        env.update(self._user_env)
         env = self._apply_sandbox_env_hooks(env, session, setup.effective_user_id)
 
         metadata = session.context.to_dict()
@@ -680,6 +684,7 @@ class Agent:
                 provider=session.provider,
                 metadata=session.context.to_dict(),
             ),
+            model_alias=None,
             model=self._config.model,
             iteration=iterations,
             max_iterations=self._config.max_tool_iterations,
@@ -921,6 +926,7 @@ class Agent:
         tool_overrides: dict[str, Any] | None = None,
     ) -> AgentResponse:
         from ash.logging import log_context
+        from ash.observability import set_sentry_conversation_id
 
         setup = await self._prepare_message_context(user_message, session, user_id)
         session.add_user_message(user_message)
@@ -939,6 +945,7 @@ class Agent:
             chat_type=session.context.chat_type,
             source_username=session.context.username,
         ):
+            set_sentry_conversation_id(session.session_id)
             while iterations < self._config.max_tool_iterations:
                 iterations += 1
 
@@ -1063,6 +1070,7 @@ class Agent:
         tool_overrides: dict[str, Any] | None = None,
     ) -> AsyncIterator[str]:
         from ash.logging import log_context
+        from ash.observability import set_sentry_conversation_id
 
         setup = await self._prepare_message_context(user_message, session, user_id)
         session.add_user_message(user_message)
@@ -1080,6 +1088,7 @@ class Agent:
             chat_type=session.context.chat_type,
             source_username=session.context.username,
         ):
+            set_sentry_conversation_id(session.session_id)
             while iterations < self._config.max_tool_iterations:
                 iterations += 1
 
@@ -1198,7 +1207,18 @@ async def create_agent(
     from ash.sandbox.packages import build_setup_command, collect_skill_packages
     from ash.skills import SkillRegistry
     from ash.tools.base import build_sandbox_manager_config
-    from ash.tools.builtin import BashTool, WebFetchTool, WebSearchTool
+    from ash.tools.builtin import (
+        AshTriageDeepAgentsTool,
+        BashTool,
+        DeepAgentsStatusTool,
+        DeepResearchTool,
+        ForgetMemoryTool,
+        ListMemoriesTool,
+        RememberTool,
+        SearchMemoriesTool,
+        WebFetchTool,
+        WebSearchTool,
+    )
     from ash.tools.builtin.agents import UseAgentTool
     from ash.tools.builtin.files import ReadFileTool, WriteFileTool
     from ash.tools.builtin.search_cache import SearchCache
@@ -1238,13 +1258,15 @@ async def create_agent(
 
     tool_registry.register(InterruptTool())
     tool_registry.register(CompleteTool())
+    tool_registry.register(DeepAgentsStatusTool())
+    tool_registry.register(AshTriageDeepAgentsTool())
 
-    if config.brave_search and config.brave_search.api_key:
+    if config.parallel_search and config.parallel_search.api_key:
         search_cache = SearchCache(maxsize=100, ttl=900)
         fetch_cache = SearchCache(maxsize=50, ttl=1800)
         tool_registry.register(
             WebSearchTool(
-                api_key=config.brave_search.api_key.get_secret_value(),
+                api_key=config.parallel_search.api_key.get_secret_value(),
                 executor=shared_executor,
                 cache=search_cache,
             )
@@ -1278,11 +1300,20 @@ async def create_agent(
         except Exception:
             logger.warning("memory_query_planner_disabled", exc_info=True)
 
+    # Register first-class memory tools when the store is available.
+    if graph_store is not None:
+        tool_registry.register(RememberTool(store=graph_store, extractor=memory_extractor))
+        tool_registry.register(ListMemoriesTool(store=graph_store))
+        tool_registry.register(SearchMemoriesTool(store=graph_store))
+        tool_registry.register(ForgetMemoryTool(store=graph_store))
+        logger.debug("memory_tools_registered")
+
     tool_executor = ToolExecutor(tool_registry)
+    tool_registry.register(DeepResearchTool(tool_executor=tool_executor))
     logger.info("tools_registered", extra={"count": len(tool_registry)})
 
     agent_registry = AgentRegistry()
-    register_builtin_agents(agent_registry)
+    register_builtin_agents(agent_registry, config=config)
     logger.info("agents_registered", extra={"count": len(agent_registry)})
 
     runtime = RuntimeInfo.from_environment(
@@ -1341,6 +1372,7 @@ async def create_agent(
         memory_context_limit=config.memory.context_injection_limit,
         memory_retrieval_limit=config.memory.query_planning_fetch_memories,
         mount_prefix=config.sandbox.mount_prefix,
+        user_env=config.env,
         prompt_context_augmenters=prompt_context_augmenters,
         sandbox_env_augmenters=sandbox_env_augmenters,
         incoming_message_preprocessors=incoming_message_preprocessors,
