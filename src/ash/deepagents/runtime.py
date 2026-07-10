@@ -9,6 +9,7 @@ DeepAgents once the dependency is installed.
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import inspect
 import json
 import os
@@ -19,6 +20,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ash.config.paths import get_workspace_path
+
+MAX_WORKSPACE_SEARCH_FILES = 10_000
+MAX_WORKSPACE_SEARCH_FILE_BYTES = 1_000_000
 
 if TYPE_CHECKING:
     from ash.sandbox import SandboxExecutor
@@ -39,17 +43,17 @@ class _AshToDeepAgentBackendAdapter:
     def ls(self, path: str) -> Any:
         import asyncio
 
-        return asyncio.run(self._backend.list_files(path))
+        return asyncio.run(self.als(path))
 
     def read(self, file_path: str, offset: int = 0, limit: int = 2000) -> Any:
         import asyncio
 
-        return asyncio.run(self._async_read(file_path, offset, limit))
+        return asyncio.run(self.aread(file_path, offset, limit))
 
     def write(self, file_path: str, content: str) -> Any:
         import asyncio
 
-        return asyncio.run(self._async_write(file_path, content))
+        return asyncio.run(self.awrite(file_path, content))
 
     def edit(
         self,
@@ -60,31 +64,50 @@ class _AshToDeepAgentBackendAdapter:
     ) -> Any:
         import asyncio
 
-        return asyncio.run(
-            self._async_edit(file_path, old_string, new_string, replace_all)
-        )
+        return asyncio.run(self.aedit(file_path, old_string, new_string, replace_all))
 
     def glob(self, pattern: str, path: str | None = None) -> Any:
         import asyncio
 
-        return asyncio.run(self._async_list_files(path or "."))
+        return asyncio.run(self.aglob(pattern, path))
 
     def grep(
         self, pattern: str, path: str | None = None, glob: str | None = None
     ) -> Any:
         import asyncio
 
-        return asyncio.run(self._backend.search(pattern, path or "."))
+        return asyncio.run(self.agrep(pattern, path, glob))
 
     # --- async surface ---
     async def als(self, path: str) -> Any:
-        return await self._backend.list_files(path)
+        result_types = _deepagents_result_types()
+        try:
+            entries = await self._backend.list_file_infos(path, recursive=False)
+        except Exception as exc:
+            return result_types["LsResult"](error=str(exc), entries=None)
+        return result_types["LsResult"](entries=entries)
 
     async def aread(self, file_path: str, offset: int = 0, limit: int = 2000) -> Any:
-        return await self._async_read(file_path, offset, limit)
+        result_types = _deepagents_result_types()
+        try:
+            content = await self._backend.read_file(file_path)
+        except Exception as exc:
+            return result_types["ReadResult"](error=str(exc))
+        lines = content.splitlines(keepends=True)
+        if offset or limit:
+            lines = lines[offset : offset + limit] if limit else lines[offset:]
+        file_data = {"content": "".join(lines), "encoding": "utf-8"}
+        return result_types["ReadResult"](file_data=file_data)
 
     async def awrite(self, file_path: str, content: str) -> Any:
-        return await self._async_write(file_path, content)
+        result_types = _deepagents_result_types()
+        try:
+            written_path = await self._backend.write_file(
+                file_path, content, overwrite=False
+            )
+        except Exception as exc:
+            return result_types["WriteResult"](error=str(exc))
+        return result_types["WriteResult"](path=f"/{written_path}")
 
     async def aedit(
         self,
@@ -93,46 +116,51 @@ class _AshToDeepAgentBackendAdapter:
         new_string: str,
         replace_all: bool = False,
     ) -> Any:
-        return await self._async_edit(file_path, old_string, new_string, replace_all)
+        result_types = _deepagents_result_types()
+        try:
+            content = await self._backend.read_file(file_path)
+            occurrences = content.count(old_string)
+            if occurrences == 0:
+                return result_types["EditResult"](
+                    error=f"String to replace was not found in {file_path}"
+                )
+            if not replace_all and occurrences > 1:
+                return result_types["EditResult"](
+                    error=(
+                        f"String to replace appears {occurrences} times in "
+                        f"{file_path}; pass replace_all=True to replace all occurrences"
+                    )
+                )
+            new_content = content.replace(
+                old_string, new_string, occurrences if replace_all else 1
+            )
+            written_path = await self._backend.write_file(
+                file_path, new_content, overwrite=True
+            )
+        except Exception as exc:
+            return result_types["EditResult"](error=str(exc))
+        return result_types["EditResult"](
+            path=f"/{written_path}",
+            occurrences=occurrences if replace_all else 1,
+        )
 
     async def aglob(self, pattern: str, path: str | None = None) -> Any:
-        return await self._backend.list_files(path or ".")
+        result_types = _deepagents_result_types()
+        try:
+            matches = await self._backend.glob_file_infos(pattern, path or ".")
+        except Exception as exc:
+            return result_types["GlobResult"](error=str(exc), matches=[])
+        return result_types["GlobResult"](matches=matches)
 
     async def agrep(
         self, pattern: str, path: str | None = None, glob: str | None = None
     ) -> Any:
-        return await self._backend.search(pattern, path or ".")
-
-    # --- helpers ---
-    async def _async_read(
-        self, file_path: str, offset: int = 0, limit: int = 2000
-    ) -> str:
-        content = await self._backend.read_file(file_path)
-        lines = content.split("\n")
-        if offset or limit:
-            lines = lines[offset : offset + limit] if limit else lines[offset:]
-        return "\n".join(lines)
-
-    async def _async_write(self, file_path: str, content: str) -> str:
-        return await self._backend.write_file(file_path, content)
-
-    async def _async_edit(
-        self,
-        file_path: str,
-        old_string: str,
-        new_string: str,
-        replace_all: bool = False,
-    ) -> str:
-        content = await self._backend.read_file(file_path)
-        if replace_all:
-            content = content.replace(old_string, new_string)
-        else:
-            content = content.replace(old_string, new_string, 1)
-        await self._backend.write_file(file_path, content)
-        return str(self._backend._resolve(file_path).relative_to(self._root))
-
-    async def _async_list_files(self, path: str) -> list[str]:
-        return await self._backend.list_files(path)
+        result_types = _deepagents_result_types()
+        try:
+            matches = await self._backend.search_matches(pattern, path or ".", glob)
+        except Exception as exc:
+            return result_types["GrepResult"](error=str(exc), matches=[])
+        return result_types["GrepResult"](matches=matches)
 
     # --- stub the rest ---
     def ls_info(self, path: str) -> Any:
@@ -174,6 +202,26 @@ def _default_tool_context() -> Any:
     from ash.tools.base import ToolContext
 
     return ToolContext()
+
+
+def _deepagents_result_types() -> dict[str, Any]:
+    from deepagents.backends.protocol import (
+        EditResult,
+        GlobResult,
+        GrepResult,
+        LsResult,
+        ReadResult,
+        WriteResult,
+    )
+
+    return {
+        "EditResult": EditResult,
+        "GlobResult": GlobResult,
+        "GrepResult": GrepResult,
+        "LsResult": LsResult,
+        "ReadResult": ReadResult,
+        "WriteResult": WriteResult,
+    }
 
 
 class AshDeepAgentsUnavailable(RuntimeError):
@@ -230,6 +278,36 @@ def _call_maybe_async(
         return result
 
     return _wrapped()
+
+
+async def _call_with_supported_kwargs(
+    func: Callable[..., Any], *args: Any, **kwargs: Any
+) -> Any:
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        supported_kwargs: dict[str, Any] = {}
+    else:
+        parameters = signature.parameters.values()
+        accepts_var_kwargs = any(
+            param.kind is inspect.Parameter.VAR_KEYWORD for param in parameters
+        )
+        if accepts_var_kwargs:
+            supported_kwargs = kwargs
+        else:
+            accepted_names = {
+                param.name
+                for param in parameters
+                if param.kind
+                in {
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                }
+            }
+            supported_kwargs = {
+                key: value for key, value in kwargs.items() if key in accepted_names
+            }
+    return await _call_maybe_async(func, *args, **supported_kwargs)
 
 
 @dataclass(slots=True)
@@ -326,7 +404,7 @@ class AshFilesystemBackend:
     root: Path = field(default_factory=get_workspace_path)
 
     def _resolve(self, path: str | Path) -> Path:
-        candidate = Path(path)
+        candidate = self._normalize_virtual_path(path)
         if not candidate.is_absolute():
             candidate = self.root / candidate
         resolved = candidate.expanduser().resolve()
@@ -335,40 +413,138 @@ class AshFilesystemBackend:
             raise ValueError(f"Path escapes Ash workspace: {path}")
         return resolved
 
-    async def read_file(self, path: str) -> str:
-        return self._resolve(path).read_text()
+    @staticmethod
+    def _normalize_virtual_path(path: str | Path) -> Path:
+        text = str(path).strip() or "."
+        if text.startswith("~"):
+            raise ValueError(f"Path escapes Ash workspace: {path}")
+        candidate = Path(text)
+        if candidate.is_absolute():
+            # DeepAgents filesystem paths are slash-rooted virtual paths.
+            candidate = Path(text.lstrip("/") or ".")
+        if ".." in candidate.parts:
+            raise ValueError(f"Path escapes Ash workspace: {path}")
+        return candidate
 
-    async def write_file(self, path: str, content: str) -> str:
-        resolved = self._resolve(path)
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-        resolved.write_text(content)
-        return str(resolved.relative_to(self.root.expanduser().resolve()))
+    def _workspace_root(self) -> Path:
+        return self.root.expanduser().resolve()
+
+    def _relative_path(self, path: Path) -> str:
+        return path.relative_to(self._workspace_root()).as_posix()
+
+    def _file_info(self, path: Path) -> dict[str, Any]:
+        rel = self._relative_path(path)
+        info: dict[str, Any] = {
+            "path": f"/{rel}",
+            "is_dir": path.is_dir(),
+        }
+        try:
+            stat = path.stat()
+            info["size"] = int(stat.st_size)
+            info["modified_at"] = str(stat.st_mtime)
+        except OSError:
+            pass
+        if info["is_dir"] and not info["path"].endswith("/"):
+            info["path"] += "/"
+        return info
+
+    async def read_file(self, path: str) -> str:
+        return await asyncio.to_thread(lambda: self._resolve(path).read_text())
+
+    async def write_file(
+        self, path: str, content: str, *, overwrite: bool = True
+    ) -> str:
+        def _write() -> str:
+            resolved = self._resolve(path)
+            if not overwrite and resolved.exists():
+                raise FileExistsError(f"File already exists: {path}")
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            resolved.write_text(content)
+            return self._relative_path(resolved)
+
+        return await asyncio.to_thread(_write)
 
     async def list_files(self, path: str = ".") -> list[str]:
-        resolved = self._resolve(path)
-        files = sorted(p for p in resolved.rglob("*") if p.is_file())
-        root = self.root.expanduser().resolve()
-        return [str(p.relative_to(root)) for p in files]
+        def _list() -> list[str]:
+            resolved = self._resolve(path)
+            files = sorted(p for p in resolved.rglob("*") if p.is_file())
+            return [self._relative_path(p) for p in files]
 
-    async def search(self, query: str, path: str = ".") -> list[str]:
-        resolved = self._resolve(path)
+        return await asyncio.to_thread(_list)
 
-        def _scan() -> list[str]:
-            matches: list[str] = []
+    async def list_file_infos(
+        self, path: str = ".", *, recursive: bool = True
+    ) -> list[dict[str, Any]]:
+        def _list() -> list[dict[str, Any]]:
+            resolved = self._resolve(path)
+            iterator = resolved.rglob("*") if recursive else resolved.iterdir()
+            return sorted(
+                (self._file_info(p) for p in iterator),
+                key=lambda item: str(item.get("path", "")),
+            )
+
+        return await asyncio.to_thread(_list)
+
+    async def glob_file_infos(
+        self, pattern: str, path: str = "."
+    ) -> list[dict[str, Any]]:
+        def _glob() -> list[dict[str, Any]]:
+            resolved = self._resolve(path)
+            normalized_pattern = pattern.lstrip("/") or "*"
+            matches: list[dict[str, Any]] = []
             for item in resolved.rglob("*"):
                 if not item.is_file():
                     continue
+                rel = self._relative_path(item)
+                if fnmatch.fnmatch(rel, normalized_pattern) or fnmatch.fnmatch(
+                    item.name, normalized_pattern
+                ):
+                    matches.append(self._file_info(item))
+            return sorted(matches, key=lambda entry: str(entry.get("path", "")))
+
+        return await asyncio.to_thread(_glob)
+
+    async def search(self, query: str, path: str = ".") -> list[str]:
+        matches = await self.search_matches(query, path)
+        return sorted({str(match["path"]).lstrip("/") for match in matches})
+
+    async def search_matches(
+        self, query: str, path: str = ".", glob: str | None = None
+    ) -> list[dict[str, Any]]:
+        resolved = self._resolve(path)
+
+        def _scan() -> list[dict[str, Any]]:
+            matches: list[dict[str, Any]] = []
+            scanned = 0
+            for item in resolved.rglob("*"):
+                if not item.is_file():
+                    continue
+                scanned += 1
+                if scanned > MAX_WORKSPACE_SEARCH_FILES:
+                    break
+                rel = self._relative_path(item)
+                if glob and not (
+                    fnmatch.fnmatch(rel, glob) or fnmatch.fnmatch(item.name, glob)
+                ):
+                    continue
                 try:
-                    text = item.read_text(errors="ignore")
+                    if item.stat().st_size > MAX_WORKSPACE_SEARCH_FILE_BYTES:
+                        continue
+                    lines = item.read_text(errors="ignore").splitlines()
                 except OSError:
                     continue
-                if query in text:
-                    matches.append(
-                        str(item.relative_to(self.root.expanduser().resolve()))
-                    )
+                for line_number, line in enumerate(lines, start=1):
+                    if query in line:
+                        matches.append(
+                            {
+                                "path": f"/{rel}",
+                                "line": line_number,
+                                "text": line,
+                            }
+                        )
             return matches
 
-        return _scan()
+        return await asyncio.to_thread(_scan)
 
 
 @dataclass(slots=True)
@@ -455,10 +631,7 @@ class AshMemoryStoreAdapter:
         )
         if search is None:
             return []
-        try:
-            result = await _call_maybe_async(search, query, limit=limit)
-        except TypeError:
-            result = await _call_maybe_async(search, query)
+        result = await _call_with_supported_kwargs(search, query, limit=limit)
         if result is None:
             return []
         if isinstance(result, list):
@@ -475,10 +648,7 @@ class AshMemoryStoreAdapter:
             method = getattr(self.store, method_name, None)
             if method is None:
                 continue
-            try:
-                result = await _call_maybe_async(method, content, **metadata)
-            except TypeError:
-                result = await _call_maybe_async(method, content)
+            result = await _call_with_supported_kwargs(method, content, **metadata)
             return {"stored": True, "result": str(result)}
         return {"stored": False, "reason": "store has no supported add method"}
 
@@ -538,7 +708,10 @@ class DeepAgentsCodeHelper:
         return (
             "Deep Agents Code can run alongside Ash for terminal coding tasks.\n\n"
             "Install:\n"
-            "  curl -LsSf https://langch.in/dcode | bash\n\n"
+            "  1. Open https://docs.langchain.com/deep-agents in a browser.\n"
+            "  2. Follow the documented Deep Agents Code installation steps for your platform.\n"
+            "  3. Verify downloaded installers or scripts before executing them; do not pipe\n"
+            "     remote scripts directly into a shell without explicit confirmation.\n\n"
             "Suggested handoff workspace:\n"
             f"  {self.workspace}\n\n"
             "Keep Ash as the memory/personality/Telegram orchestrator and use Deep Agents "
@@ -560,6 +733,8 @@ def build_workspace_system_prompt(base: str, workspace: Path | None = None) -> s
 
 def shell_command_for_triage(kind: str, target: str) -> str:
     """Build a conservative diagnostic command for ash-triage handoff (#5)."""
+    if kind == "ssh" and target.strip().startswith("-"):
+        raise ValueError("SSH target must not start with '-'")
     safe_target = shlex.quote(target)
     if kind == "docker":
         return f"docker ps -a | grep {safe_target}; docker logs {safe_target} 2>&1 | tail -50"

@@ -201,11 +201,27 @@ class AshTriageDeepAgentsTool(Tool):
 
     def _get_guidance(self, error_context: str, api_key: str | None) -> Any:
         # Prefer an installed/importable ash_triage. Fall back to the sibling dev checkout
-        # that exists in Rahul's environment without making Ash depend on it.
+        # when present without making Ash depend on it.
+        inserted_path: str | None = None
         if importlib.util.find_spec("ash_triage") is None:
-            candidate = Path.home() / "ash-triage-api"
+            candidate = Path(
+                os.environ.get("ASH_TRIAGE_PACKAGE_PATH")
+                or str(Path.home() / "ash-triage-api")
+            )
             if candidate.exists():
-                sys.path.insert(0, str(candidate))
-        from ash_triage import get_triage_guidance  # type: ignore[import-not-found]
+                path_str = str(candidate)
+                if path_str not in sys.path:
+                    sys.path.insert(0, path_str)
+                    inserted_path = path_str
 
-        return get_triage_guidance(error_context, api_key)
+        try:
+            from ash_triage import get_triage_guidance  # type: ignore[import-not-found]
+
+            return get_triage_guidance(error_context, api_key)
+        except Exception:
+            if inserted_path is not None:
+                try:
+                    sys.path.remove(inserted_path)
+                except ValueError:
+                    pass
+            raise

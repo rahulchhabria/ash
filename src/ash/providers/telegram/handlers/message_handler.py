@@ -1142,6 +1142,17 @@ class TelegramMessageHandler:
                                     "remaining_depth": stack.depth,
                                 },
                             )
+                            if orchestration_tracker.thinking_msg_id:
+                                try:
+                                    await self._provider.delete(
+                                        message.chat_id,
+                                        orchestration_tracker.thinking_msg_id,
+                                    )
+                                except Exception:
+                                    logger.debug(
+                                        "Failed to delete orphaned thinking message"
+                                    )
+                            orchestration_tracker.thinking_msg_id = None
                         elif result.text:
                             response_external_id = await self._send_stack_response(
                                 message,

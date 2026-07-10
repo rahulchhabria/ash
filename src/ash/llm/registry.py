@@ -59,7 +59,12 @@ def create_llm_provider(
             provider_name=provider_name or provider,
         )
     if provider == "pioneer":
-        return PioneerProvider(api_key=key)
+        return PioneerProvider(
+            api_key=key,
+            base_url=base_url,
+            default_headers=default_headers,
+            provider_name=provider_name or provider,
+        )
     if provider == "openai-oauth":
         if not access_token or not account_id:
             raise ValueError(

@@ -179,13 +179,19 @@ async def test_no_match_returns_unchanged() -> None:
 
 
 @pytest.mark.asyncio
-async def test_invalid_and_actionless_rules_are_skipped() -> None:
+async def test_incomplete_rules_raise_validation_error() -> None:
+    with pytest.raises(ValueError, match="match_prefix or match_regex"):
+        ReactiveWorkflowRule(name="no-matcher", skill="triage")
+    with pytest.raises(ValueError, match="skill, agent, or instruction"):
+        ReactiveWorkflowRule(name="no-action", match_prefix="/y")
+
+
+@pytest.mark.asyncio
+async def test_invalid_regex_rules_are_skipped() -> None:
     integration = ReactiveWorkflowIntegration()
     config = _config(
         enabled=True,
         rules=[
-            ReactiveWorkflowRule(name="no-matcher", skill="triage"),
-            ReactiveWorkflowRule(name="no-action", match_prefix="/y"),
             ReactiveWorkflowRule(
                 name="bad-regex", match_regex="(unclosed", skill="triage"
             ),
