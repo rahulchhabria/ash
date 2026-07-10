@@ -44,7 +44,7 @@ def init_sentry(config: "SentryConfig", server_mode: bool = False) -> bool:
         LoggingIntegration(
             level=logging.INFO,  # Capture INFO+ as breadcrumbs
             event_level=logging.ERROR,  # Create events for ERROR+
-            sentry_logs_level=logging.DEBUG,  # Send all emitted app logs to Sentry Logs
+            sentry_logs_level=logging.INFO,  # Send INFO+ emitted app logs to Sentry Logs
         ),
     ]
 

@@ -76,6 +76,11 @@ After execution:
 | `username` | string | No | @mention name for responses |
 | `created_at` | ISO 8601 | No | When the task was created |
 | `last_run` | ISO 8601 | No | Last execution time (periodic only) |
+| `max_retries` | int | No | Automatic retries on failure (one-shot only; default 0 = no retry) |
+| `retry_count` | int | No | Retries already attempted for this task lineage |
+| `retry_backoff_seconds` | int | No | Base backoff between retries; doubled each attempt (default 60) |
+| `notify_on_failure` | bool | No | Message the chat when a task ultimately fails (default false) |
+| `last_error` | string | No | Error text from the most recent failed attempt |
 
 ## Cron Format
 
@@ -109,6 +114,9 @@ ash-sb schedule create "Daily summary" --cron "0 8 * * *"
 
 # With explicit timezone (overrides token timezone default)
 ash-sb schedule create "Standup" --cron "0 10 * * 1-5" --tz America/New_York
+
+# Reliable one-shot: retry up to 3 times with backoff, notify the chat if it ultimately fails
+ash-sb schedule create "Sync report" --at "in 1 hour" --max-retries 3 --retry-backoff 60 --notify-on-failure
 ```
 
 **One-shot output:**
@@ -235,9 +243,16 @@ Updated reminder (id=a1b2c3d4)
 3. Cannot switch entry types (one-shot ↔ periodic)
 4. `trigger_at` updates must be in the future; `cron` updates must be valid expressions
 
-### No-Retry Semantics
+### Retry Semantics
 
-Failed tasks are still marked as processed — one-shot entries are deleted, periodic entries get `last_run` updated. There is no automatic retry. This prevents infinite retry loops for tasks that consistently fail.
+Failure handling is opt-in and defaults to legacy no-retry behavior (`max_retries = 0`):
+
+- **Default (`max_retries = 0`):** Failed tasks are still marked as processed — one-shot entries are deleted, periodic entries get `last_run` updated. No automatic retry. Prevents infinite retry loops for tasks that consistently fail.
+- **Retry (`max_retries > 0`, one-shot only):** On **task-execution** failure the handler enqueues a fresh one-shot retry entry (new `id`, `retry_count` incremented, `trigger_at = now + retry_backoff_seconds * 2^(attempt-1)`, capped at 24h). The watcher still removes the original one-shot; the retry survives because it is a distinct entry. Retries stop once `retry_count` reaches `max_retries`. Periodic tasks are **not** retried this way — their next cron occurrence is the natural retry.
+- **Delivery failures are not retried:** Retry covers only task execution (the agent run). If the task executed but sending the response fails, the failure is logged and **not** retried — re-running the task could duplicate side effects (tool calls) that already succeeded.
+- **Failure notification (`notify_on_failure = true`):** When a task ultimately fails (one-shot retries exhausted, or a periodic run fails), the handler sends a short failure notice to the originating chat including the task text and `last_error`. Wording differs by type: a periodic notice states the task will run again at its next scheduled time; a one-shot notice states it will not run again automatically. Retry attempts in between are silent.
+
+`last_error` records the most recent failure text for diagnostics and is cleared on a subsequent successful run (so a recovered periodic task does not appear permanently broken). Retry policy is set at creation; there is currently no update path to change it afterward.
 
 ### Ownership Rules
 
@@ -334,7 +349,7 @@ cat ~/.ash/graph/schedules.jsonl
 3. **Delete vs update** - One-shot deleted, periodic updated in place
 4. **CLI injects context** - `ash schedule create` adds chat_id/provider from env vars
 5. **Provider required** - Requires provider with persistent chat for response routing
-6. **Fresh context per task** - Each task runs in ephemeral session
+6. **Fresh context per task** - Each task runs in ephemeral session. Memory/people retrieval is pinned to the real task text (`entry.message`) via `process_message(retrieval_query=...)`, so the scheduling wrapper never pollutes retrieval and autonomous runs stay personalized.
 7. **UTC times** - Avoids timezone confusion
 8. **Ownership filtering** - Users can only cancel/update their own tasks (RPC layer); listing is scoped by room + user
 9. **Time-aware execution** - Agent can skip stale time-sensitive tasks

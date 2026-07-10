@@ -407,7 +407,7 @@ class TestUseSkillToolExecution:
         registry.get.return_value = skill
         executor = MagicMock()
         config = _mock_config(
-            skills={"google": SkillConfig(email_model="school_email")},
+            skills={"google": SkillConfig(email_model="school_email_pioneer")},
             agents={},
             skill_defaults=SimpleNamespace(allow_chat_ids=[]),
         )
@@ -418,7 +418,7 @@ class TestUseSkillToolExecution:
             await tool.execute({"skill": "google", "message": "summarize my inbox"})
 
         frame = exc_info.value.child_frame
-        assert frame.model_alias == "school_email"
+        assert frame.model_alias == "school_email_pioneer"
         assert frame.model == "job_school_email"
 
     @pytest.mark.asyncio
@@ -433,7 +433,7 @@ class TestUseSkillToolExecution:
         registry.get.return_value = skill
         executor = MagicMock()
         config = _mock_config(
-            skills={"google": SkillConfig(email_model="school_email")},
+            skills={"google": SkillConfig(email_model="school_email_pioneer")},
             agents={},
             skill_defaults=SimpleNamespace(allow_chat_ids=[]),
         )

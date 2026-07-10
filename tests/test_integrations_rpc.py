@@ -13,23 +13,43 @@ from ash.integrations.rpc import active_rpc_server
 from ash.integrations.runtime import IntegrationContext
 
 
+class _FakeRPCServer:
+    def __init__(
+        self,
+        socket_path: Path,
+        *,
+        tcp_host: str | None = None,
+        tcp_port: int = 43210,
+        events: list[str] | None = None,
+        calls: list[str] | None = None,
+    ) -> None:
+        self.socket_path = socket_path
+        self.tcp_bind_host = tcp_host
+        self.tcp_host = "127.0.0.1"
+        self.tcp_port = tcp_port
+        self.methods: dict[str, Any] = {}
+        self._events = events
+        self._calls = calls
+        if self._events is not None:
+            self._events.append("init")
+
+    def register(self, method: str, handler: Any) -> None:
+        if self._calls is not None:
+            self._calls.append(method)
+        self.methods[method] = handler
+
+    async def start(self) -> None:
+        if self._events is not None:
+            self._events.append("start")
+
+    async def stop(self) -> None:
+        if self._events is not None:
+            self._events.append("stop")
+
+
 @pytest.mark.asyncio
 async def test_active_rpc_server_starts_and_stops(monkeypatch) -> None:
     events: list[str] = []
-
-    class _FakeRPCServer:
-        def __init__(self, socket_path: Path, *, tcp_host: str | None = None) -> None:
-            self.socket_path = socket_path
-            self.tcp_bind_host = tcp_host
-            self.tcp_host = "127.0.0.1"
-            self.tcp_port = 43210
-            events.append("init")
-
-        async def start(self) -> None:
-            events.append("start")
-
-        async def stop(self) -> None:
-            events.append("stop")
 
     runtime = cast(
         Any,
@@ -39,7 +59,12 @@ async def test_active_rpc_server_starts_and_stops(monkeypatch) -> None:
     )
     context = cast(Any, SimpleNamespace(sandbox_env={}))
 
-    monkeypatch.setattr("ash.integrations.rpc.RPCServer", _FakeRPCServer)
+    monkeypatch.setattr(
+        "ash.integrations.rpc.RPCServer",
+        lambda socket_path, *, tcp_host=None: _FakeRPCServer(
+            socket_path, tcp_host=tcp_host, events=events
+        ),
+    )
 
     async with active_rpc_server(
         runtime=runtime,
@@ -48,7 +73,7 @@ async def test_active_rpc_server_starts_and_stops(monkeypatch) -> None:
     ) as server:
         assert server is not None
         assert server.socket_path == Path("rpc.sock")
-        assert server.tcp_bind_host == "0.0.0.0"
+        assert server.tcp_bind_host == "0.0.0.0"  # noqa: S104
         assert context.sandbox_env["ASH_RPC_HOST"] == "host.docker.internal"
         assert context.sandbox_env["ASH_RPC_PORT"] == "43210"
         events.append("inside")
@@ -87,26 +112,18 @@ async def test_active_rpc_server_noops_when_disabled(monkeypatch) -> None:
 async def test_active_rpc_server_uses_docker_host_alias_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _FakeRPCServer:
-        def __init__(self, socket_path: Path, *, tcp_host: str | None = None) -> None:
-            self.socket_path = socket_path
-            self.tcp_bind_host = tcp_host
-            self.tcp_host = "127.0.0.1"
-            self.tcp_port = 40123
-
-        async def start(self) -> None:
-            return None
-
-        async def stop(self) -> None:
-            return None
-
     runtime = cast(
         Any,
         SimpleNamespace(register_rpc_methods=lambda _server, _context: None),
     )
     context = cast(Any, SimpleNamespace(sandbox_env={}))
     monkeypatch.setenv("ASH_RPC_DOCKER_HOST_ALIAS", "host.containers.internal")
-    monkeypatch.setattr("ash.integrations.rpc.RPCServer", _FakeRPCServer)
+    monkeypatch.setattr(
+        "ash.integrations.rpc.RPCServer",
+        lambda socket_path, *, tcp_host=None: _FakeRPCServer(
+            socket_path, tcp_host=tcp_host, tcp_port=40123
+        ),
+    )
 
     async with active_rpc_server(
         runtime=runtime,
@@ -121,25 +138,18 @@ async def test_active_rpc_server_uses_docker_host_alias_override(
 async def test_active_rpc_server_uses_tcp_bind_host_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _FakeRPCServer:
-        def __init__(self, socket_path: Path, *, tcp_host: str | None = None) -> None:
-            self.socket_path = socket_path
-            self.tcp_bind_host = tcp_host
-            self.tcp_port = 40123
-
-        async def start(self) -> None:
-            return None
-
-        async def stop(self) -> None:
-            return None
-
     runtime = cast(
         Any,
         SimpleNamespace(register_rpc_methods=lambda _server, _context: None),
     )
     context = cast(Any, SimpleNamespace(sandbox_env={}))
     monkeypatch.setenv("ASH_RPC_TCP_BIND_HOST", "127.0.0.1")
-    monkeypatch.setattr("ash.integrations.rpc.RPCServer", _FakeRPCServer)
+    monkeypatch.setattr(
+        "ash.integrations.rpc.RPCServer",
+        lambda socket_path, *, tcp_host=None: _FakeRPCServer(
+            socket_path, tcp_host=tcp_host, tcp_port=40123
+        ),
+    )
 
     async with active_rpc_server(
         runtime=runtime,
@@ -175,26 +185,12 @@ async def test_todo_rpc_methods_not_registered_when_todo_disabled(
     await runtime.setup(context)
 
     calls: list[str] = []
-
-    class _FakeRPCServer:
-        def __init__(self, socket_path: Path, *, tcp_host: str | None = None) -> None:
-            self.socket_path = socket_path
-            self.tcp_bind_host = tcp_host
-            self.methods: dict[str, Any] = {}
-            self.tcp_host = "127.0.0.1"
-            self.tcp_port = 41111
-
-        def register(self, method: str, _handler: Any) -> None:
-            calls.append(method)
-            self.methods[method] = _handler
-
-        async def start(self) -> None:
-            return None
-
-        async def stop(self) -> None:
-            return None
-
-    monkeypatch.setattr("ash.integrations.rpc.RPCServer", _FakeRPCServer)
+    monkeypatch.setattr(
+        "ash.integrations.rpc.RPCServer",
+        lambda socket_path, *, tcp_host=None: _FakeRPCServer(
+            socket_path, tcp_host=tcp_host, tcp_port=41111, calls=calls
+        ),
+    )
 
     async with active_rpc_server(
         runtime=runtime,

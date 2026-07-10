@@ -356,6 +356,18 @@ class TestNamedModelConfigs:
         assert api_key is not None
         assert api_key.get_secret_value() == "env-key"
 
+    def test_resolve_pioneer_api_key_from_env(self, monkeypatch):
+        """Test Pioneer API key resolution from environment variable."""
+        monkeypatch.setenv("PIONEER_API_KEY", "pioneer-env-key")
+        config = AshConfig(
+            models={
+                "default": ModelConfig(provider="pioneer", model="job_abc123"),
+            }
+        )
+        api_key = config.resolve_api_key("default")
+        assert api_key is not None
+        assert api_key.get_secret_value() == "pioneer-env-key"
+
     def test_resolve_api_key_provider_takes_precedence(self, monkeypatch):
         """Test provider-level config takes precedence over env var."""
         monkeypatch.setenv("OPENAI_API_KEY", "env-key")

@@ -108,6 +108,7 @@ async def test_scheduling_integration_owns_lifecycle_and_rpc(monkeypatch) -> Non
             persisters,
             timezone: str,
             agent_executor,
+            store=None,
         ) -> None:
             self.agent = agent
             self.senders = senders
@@ -115,6 +116,7 @@ async def test_scheduling_integration_owns_lifecycle_and_rpc(monkeypatch) -> Non
             self.persisters = persisters
             self.timezone = timezone
             self.agent_executor = agent_executor
+            self.store = store
 
         async def handle(self, *_args, **_kwargs) -> None:
             return None

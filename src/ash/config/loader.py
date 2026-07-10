@@ -13,6 +13,7 @@ from ash.config.paths import get_config_path
 ENV_VAR_MAPPINGS = {
     "anthropic": ("api_key", "ANTHROPIC_API_KEY"),
     "openai": ("api_key", "OPENAI_API_KEY"),
+    "pioneer": ("api_key", "PIONEER_API_KEY"),
     "telegram": ("bot_token", "TELEGRAM_BOT_TOKEN"),
     "parallel_search": ("api_key", "PARALLEL_API_KEY"),
     "sentry": ("dsn", "SENTRY_DSN"),

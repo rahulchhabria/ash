@@ -194,6 +194,27 @@ def create(
             help="Timezone for schedule (IANA name, e.g., 'America/New_York'). Overrides default.",
         ),
     ] = None,
+    max_retries: Annotated[
+        int,
+        typer.Option(
+            "--max-retries",
+            help="Automatic retries on failure (one-shot only). Default 0 = no retry.",
+        ),
+    ] = 0,
+    retry_backoff: Annotated[
+        int,
+        typer.Option(
+            "--retry-backoff",
+            help="Base backoff seconds between retries (doubles each attempt).",
+        ),
+    ] = 60,
+    notify_on_failure: Annotated[
+        bool,
+        typer.Option(
+            "--notify-on-failure",
+            help="Message this chat if the task ultimately fails.",
+        ),
+    ] = False,
 ) -> None:
     """Create a scheduled task.
 
@@ -201,6 +222,7 @@ def create(
         ash-sb schedule create "Remind me to check the build" --at "tomorrow at 9am"
         ash-sb schedule create "Daily status check" --cron "0 8 * * *"
         ash-sb schedule create "Standup" --cron "0 10 * * 1-5" --tz America/New_York
+        ash-sb schedule create "Sync report" --at "in 1 hour" --max-retries 3 --notify-on-failure
     """
     ctx = _require_routing_context()
     if timezone:
@@ -246,12 +268,17 @@ def create(
             raise typer.Exit(1) from None
 
     # Build RPC params
-    params: dict[str, str | None] = {
+    params: dict[str, str | int | bool | None] = {
         "message": message,
         "chat_id": ctx["chat_id"],
         "provider": ctx["provider"],
         "timezone": ctx["timezone"],
     }
+    if max_retries:
+        params["max_retries"] = max_retries
+        params["retry_backoff_seconds"] = retry_backoff
+    if notify_on_failure:
+        params["notify_on_failure"] = True
     if trigger_at_iso:
         params["trigger_at"] = trigger_at_iso
     if cron:

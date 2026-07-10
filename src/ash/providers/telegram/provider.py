@@ -784,49 +784,62 @@ class TelegramProvider(Provider):
 
     async def _send_image(self, message: OutgoingMessage) -> str:
         """Send an image (optionally with caption) via Telegram."""
-        parse_mode = _get_parse_mode(message.parse_mode)
-        reply_to = _coerce_reply_to_message_id(message.reply_to_message_id)
         image_path = str(message.image_path or "").strip()
         if not image_path:
             raise ValueError("image_path is required for image messages")
 
-        # Telegram captions are limited. Send overflow as a follow-up text message.
-        caption = message.text or ""
-        caption_head = truncate_for_rendered_limit(
-            caption, parse_mode=parse_mode, max_length=MAX_CAPTION_LENGTH
-        )
-        caption_tail = caption[len(caption_head) :]
-        rendered_caption_head = render_text_for_parse_mode(caption_head, parse_mode)
-
-        sent = await self._bot.send_photo(
-            chat_id=int(message.chat_id),
-            photo=FSInputFile(image_path),
-            caption=rendered_caption_head or None,
-            reply_to_message_id=reply_to,
-            parse_mode=parse_mode if rendered_caption_head else None,
-            reply_markup=message.reply_markup,
-        )
-
-        if caption_tail:
-            await self._send_single(
-                OutgoingMessage(
-                    chat_id=message.chat_id,
-                    text=caption_tail,
-                    reply_to_message_id=str(sent.message_id),
-                    parse_mode=message.parse_mode,
-                )
+        async def send_photo(
+            *,
+            caption: str | None,
+            reply_to_message_id: int | None,
+            parse_mode: ParseMode | None,
+        ) -> TelegramMessage:
+            return await self._bot.send_photo(
+                chat_id=int(message.chat_id),
+                photo=FSInputFile(image_path),
+                caption=caption,
+                reply_to_message_id=reply_to_message_id,
+                parse_mode=parse_mode,
+                reply_markup=message.reply_markup,
             )
 
-        return str(sent.message_id)
+        return await self._send_media_with_caption(message, send_photo)
 
     async def _send_document(self, message: OutgoingMessage) -> str:
         """Send a document (optionally with caption) via Telegram."""
-        parse_mode = _get_parse_mode(message.parse_mode)
-        reply_to = _coerce_reply_to_message_id(message.reply_to_message_id)
         document_path = str(message.document_path or "").strip()
         if not document_path:
             raise ValueError("document_path is required for document messages")
 
+        async def send_document(
+            *,
+            caption: str | None,
+            reply_to_message_id: int | None,
+            parse_mode: ParseMode | None,
+        ) -> TelegramMessage:
+            return await self._bot.send_document(
+                chat_id=int(message.chat_id),
+                document=FSInputFile(document_path),
+                caption=caption,
+                reply_to_message_id=reply_to_message_id,
+                parse_mode=parse_mode,
+                reply_markup=message.reply_markup,
+            )
+
+        return await self._send_media_with_caption(message, send_document)
+
+    async def _send_media_with_caption(
+        self,
+        message: OutgoingMessage,
+        send_media: Callable[
+            ...,
+            Awaitable[TelegramMessage],
+        ],
+    ) -> str:
+        """Send Telegram media with shared caption overflow handling."""
+        parse_mode = _get_parse_mode(message.parse_mode)
+        reply_to = _coerce_reply_to_message_id(message.reply_to_message_id)
+
         caption = message.text or ""
         caption_head = truncate_for_rendered_limit(
             caption, parse_mode=parse_mode, max_length=MAX_CAPTION_LENGTH
@@ -834,13 +847,10 @@ class TelegramProvider(Provider):
         caption_tail = caption[len(caption_head) :]
         rendered_caption_head = render_text_for_parse_mode(caption_head, parse_mode)
 
-        sent = await self._bot.send_document(
-            chat_id=int(message.chat_id),
-            document=FSInputFile(document_path),
+        sent = await send_media(
             caption=rendered_caption_head or None,
             reply_to_message_id=reply_to,
             parse_mode=parse_mode if rendered_caption_head else None,
-            reply_markup=message.reply_markup,
         )
 
         if caption_tail:

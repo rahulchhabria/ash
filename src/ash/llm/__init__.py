@@ -4,6 +4,7 @@ from ash.llm.anthropic import AnthropicProvider
 from ash.llm.base import LLMProvider
 from ash.llm.openai import OpenAIProvider
 from ash.llm.openai_oauth import OpenAIOAuthProvider
+from ash.llm.pioneer import PioneerProvider
 from ash.llm.registry import (
     LLMRegistry,
     ProviderName,
@@ -38,6 +39,7 @@ __all__ = [
     "AnthropicProvider",
     "OpenAIOAuthProvider",
     "OpenAIProvider",
+    "PioneerProvider",
     # Registry
     "LLMRegistry",
     "ProviderName",

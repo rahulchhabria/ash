@@ -17,7 +17,7 @@ from ash.config.models import ModelConfig
 
 
 def _config(
-    provider: Literal["anthropic", "openai", "openai-oauth"],
+    provider: Literal["anthropic", "openai", "openai-oauth", "pioneer"],
 ) -> AshConfig:
     return AshConfig(
         workspace=Path("tmp-workspace"),
@@ -79,6 +79,7 @@ def test_validate_model_credentials_raises_when_api_key_missing(
 ) -> None:
     messages: list[str] = []
     monkeypatch.setattr("ash.cli.commands.chat.error", lambda msg: messages.append(msg))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     cfg = _config("anthropic")
 
     with pytest.raises(typer.Exit):
@@ -98,20 +99,19 @@ def test_validate_model_credentials_passes_when_api_key_present(
     _validate_model_credentials(cfg, "default")
 
 
-def test_validate_model_credentials_uses_anthropic_env_var(
+def test_validate_model_credentials_uses_pioneer_env_var(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     messages: list[str] = []
     monkeypatch.setattr("ash.cli.commands.chat.error", lambda msg: messages.append(msg))
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    cfg = _config("anthropic")
+    cfg = _config("pioneer")
 
     with pytest.raises(typer.Exit):
         _validate_model_credentials(cfg, "default")
 
     assert len(messages) == 1
-    assert "No API key for provider 'anthropic'" in messages[0]
-    assert "ANTHROPIC_API_KEY" in messages[0]
+    assert "No API key for provider 'pioneer'" in messages[0]
+    assert "PIONEER_API_KEY" in messages[0]
 
 
 def test_new_cli_session_state_sets_private_chat_context() -> None:

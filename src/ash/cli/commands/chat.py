@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 PROVIDER_ENV_VARS = {
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
+    "pioneer": "PIONEER_API_KEY",
 }
 
 

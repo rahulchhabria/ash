@@ -312,6 +312,16 @@ class TelegramMessageHandler:
 
     async def _try_handle_triggered_skill(self, message: IncomingMessage) -> bool:
         """Handle explicit slash-command skill triggers without main-agent routing."""
+        thread_id = message.metadata.get("thread_id")
+        session_key = make_session_key(
+            self._provider.name,
+            message.chat_id,
+            message.user_id,
+            thread_id,
+        )
+        if self._stack_manager.has_active(session_key):
+            return False
+
         matched = self._match_triggered_skill(message.text or "")
         if matched is None:
             return False
@@ -332,13 +342,6 @@ class TelegramMessageHandler:
         use_skill_tool = self._tool_registry.get("use_skill")
         tracker = self._create_tool_tracker(message)
 
-        thread_id = message.metadata.get("thread_id")
-        session_key = make_session_key(
-            self._provider.name,
-            message.chat_id,
-            message.user_id,
-            thread_id,
-        )
         session = await self._session_handler.get_or_create_session(message)
         if session.has_incomplete_tool_use():
             session.repair_incomplete_tool_use()
@@ -1131,7 +1134,15 @@ class TelegramMessageHandler:
                     )
                     if stack.is_empty:
                         # Edge case: no parent to cascade to
-                        if result.text:
+                        if result.text and is_no_reply(result.text):
+                            logger.info(
+                                "child_no_reply_suppressed",
+                                extra={
+                                    "child_agent": completed.agent_name,
+                                    "remaining_depth": stack.depth,
+                                },
+                            )
+                        elif result.text:
                             response_external_id = await self._send_stack_response(
                                 message,
                                 result.text,

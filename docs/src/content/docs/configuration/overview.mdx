@@ -82,6 +82,9 @@ max_concurrent = 2
 [openai]
 api_key = "sk-..."
 
+[pioneer]
+api_key = "pio-..."
+
 [models.default]
 provider = "openai"
 model = "gpt-5.6"
@@ -93,6 +96,7 @@ model = "gpt-5.6"
 |----------|---------|
 | `ASH_HOME` | Base directory for Ash state (`config.toml`, logs, sessions, auth) |
 | `OPENAI_API_KEY` | OpenAI API key (for `provider = "openai"`) |
+| `PIONEER_API_KEY` | Pioneer API key (for `provider = "pioneer"`) |
 | `ANTHROPIC_API_KEY` | Anthropic API key |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token |
 | `PARALLEL_API_KEY` | Parallel Search API key |
@@ -105,7 +109,7 @@ model = "gpt-5.6"
 |---------|---------|
 | `workspace`, `timezone` | Global behavior |
 | `[models.*]` | Named model aliases (must include `default`) |
-| `[openai]`, `[anthropic]` | Provider API key config |
+| `[openai]`, `[anthropic]`, `[pioneer]` | Provider API key config |
 | `[telegram]` | Telegram provider settings |
 | `[sandbox]` | Sandbox runtime and mount settings |
 | `[memory]` | Memory retention and extraction tuning |

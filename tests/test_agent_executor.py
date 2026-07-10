@@ -103,9 +103,9 @@ class TestAgentExecutorModelResolution:
         default_llm.name = "openai"
         default_llm.complete = AsyncMock()
 
-        alt_llm = MagicMock()
-        alt_llm.name = "anthropic"
-        alt_llm.complete = AsyncMock(
+        pioneer_llm = MagicMock()
+        pioneer_llm.name = "pioneer"
+        pioneer_llm.complete = AsyncMock(
             return_value=CompletionResponse(
                 message=Message(
                     role=Role.ASSISTANT,
@@ -118,13 +118,13 @@ class TestAgentExecutorModelResolution:
 
         config = MagicMock(spec=AshConfig)
         config.models = {
-            "school_email": ModelConfig(
-                provider="anthropic",
+            "school_email_pioneer": ModelConfig(
+                provider="pioneer",
                 model="job_school_email",
             ),
         }
         config.get_model.side_effect = lambda alias: config.models[alias]
-        config.create_llm_provider_for_model.return_value = alt_llm
+        config.create_llm_provider_for_model.return_value = pioneer_llm
 
         executor = AgentExecutor(default_llm, mock_tools, config)
         session = SessionState(
@@ -141,7 +141,7 @@ class TestAgentExecutorModelResolution:
             session=session,
             system_prompt="system",
             context=AgentContext(),
-            model_alias="school_email",
+            model_alias="school_email_pioneer",
             model="job_school_email",
             max_iterations=1,
             is_skill_agent=True,
@@ -150,9 +150,9 @@ class TestAgentExecutorModelResolution:
         result = await executor.execute_turn(frame)
 
         assert result.action == TurnAction.SEND_TEXT
-        alt_llm.complete.assert_called_once()
+        pioneer_llm.complete.assert_called_once()
         default_llm.complete.assert_not_called()
-        assert alt_llm.complete.call_args.kwargs["model"] == "job_school_email"
+        assert pioneer_llm.complete.call_args.kwargs["model"] == "job_school_email"
 
     @pytest.mark.asyncio
     async def test_agent_without_model_uses_none(

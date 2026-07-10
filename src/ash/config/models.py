@@ -35,12 +35,15 @@ class ModelConfig(BaseModel):
     Only supported by Anthropic Claude models.
     """
 
-    provider: Literal["anthropic", "openai", "openai-oauth"]
+    provider: Literal["anthropic", "openai", "openai-oauth", "pioneer"]
     model: str
     temperature: float | None = None  # None = use provider default
     max_tokens: int = 4096
     thinking: Literal["off", "minimal", "low", "medium", "high"] | None = None
     reasoning: Literal["low", "medium", "high"] | None = None
+    base_url: str | None = None
+    default_headers: dict[str, str] | None = None
+    provider_name: str | None = None
 
 
 class ProviderConfig(BaseModel):
@@ -260,6 +263,35 @@ class CloseGameAlertConfig(BaseModel):
     recent_window_minutes: int = Field(default=240, ge=1, le=1440)
     history_lookback: int = Field(default=10, ge=1, le=100)
     alert_prefixes: list[str] = Field(default_factory=lambda: ["Close Game Alert"])
+
+
+class ReactiveWorkflowRule(BaseModel):
+    """One signal->workflow routing rule.
+
+    Spec contract: specs/reactive_workflows.md.
+    """
+
+    name: str
+    match_prefix: str | None = None
+    match_regex: str | None = None
+    skill: str | None = None
+    agent: str | None = None
+    instruction: str | None = None
+    chat_types: list[str] = Field(default_factory=list)
+
+
+class ReactiveWorkflowConfig(BaseModel):
+    """Configuration for the reactive-workflow integration.
+
+    Config-driven, deterministic signal->workflow routing: when an inbound
+    message matches a rule, a structured instruction block is prepended so the
+    agent deterministically routes to the named skill/agent.
+
+    Spec contract: specs/reactive_workflows.md.
+    """
+
+    enabled: bool = False
+    rules: list[ReactiveWorkflowRule] = Field(default_factory=list)
 
 
 class CapabilityProviderConfig(BaseModel):
@@ -538,6 +570,7 @@ class AshConfig(BaseModel):
     # Provider-level API keys
     anthropic: ProviderConfig | None = None
     openai: ProviderConfig | None = None
+    pioneer: ProviderConfig | None = None
     telegram: TelegramConfig | None = None
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     server: ServerConfig = Field(default_factory=ServerConfig)
@@ -548,6 +581,9 @@ class AshConfig(BaseModel):
         default_factory=EmailForwardSummaryConfig
     )
     close_game_alert: CloseGameAlertConfig = Field(default_factory=CloseGameAlertConfig)
+    reactive_workflows: ReactiveWorkflowConfig = Field(
+        default_factory=ReactiveWorkflowConfig
+    )
     capabilities: CapabilitiesConfig = Field(default_factory=CapabilitiesConfig)
     tool_output_trust: ToolOutputTrustConfig = Field(
         default_factory=ToolOutputTrustConfig
@@ -656,7 +692,7 @@ class AshConfig(BaseModel):
         return self.get_model("default")
 
     def _resolve_provider_api_key(
-        self, provider: Literal["anthropic", "openai", "openai-oauth"]
+        self, provider: Literal["anthropic", "openai", "openai-oauth", "pioneer"]
     ) -> SecretStr | None:
         if provider == "openai-oauth":
             # OAuth-based provider — API key comes from auth.json, not config
@@ -693,7 +729,7 @@ class AshConfig(BaseModel):
         return self._resolve_provider_api_key(self.get_model(alias).provider)
 
     def resolve_provider_api_key(
-        self, provider: Literal["anthropic", "openai", "openai-oauth"]
+        self, provider: Literal["anthropic", "openai", "openai-oauth", "pioneer"]
     ) -> SecretStr | None:
         """Resolve API key for a provider from config/env/oauth storage."""
         return self._resolve_provider_api_key(provider)
@@ -734,10 +770,13 @@ class AshConfig(BaseModel):
         return create_llm_provider(
             model_config.provider,
             api_key=api_key.get_secret_value() if api_key else None,
+            base_url=model_config.base_url,
+            default_headers=model_config.default_headers,
+            provider_name=model_config.provider_name,
         )
 
     def create_llm_provider_for_provider(
-        self, provider: Literal["anthropic", "openai", "openai-oauth"]
+        self, provider: Literal["anthropic", "openai", "openai-oauth", "pioneer"]
     ):
         """Create an LLM provider instance directly from a provider id."""
         from ash.llm.registry import create_llm_provider

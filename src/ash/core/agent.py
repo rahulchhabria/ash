@@ -165,7 +165,6 @@ class Agent:
         memory_context_limit: int = 10,
         memory_retrieval_limit: int = 25,
         mount_prefix: str = "/ash",
-        user_env: dict[str, str] | None = None,
         prompt_context_augmenters: list[PromptContextAugmenter] | None = None,
         sandbox_env_augmenters: list[SandboxEnvAugmenter] | None = None,
         incoming_message_preprocessors: list[IncomingMessagePreprocessor] | None = None,
@@ -182,7 +181,6 @@ class Agent:
             config: Agent configuration.
             graph_store: Unified graph store (memory + people).
             mount_prefix: Sandbox mount prefix for container paths.
-            user_env: User-configured environment variables for tool execution.
             prompt_context_augmenters: Optional hooks for prompt context augmentation.
             sandbox_env_augmenters: Optional hooks for sandbox environment augmentation.
             incoming_message_preprocessors: Optional hooks for inbound message preprocessing.
@@ -201,7 +199,6 @@ class Agent:
         self._memory_retrieval_limit = max(1, memory_retrieval_limit)
         self._config = config or AgentConfig()
         self._mount_prefix = mount_prefix
-        self._user_env = dict(user_env or {})
         self._prompt_context_augmenters = tuple(prompt_context_augmenters or [])
         self._sandbox_env_augmenters = tuple(sandbox_env_augmenters or [])
         self._incoming_message_preprocessors = tuple(
@@ -502,10 +499,14 @@ class Agent:
         user_message: str,
         session: SessionState,
         user_id: str | None,
+        retrieval_query: str | None = None,
     ) -> _MessageSetup:
         effective_user_id = user_id or session.user_id
 
-        # Use ContextGatherer to retrieve memory and people context
+        # Use ContextGatherer to retrieve memory and people context.
+        # retrieval_query lets callers (e.g. the scheduled-task handler) drive
+        # memory/people retrieval from the real task text instead of a wrapped
+        # prompt, so autonomous runs stay personalized. Defaults to user_message.
         ctx = session.context
         context_gatherer = ContextGatherer(
             self._memory,
@@ -515,7 +516,7 @@ class Agent:
         )
         gathered = await context_gatherer.gather(
             user_id=effective_user_id,
-            user_message=user_message,
+            user_message=retrieval_query or user_message,
             provider=session.provider,
             chat_id=session.chat_id,
             chat_type=ctx.chat_type,
@@ -589,7 +590,6 @@ class Agent:
             timezone=self._timezone,
             mount_prefix=self._mount_prefix,
         )
-        env.update(self._user_env)
         env = self._apply_sandbox_env_hooks(env, session, setup.effective_user_id)
 
         metadata = session.context.to_dict()
@@ -802,6 +802,7 @@ class Agent:
                     mount_prefix=self._mount_prefix,
                 )
             )
+            per_tool_env.update(self._user_env)
             per_tool_context = replace(
                 tool_context,
                 tool_use_id=tool_use.id,
@@ -924,11 +925,14 @@ class Agent:
         get_steering_messages: GetSteeringMessagesCallback | None = None,
         session_manager: Any = None,  # Type: SessionManager | None
         tool_overrides: dict[str, Any] | None = None,
+        retrieval_query: str | None = None,
     ) -> AgentResponse:
         from ash.logging import log_context
         from ash.observability import set_sentry_conversation_id
 
-        setup = await self._prepare_message_context(user_message, session, user_id)
+        setup = await self._prepare_message_context(
+            user_message, session, user_id, retrieval_query=retrieval_query
+        )
         session.add_user_message(user_message)
         compaction_info = await self._maybe_compact(session)
 
@@ -1068,11 +1072,14 @@ class Agent:
         get_steering_messages: GetSteeringMessagesCallback | None = None,
         session_manager: Any = None,  # Type: SessionManager | None
         tool_overrides: dict[str, Any] | None = None,
+        retrieval_query: str | None = None,
     ) -> AsyncIterator[str]:
         from ash.logging import log_context
         from ash.observability import set_sentry_conversation_id
 
-        setup = await self._prepare_message_context(user_message, session, user_id)
+        setup = await self._prepare_message_context(
+            user_message, session, user_id, retrieval_query=retrieval_query
+        )
         session.add_user_message(user_message)
         await self._maybe_compact(session)
 
@@ -1302,7 +1309,9 @@ async def create_agent(
 
     # Register first-class memory tools when the store is available.
     if graph_store is not None:
-        tool_registry.register(RememberTool(store=graph_store, extractor=memory_extractor))
+        tool_registry.register(
+            RememberTool(store=graph_store, extractor=memory_extractor)
+        )
         tool_registry.register(ListMemoriesTool(store=graph_store))
         tool_registry.register(SearchMemoriesTool(store=graph_store))
         tool_registry.register(ForgetMemoryTool(store=graph_store))
@@ -1372,7 +1381,6 @@ async def create_agent(
         memory_context_limit=config.memory.context_injection_limit,
         memory_retrieval_limit=config.memory.query_planning_fetch_memories,
         mount_prefix=config.sandbox.mount_prefix,
-        user_env=config.env,
         prompt_context_augmenters=prompt_context_augmenters,
         sandbox_env_augmenters=sandbox_env_augmenters,
         incoming_message_preprocessors=incoming_message_preprocessors,
