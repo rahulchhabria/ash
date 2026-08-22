@@ -91,7 +91,7 @@ class ToolExecutor:
 
             if result.is_error:
                 log_extra["error.message"] = result.content[:500]
-                logger.error(
+                logger.warning(
                     "tool_executed",
                     extra=log_extra,
                 )

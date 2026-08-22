@@ -30,6 +30,14 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "gpt-5.2"
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
+MODEL_FALLBACKS = {
+    "gpt-5.6": DEFAULT_MODEL,
+}
+
+
+def _supports_custom_temperature(model: str) -> bool:
+    """Return whether a model supports non-default temperature values."""
+    return not model.startswith("gpt-5")
 
 
 class OpenAIProvider(LLMProvider):
@@ -159,7 +167,8 @@ class OpenAIProvider(LLMProvider):
         if instructions:
             kwargs["instructions"] = instructions
 
-        if temperature is not None:
+        request_model = str(kwargs["model"])
+        if temperature is not None and _supports_custom_temperature(request_model):
             kwargs["temperature"] = temperature
 
         if reasoning:
@@ -231,7 +240,24 @@ class OpenAIProvider(LLMProvider):
         model_name = kwargs["model"]
 
         start_time = time.monotonic()
-        response = await self._client.responses.create(**kwargs)
+        try:
+            response = await self._client.responses.create(**kwargs)
+        except openai.NotFoundError as exc:
+            fallback_model = MODEL_FALLBACKS.get(str(model_name))
+            if not fallback_model:
+                raise
+            logger.warning(
+                "llm_model_not_found_retrying",
+                extra={
+                    "provider": self.name,
+                    "model": model_name,
+                    "fallback_model": fallback_model,
+                    "error.message": str(exc),
+                },
+            )
+            kwargs["model"] = fallback_model
+            model_name = fallback_model
+            response = await self._client.responses.create(**kwargs)
         duration_ms = int((time.monotonic() - start_time) * 1000)
 
         usage = response.usage
