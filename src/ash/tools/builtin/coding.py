@@ -175,6 +175,11 @@ class RepoTool(Tool):
                     "type": "string",
                     "description": "Base ref for diff/pr_summary/pr_create. Default: HEAD for diffs, main for PRs.",
                 },
+                "approved": {
+                    "type": "boolean",
+                    "description": "Set true only after explicit user approval for commit or PR creation.",
+                    "default": False,
+                },
             },
             "required": ["action"],
         }
@@ -245,6 +250,8 @@ class RepoTool(Tool):
             command = test_command
             timeout = 600
         elif action == "commit":
+            if not bool(input_data.get("approved", False)):
+                return ToolResult.error("commit requires explicit user approval")
             message = str(input_data.get("message") or "").strip()
             if not message:
                 return ToolResult.error("message is required for action=commit")
@@ -261,6 +268,8 @@ class RepoTool(Tool):
                 "gh auth status && printf '\\n--- REMOTES ---\\n' && git remote -v"
             )
         elif action == "pr_create":
+            if not bool(input_data.get("approved", False)):
+                return ToolResult.error("pr_create requires explicit user approval")
             title = str(input_data.get("title") or "").strip()
             body = str(input_data.get("body") or "").strip()
             base = str(input_data.get("base") or "main").strip()

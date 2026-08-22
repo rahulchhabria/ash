@@ -353,6 +353,25 @@ async def test_repo_tool_create_project_uses_safe_workspace_path():
 
 
 @pytest.mark.asyncio
+async def test_repo_tool_requires_approval_for_commit_and_pr_create():
+    tool = RepoTool(FakeExecutor())
+
+    commit = await tool.execute(
+        {"action": "commit", "repo_path": "/workspace", "message": "test"},
+        SimpleNamespace(env={}),
+    )
+    pr = await tool.execute(
+        {"action": "pr_create", "repo_path": "/workspace", "title": "test"},
+        SimpleNamespace(env={}),
+    )
+
+    assert commit.is_error is True
+    assert "explicit user approval" in commit.content
+    assert pr.is_error is True
+    assert "explicit user approval" in pr.content
+
+
+@pytest.mark.asyncio
 async def test_repo_tool_rejects_paths_outside_workspace():
     tool = RepoTool(FakeExecutor())
 

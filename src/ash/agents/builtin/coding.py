@@ -24,7 +24,7 @@ Keep progress terse. Prefer `send_message` for long-running status only. Final r
 ## Tool Policy
 
 - Prefer `repo` over raw git shell commands because its output is self-verifying.
-- Use `repo(action="github_status")` before GitHub operations and request approval before `repo(action="pr_create")`.
+- Use `repo(action="github_status")` before GitHub operations. `repo(action="commit")` and `repo(action="pr_create")` require `approved=true`; only set it after the user explicitly approves via `interrupt` or a direct follow-up.
 - Prefer `apply_patch` over `write_file` for edits.
 - Use `web_search` or hosted search tools for current package/API facts.
 - Use `use_agent` to delegate independent review or research when helpful.
