@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import logging
 import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -445,6 +446,259 @@ class TelegramMessageHandler:
         )
         return True
 
+
+    async def _try_handle_coding_command(self, message: IncomingMessage) -> IncomingMessage | bool:
+        """Handle Telegram coding harness slash commands.
+
+        Returns a rewritten message for commands that should enter the normal
+        agent loop, True when handled directly, or False when not a coding command.
+        """
+        coding_config = getattr(self._config, "coding", None)
+        if coding_config is not None and not getattr(
+            coding_config, "telegram_commands_enabled", True
+        ):
+            return False
+
+        parsed = self._parse_slash_command(message.text)
+        if parsed is None:
+            return False
+        command, arguments = parsed
+        if command not in {"/code", "/status", "/diff", "/test", "/cancel"}:
+            return False
+
+        from ash.coding import CodingJobStore
+
+        store = CodingJobStore()
+        repo_path = getattr(coding_config, "default_repo_path", "/workspace")
+
+        if command == "/code":
+            task = arguments.strip()
+            if not task:
+                await self._send_direct_result(
+                    message=message,
+                    assistant_text="Usage: /code <coding task>",
+                    skip_user_message=False,
+                )
+                return True
+            job = store.create(
+                task=task,
+                repo_path=repo_path,
+                chat_id=message.chat_id,
+                user_id=message.user_id,
+                provider=self._provider.name,
+                thread_id=message.metadata.get("thread_id"),
+                telegram_message_id=message.id,
+            )
+            await self._run_coding_agent_command(
+                message=message,
+                task=task,
+                job_id=job.id,
+                repo_path=repo_path,
+            )
+            return True
+
+        job = store.latest_for_chat(
+            chat_id=message.chat_id,
+            user_id=message.user_id,
+            provider=self._provider.name,
+        )
+        if job is None:
+            await self._send_direct_result(
+                message=message,
+                assistant_text="No active coding job for this chat.",
+                skip_user_message=False,
+            )
+            return True
+
+        if command == "/status":
+            await self._send_direct_result(
+                message=message,
+                assistant_text=(
+                    f"Coding job: {job.id}\n"
+                    f"Status: {job.status}\n"
+                    f"Repo: {job.repo_path}\n"
+                    f"Task: {job.task}\n"
+                    f"Last diff: {job.last_diff_summary or '(none)'}\n"
+                    f"Last test: {job.last_test_result or '(none)'}"
+                ),
+                skip_user_message=False,
+            )
+            return True
+
+        if command == "/cancel":
+            job.status = "cancelled"
+            store.save(job)
+            thread_id = message.metadata.get("thread_id")
+            session_key = make_session_key(
+                self._provider.name,
+                message.chat_id,
+                message.user_id,
+                thread_id,
+            )
+            self._stack_manager.clear(session_key)
+            session_manager = self._session_handler.get_session_manager(
+                message.chat_id, message.user_id, thread_id
+            )
+            session_manager.save_active_stack(None)
+            await self._send_direct_result(
+                message=message,
+                assistant_text=f"Cancelled coding job {job.id}.",
+                skip_user_message=False,
+            )
+            return True
+
+        if command == "/diff":
+            rewritten = (
+                "Use the built-in coding agent to show and summarize the current diff "
+                f"for coding job {job.id}. Run repo(action=\"diff\") and explain what changed."
+            )
+            return replace(message, text=rewritten)
+
+        if command == "/test":
+            test_command = arguments.strip() or job.last_test_command or "make test"
+            rewritten = (
+                "Use the built-in coding agent to run tests for the active coding job.\n\n"
+                f"Job id: {job.id}\n"
+                f"Command: {test_command}\n\n"
+                "Run repo(action=\"test\", command=the command), update the coding_job "
+                "with the result, and summarize failures if any."
+            )
+            return replace(message, text=rewritten)
+
+        return False
+
+
+    async def _run_coding_agent_command(
+        self,
+        *,
+        message: IncomingMessage,
+        task: str,
+        job_id: str,
+        repo_path: str,
+    ) -> None:
+        """Invoke the coding agent directly for /code without LLM re-routing."""
+        if self._tool_registry is None or not self._tool_registry.has("use_agent"):
+            await self._send_direct_result(
+                message=message,
+                assistant_text="Coding agent is not available in this runtime.",
+                skip_user_message=False,
+            )
+            return
+
+        from ash.providers.telegram.checkpoint_ui import (
+            create_checkpoint_keyboard,
+            format_checkpoint_message,
+        )
+        from ash.tools.builtin.agents import CHECKPOINT_METADATA_KEY, UseAgentTool
+
+        use_agent_tool = self._tool_registry.get("use_agent")
+        if not isinstance(use_agent_tool, UseAgentTool):
+            await self._send_direct_result(
+                message=message,
+                assistant_text="Coding agent is not properly configured.",
+                skip_user_message=False,
+            )
+            return
+
+        import uuid
+
+        thread_id = message.metadata.get("thread_id")
+        session_key = make_session_key(
+            self._provider.name,
+            message.chat_id,
+            message.user_id,
+            thread_id,
+        )
+        session_manager = self._session_handler.get_session_manager(
+            message.chat_id, message.user_id, thread_id
+        )
+        tracker = self._create_tool_tracker(message)
+        progress_tool = ProgressMessageTool(tracker)
+        tool_use_id = f"code_{uuid.uuid4().hex[:12]}"
+        tool_input = {
+            "agent": "coding",
+            "message": task,
+            "input": {"job_id": job_id, "repo_path": repo_path},
+        }
+        tool_context = ToolContext(
+            session_id=session_key,
+            user_id=message.user_id,
+            chat_id=message.chat_id,
+            thread_id=thread_id,
+            provider=self._provider.name,
+            metadata={
+                "message_id": message.id,
+                "current_message_id": message.id,
+                "username": message.username,
+                "display_name": message.display_name,
+                "chat_type": message.metadata.get("chat_type"),
+                "chat_title": message.metadata.get("chat_title"),
+                "reply_to_message_id": message.reply_to_message_id or message.id,
+            },
+            session_manager=session_manager,
+            tool_use_id=tool_use_id,
+            tool_overrides={progress_tool.name: progress_tool},
+        )
+
+        await self._provider.send_typing(message.chat_id)
+        result = await use_agent_tool.execute(tool_input, tool_context)
+        response_text = result.content
+        reply_markup = None
+        checkpoint = result.metadata.get(CHECKPOINT_METADATA_KEY)
+        if isinstance(checkpoint, dict):
+            self._checkpoint_handler.store_checkpoint(
+                checkpoint,
+                message,
+                agent_name="coding",
+                original_message=task,
+                tool_use_id=tool_use_id,
+            )
+            response_text = format_checkpoint_message(checkpoint)
+            reply_markup = create_checkpoint_keyboard(checkpoint)
+
+        if tracker.thinking_msg_id and not reply_markup:
+            sent_message_id = await tracker.finalize_response(response_text)
+        else:
+            if tracker.thinking_msg_id:
+                try:
+                    await self._provider.delete(message.chat_id, tracker.thinking_msg_id)
+                except Exception:
+                    logger.debug("Failed to delete coding thinking message")
+            sent_message_id = await self._provider.send(
+                OutgoingMessage(
+                    chat_id=message.chat_id,
+                    text=response_text,
+                    reply_to_message_id=message.id,
+                    reply_markup=reply_markup,
+                )
+            )
+
+        await self._session_handler.persist_messages(
+            message.chat_id,
+            message.user_id,
+            message.text,
+            response_text,
+            external_id=message.id,
+            reply_to_external_id=message.reply_to_message_id,
+            response_external_id=sent_message_id,
+            username=message.username,
+            display_name=message.display_name,
+            thread_id=thread_id,
+            skip_user_message=False,
+        )
+        await session_manager.add_tool_use(
+            tool_use_id=tool_use_id,
+            name="use_agent",
+            input_data=tool_input,
+        )
+        await session_manager.add_tool_result(
+            tool_use_id=tool_use_id,
+            output=result.content,
+            success=not result.is_error,
+            metadata=result.metadata,
+        )
+        self._log_response(response_text)
+
     async def _try_handle_capability_oauth_callback(
         self, message: IncomingMessage
     ) -> bool:
@@ -719,6 +973,12 @@ class TelegramMessageHandler:
 
         if await self._try_handle_capability_oauth_callback(message):
             return
+
+        coding_command_result = await self._try_handle_coding_command(message)
+        if coding_command_result is True:
+            return
+        if isinstance(coding_command_result, IncomingMessage):
+            message = coding_command_result
 
         if await self._try_handle_triggered_skill(message):
             return

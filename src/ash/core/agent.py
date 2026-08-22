@@ -1216,13 +1216,17 @@ async def create_agent(
     from ash.skills import SkillRegistry
     from ash.tools.base import build_sandbox_manager_config
     from ash.tools.builtin import (
+        ApplyPatchTool,
         AshTriageDeepAgentsTool,
         BashTool,
+        CodingJobTool,
         DeepAgentsStatusTool,
         DeepResearchTool,
         ForgetMemoryTool,
+        HostedOpenAITool,
         ListMemoriesTool,
         RememberTool,
+        RepoTool,
         SearchMemoriesTool,
         WebFetchTool,
         WebSearchTool,
@@ -1259,6 +1263,9 @@ async def create_agent(
     tool_registry.register(BashTool(executor=shared_executor))
     tool_registry.register(ReadFileTool(executor=shared_executor))
     tool_registry.register(WriteFileTool(executor=shared_executor))
+    tool_registry.register(ApplyPatchTool(executor=shared_executor))
+    tool_registry.register(RepoTool(executor=shared_executor))
+    tool_registry.register(CodingJobTool())
 
     # Register interrupt tool for agent checkpointing
     from ash.tools.builtin.complete import CompleteTool
@@ -1268,6 +1275,20 @@ async def create_agent(
     tool_registry.register(CompleteTool())
     tool_registry.register(DeepAgentsStatusTool())
     tool_registry.register(AshTriageDeepAgentsTool())
+    tool_registry.register(
+        HostedOpenAITool(
+            "openai_web_search",
+            "Use OpenAI hosted web search when the active provider supports it.",
+            {"type": "web_search_preview", "search_context_size": "medium"},
+        )
+    )
+    tool_registry.register(
+        HostedOpenAITool(
+            "openai_file_search",
+            "Use OpenAI hosted file search when vector stores are configured.",
+            {"type": "file_search", "vector_store_ids": []},
+        )
+    )
 
     if config.parallel_search and config.parallel_search.api_key:
         search_cache = SearchCache(maxsize=100, ttl=900)

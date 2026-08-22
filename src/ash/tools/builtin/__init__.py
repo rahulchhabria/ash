@@ -10,6 +10,12 @@ Core tools are exported here:
 
 from ash.tools.builtin.bash import BashTool
 from ash.tools.builtin.browser import BrowserTool
+from ash.tools.builtin.coding import (
+    ApplyPatchTool,
+    CodingJobTool,
+    HostedOpenAITool,
+    RepoTool,
+)
 from ash.tools.builtin.deepagents import (
     AshTriageDeepAgentsTool,
     DeepAgentsStatusTool,
@@ -27,14 +33,18 @@ from ash.tools.builtin.web_search import WebSearchTool
 
 __all__ = [
     "BashTool",
+    "ApplyPatchTool",
     "AshTriageDeepAgentsTool",
     "BrowserTool",
+    "CodingJobTool",
     "DeepAgentsStatusTool",
     "DeepResearchTool",
     "ForgetMemoryTool",
+    "HostedOpenAITool",
     "ListMemoriesTool",
     "ReadFileTool",
     "RememberTool",
+    "RepoTool",
     "SearchMemoriesTool",
     "WebFetchTool",
     "WebSearchTool",

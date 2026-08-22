@@ -44,14 +44,20 @@ class ToolRegistry:
         return list(self._tools.keys())
 
     def get_definitions(self) -> list[ToolDefinition]:
-        return [
-            ToolDefinition(
-                name=tool.name,
-                description=tool.description,
-                input_schema=tool.input_schema,
+        definitions: list[ToolDefinition] = []
+        for tool in self._tools.values():
+            raw_definition = tool.to_definition()
+            if isinstance(raw_definition, ToolDefinition):
+                definitions.append(raw_definition)
+                continue
+            definitions.append(
+                ToolDefinition(
+                    name=raw_definition["name"],
+                    description=raw_definition["description"],
+                    input_schema=raw_definition["input_schema"],
+                )
             )
-            for tool in self._tools.values()
-        ]
+        return definitions
 
     def __len__(self) -> int:
         return len(self._tools)
