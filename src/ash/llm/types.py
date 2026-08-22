@@ -92,6 +92,8 @@ class ToolDefinition:
     name: str
     description: str
     input_schema: dict[str, Any]
+    kind: str = "function"
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

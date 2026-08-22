@@ -134,15 +134,39 @@ class OpenAIProvider(LLMProvider):
     ) -> list[dict[str, Any]] | None:
         if not tools:
             return None
-        return [
-            {
-                "type": "function",
-                "name": tool.name,
-                "description": tool.description,
-                "parameters": tool.input_schema,
-            }
-            for tool in tools
-        ]
+
+        converted: list[dict[str, Any]] = []
+        for tool in tools:
+            if tool.kind == "hosted":
+                openai_tool = tool.metadata.get("openai_tool")
+                if isinstance(openai_tool, dict):
+                    # Drop empty vector store placeholders; OpenAI rejects file_search
+                    # without configured stores, while function tools should remain usable.
+                    if (
+                        openai_tool.get("type") == "file_search"
+                        and not openai_tool.get("vector_store_ids")
+                    ):
+                        continue
+                    converted.append(dict(openai_tool))
+                continue
+            if tool.kind == "custom":
+                converted.append(
+                    {
+                        "type": "custom",
+                        "name": tool.name,
+                        "description": tool.description,
+                    }
+                )
+                continue
+            converted.append(
+                {
+                    "type": "function",
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.input_schema,
+                }
+            )
+        return converted or None
 
     def _build_request_kwargs(
         self,

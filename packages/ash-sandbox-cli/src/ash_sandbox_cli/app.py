@@ -8,6 +8,7 @@ from ash_sandbox_cli.commands import (
     config,
     logs,
     memory,
+    repo,
     schedule,
     skill,
     todo,
@@ -23,6 +24,7 @@ app = typer.Typer(
 app.add_typer(config.app, name="config")
 app.add_typer(logs.app, name="logs")
 app.add_typer(memory.app, name="memory")
+app.add_typer(repo.app, name="repo")
 app.add_typer(browser.app, name="browser")
 app.add_typer(capability.app, name="capability")
 app.add_typer(schedule.app, name="schedule")

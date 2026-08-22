@@ -409,6 +409,26 @@ class BrowserConfig(BaseModel):
     kernel: BrowserKernelConfig = Field(default_factory=BrowserKernelConfig)
 
 
+class CodingConfig(BaseModel):
+    """Configuration for the Telegram-first coding harness."""
+
+    enabled: bool = True
+    model: str = "codex"
+    default_repo_path: str = "/workspace"
+    require_approval_for: list[str] = Field(
+        default_factory=lambda: [
+            "deploy",
+            "migration",
+            "force_push",
+            "delete",
+            "secrets",
+            "dependency_upgrade",
+        ]
+    )
+    telegram_commands_enabled: bool = True
+    hosted_openai_tools_enabled: bool = True
+
+
 class ConversationConfig(BaseModel):
     """Configuration for conversation context management."""
 
@@ -604,6 +624,7 @@ class AshConfig(BaseModel):
         default_factory=ToolOutputTrustConfig
     )
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
+    coding: CodingConfig = Field(default_factory=CodingConfig)
     conversation: ConversationConfig = Field(default_factory=ConversationConfig)
     sessions: SessionsConfig = Field(default_factory=SessionsConfig)
     embeddings: EmbeddingsConfig | None = None
