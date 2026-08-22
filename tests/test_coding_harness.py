@@ -37,16 +37,21 @@ def test_coding_job_store_round_trips(tmp_path):
     assert loaded.task == "fix the tests"
     assert loaded.status == "testing"
     assert loaded.last_test_result == "Exit code: 0"
-    assert store.latest_for_chat(
-        chat_id="c1", user_id="u1", provider="telegram"
-    ).id == job.id
+    assert (
+        store.latest_for_chat(chat_id="c1", user_id="u1", provider="telegram").id
+        == job.id
+    )
 
 
 def test_builtin_coding_agent_falls_back_without_codex_alias():
     config = AshConfig(
         models={"default": ModelConfig(provider="openai", model="gpt-5.2")}
     )
-    registry = type("Registry", (), {"agents": [], "register": lambda self, a: self.agents.append(a)})()
+    registry = type(
+        "Registry",
+        (),
+        {"agents": [], "register": lambda self, a: self.agents.append(a)},
+    )()
 
     register_builtin_agents(registry, config=config)
 
@@ -61,7 +66,11 @@ def test_builtin_coding_agent_uses_configured_codex_alias():
             "codex": ModelConfig(provider="openai", model="gpt-5.2-codex"),
         }
     )
-    registry = type("Registry", (), {"agents": [], "register": lambda self, a: self.agents.append(a)})()
+    registry = type(
+        "Registry",
+        (),
+        {"agents": [], "register": lambda self, a: self.agents.append(a)},
+    )()
 
     register_builtin_agents(registry, config=config)
 
@@ -78,7 +87,12 @@ def test_openai_converts_hosted_tools_and_skips_unconfigured_file_search():
             description="hosted search",
             input_schema={"type": "object", "properties": {}},
             kind="hosted",
-            metadata={"openai_tool": {"type": "web_search_preview", "search_context_size": "medium"}},
+            metadata={
+                "openai_tool": {
+                    "type": "web_search_preview",
+                    "search_context_size": "medium",
+                }
+            },
         ),
         ToolDefinition(
             name="openai_file_search",
@@ -101,7 +115,6 @@ def test_openai_converts_hosted_tools_and_skips_unconfigured_file_search():
     assert kwargs["tools"] == [
         {"type": "web_search_preview", "search_context_size": "medium"}
     ]
-
 
 
 def test_tool_registry_preserves_hosted_tool_definitions():
@@ -156,6 +169,35 @@ async def test_telegram_code_command_dispatches_directly(monkeypatch, tmp_path):
     assert store.get(call["job_id"]) is not None
 
 
+def test_telegram_coding_command_uses_raw_text_after_preprocessing():
+    handler = TelegramMessageHandler.__new__(TelegramMessageHandler)
+    handler._provider = SimpleNamespace(bot_username=None)
+
+    raw = IncomingMessage(
+        id="m1",
+        chat_id="c1",
+        user_id="u1",
+        text="/code fix failing tests",
+        metadata={"thread_id": "t1"},
+    )
+    processed = IncomingMessage(
+        id="m1",
+        chat_id="c1",
+        user_id="u1",
+        text="--- injected context ---\n/code fix failing tests",
+        metadata={"thread_id": "t1", "source": "preprocessed"},
+    )
+
+    command_message = handler._message_for_raw_slash_command(
+        raw_message=raw,
+        processed_message=processed,
+        commands={"/code"},
+    )
+
+    assert command_message.text == "/code fix failing tests"
+    assert command_message.metadata == processed.metadata
+
+
 @pytest.mark.asyncio
 async def test_telegram_cancel_clears_persisted_stack(monkeypatch, tmp_path):
     import ash.coding
@@ -172,7 +214,9 @@ async def test_telegram_cancel_clears_persisted_stack(monkeypatch, tmp_path):
 
     session_manager = MagicMock()
     handler = TelegramMessageHandler.__new__(TelegramMessageHandler)
-    handler._config = SimpleNamespace(coding=SimpleNamespace(telegram_commands_enabled=True))
+    handler._config = SimpleNamespace(
+        coding=SimpleNamespace(telegram_commands_enabled=True)
+    )
     handler._provider = SimpleNamespace(name="telegram")
     handler._stack_manager = MagicMock()
     handler._session_handler = MagicMock()
@@ -191,4 +235,6 @@ async def test_telegram_cancel_clears_persisted_stack(monkeypatch, tmp_path):
     assert result is True
     handler._stack_manager.clear.assert_called_once()
     session_manager.save_active_stack.assert_called_once_with(None)
-    assert store.latest_for_chat(chat_id="c1", user_id="u1", provider="telegram") is None
+    assert (
+        store.latest_for_chat(chat_id="c1", user_id="u1", provider="telegram") is None
+    )

@@ -264,6 +264,20 @@ class TelegramMessageHandler:
 
         return command, remainder.strip()
 
+    def _message_for_raw_slash_command(
+        self,
+        *,
+        raw_message: IncomingMessage,
+        processed_message: IncomingMessage,
+        commands: set[str],
+    ) -> IncomingMessage:
+        parsed = self._parse_slash_command(raw_message.text or "")
+        if parsed is None or parsed[0] not in commands:
+            return processed_message
+        if raw_message.text == processed_message.text:
+            return processed_message
+        return replace(processed_message, text=raw_message.text)
+
     def _match_triggered_skill(
         self,
         message_text: str,
@@ -446,8 +460,9 @@ class TelegramMessageHandler:
         )
         return True
 
-
-    async def _try_handle_coding_command(self, message: IncomingMessage) -> IncomingMessage | bool:
+    async def _try_handle_coding_command(
+        self, message: IncomingMessage
+    ) -> IncomingMessage | bool:
         """Handle Telegram coding harness slash commands.
 
         Returns a rewritten message for commands that should enter the normal
@@ -550,7 +565,7 @@ class TelegramMessageHandler:
         if command == "/diff":
             rewritten = (
                 "Use the built-in coding agent to show and summarize the current diff "
-                f"for coding job {job.id}. Run repo(action=\"diff\") and explain what changed."
+                f'for coding job {job.id}. Run repo(action="diff") and explain what changed.'
             )
             return replace(message, text=rewritten)
 
@@ -560,13 +575,12 @@ class TelegramMessageHandler:
                 "Use the built-in coding agent to run tests for the active coding job.\n\n"
                 f"Job id: {job.id}\n"
                 f"Command: {test_command}\n\n"
-                "Run repo(action=\"test\", command=the command), update the coding_job "
+                'Run repo(action="test", command=the command), update the coding_job '
                 "with the result, and summarize failures if any."
             )
             return replace(message, text=rewritten)
 
         return False
-
 
     async def _run_coding_agent_command(
         self,
@@ -661,7 +675,9 @@ class TelegramMessageHandler:
         else:
             if tracker.thinking_msg_id:
                 try:
-                    await self._provider.delete(message.chat_id, tracker.thinking_msg_id)
+                    await self._provider.delete(
+                        message.chat_id, tracker.thinking_msg_id
+                    )
                 except Exception:
                     logger.debug("Failed to delete coding thinking message")
             sent_message_id = await self._provider.send(
@@ -958,6 +974,7 @@ class TelegramMessageHandler:
     ) -> None:
         """Inner implementation of _process_single_message (runs with log context)."""
         await self._provider.set_reaction(message.chat_id, message.id, "👀")
+        raw_message = message
         preprocess_fn = getattr(self._agent, "run_incoming_message_preprocessors", None)
         if callable(preprocess_fn):
             preprocessed = preprocess_fn(message)
@@ -974,7 +991,12 @@ class TelegramMessageHandler:
         if await self._try_handle_capability_oauth_callback(message):
             return
 
-        coding_command_result = await self._try_handle_coding_command(message)
+        coding_message = self._message_for_raw_slash_command(
+            raw_message=raw_message,
+            processed_message=message,
+            commands={"/code", "/status", "/diff", "/test", "/cancel"},
+        )
+        coding_command_result = await self._try_handle_coding_command(coding_message)
         if coding_command_result is True:
             return
         if isinstance(coding_command_result, IncomingMessage):
