@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -11,6 +12,7 @@ from typing import Any, Literal
 
 from ash.config.paths import get_ash_home
 
+logger = logging.getLogger(__name__)
 
 JobStatus = Literal[
     "planned",
@@ -36,6 +38,10 @@ class CodingJob:
     provider: str | None = None
     thread_id: str | None = None
     branch: str | None = None
+    project_name: str | None = None
+    changed_files: list[str] = field(default_factory=list)
+    last_pr_url: str | None = None
+    last_checkpoint: str | None = None
     status: JobStatus = "planned"
     telegram_message_id: str | None = None
     last_diff_summary: str | None = None
@@ -55,7 +61,7 @@ class CodingJob:
         provider: str | None = None,
         thread_id: str | None = None,
         telegram_message_id: str | None = None,
-    ) -> "CodingJob":
+    ) -> CodingJob:
         return cls(
             id=f"code-{uuid.uuid4().hex[:10]}",
             task=task,
@@ -71,7 +77,9 @@ class CodingJob:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "CodingJob":
+    def from_dict(cls, data: dict[str, Any]) -> CodingJob:
+        if "changed_files" not in data or data["changed_files"] is None:
+            data["changed_files"] = []
         return cls(**data)
 
     def touch(self) -> None:
@@ -125,7 +133,11 @@ class CodingJobStore:
         for path in sorted(self.root.glob("code-*.json"), reverse=True):
             try:
                 jobs.append(CodingJob.from_dict(json.loads(path.read_text())))
-            except Exception:
+            except Exception as exc:
+                logger.debug(
+                    "coding_job_load_failed",
+                    extra={"file.path": str(path), "error.message": str(exc)},
+                )
                 continue
             if len(jobs) >= limit:
                 break

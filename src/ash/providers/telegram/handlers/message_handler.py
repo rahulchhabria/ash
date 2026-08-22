@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
 import re
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -460,6 +461,149 @@ class TelegramMessageHandler:
         )
         return True
 
+    def _coding_env(self) -> dict[str, str]:
+        coding_config = getattr(self._config, "coding", None)
+        token_env = getattr(coding_config, "github_token_env", "GH_TOKEN") or "GH_TOKEN"
+        env: dict[str, str] = {}
+        for name in dict.fromkeys([str(token_env), "GH_TOKEN", "GITHUB_TOKEN"]):
+            token = os.environ.get(name)
+            if token:
+                env["GH_TOKEN"] = token
+                env["GITHUB_TOKEN"] = token
+                break
+        return env
+
+    def _looks_like_coding_request(self, message_text: str) -> bool:
+        text = (message_text or "").strip().lower()
+        if not text or text.startswith("/"):
+            return False
+        action = (
+            "build",
+            "create",
+            "make",
+            "implement",
+            "fix",
+            "debug",
+            "refactor",
+            "add",
+            "write",
+            "run tests",
+            "open a pr",
+            "commit",
+            "clone",
+            "initialize git",
+            "init git",
+        )
+        target = (
+            "app",
+            "site",
+            "repo",
+            "repository",
+            "project",
+            "folder",
+            "directory",
+            "code",
+            "test",
+            "branch",
+            "pull request",
+            "pr",
+            "github",
+            "file",
+        )
+        return any(word in text for word in action) and any(
+            word in text for word in target
+        )
+
+    def _format_coding_status(self, job: Any) -> str:
+        changed = ", ".join(job.changed_files) if job.changed_files else "(none)"
+        return (
+            f"Coding job: {job.id}\n"
+            f"Status: {job.status}\n"
+            f"Repo: {job.repo_path}\n"
+            f"Project: {job.project_name or '(not set)'}\n"
+            f"Branch: {job.branch or '(not set)'}\n"
+            f"Task: {job.task}\n"
+            f"Changed files: {changed}\n"
+            f"Last diff: {job.last_diff_summary or '(none)'}\n"
+            f"Last test: {job.last_test_result or '(none)'}\n"
+            f"PR: {job.last_pr_url or '(none)'}"
+        )
+
+    async def _execute_repo_for_job(
+        self,
+        *,
+        message: IncomingMessage,
+        job: Any,
+        action: str,
+        command: str | None = None,
+    ) -> str:
+        if self._tool_registry is None or not self._tool_registry.has("repo"):
+            return "Repo tool is not available in this runtime."
+        repo_tool = self._tool_registry.get("repo")
+        thread_id = message.metadata.get("thread_id")
+        session_manager = self._session_handler.get_session_manager(
+            message.chat_id, message.user_id, thread_id
+        )
+        tool_context = ToolContext(
+            session_id=make_session_key(
+                self._provider.name, message.chat_id, message.user_id, thread_id
+            ),
+            user_id=message.user_id,
+            chat_id=message.chat_id,
+            thread_id=thread_id,
+            provider=self._provider.name,
+            metadata={"message_id": message.id, "reply_to_message_id": message.id},
+            session_manager=session_manager,
+            tool_use_id=f"repo-{action}-{message.id}",
+            env=self._coding_env(),
+        )
+        input_data: dict[str, Any] = {"action": action, "repo_path": job.repo_path}
+        if command:
+            input_data["command"] = command
+        result = await repo_tool.execute(input_data, tool_context)
+        from ash.coding import CodingJobStore
+
+        store = CodingJobStore()
+        if action == "test":
+            job.last_test_command = command
+            job.last_test_result = result.content[:1000]
+        elif action == "diff":
+            job.last_diff_summary = result.content[:1000]
+        job.status = "ready" if not result.is_error else "failed"
+        store.save(job)
+        return result.content
+
+    async def _try_handle_coding_intent(self, message: IncomingMessage) -> bool:
+        coding_config = getattr(self._config, "coding", None)
+        if coding_config is not None:
+            if not getattr(coding_config, "enabled", True):
+                return False
+            if not getattr(coding_config, "auto_route_enabled", True):
+                return False
+        if not self._looks_like_coding_request(message.text or ""):
+            return False
+        from ash.coding import CodingJobStore
+
+        repo_path = getattr(coding_config, "default_repo_path", "/workspace")
+        task = message.text.strip()
+        store = CodingJobStore()
+        job = store.create(
+            task=task,
+            repo_path=repo_path,
+            chat_id=message.chat_id,
+            user_id=message.user_id,
+            provider=self._provider.name,
+            thread_id=message.metadata.get("thread_id"),
+            telegram_message_id=message.id,
+        )
+        await self._run_coding_agent_command(
+            message=message,
+            task=task,
+            job_id=job.id,
+            repo_path=repo_path,
+        )
+        return True
+
     async def _try_handle_coding_command(
         self, message: IncomingMessage
     ) -> IncomingMessage | bool:
@@ -528,14 +672,7 @@ class TelegramMessageHandler:
         if command == "/status":
             await self._send_direct_result(
                 message=message,
-                assistant_text=(
-                    f"Coding job: {job.id}\n"
-                    f"Status: {job.status}\n"
-                    f"Repo: {job.repo_path}\n"
-                    f"Task: {job.task}\n"
-                    f"Last diff: {job.last_diff_summary or '(none)'}\n"
-                    f"Last test: {job.last_test_result or '(none)'}"
-                ),
+                assistant_text=self._format_coding_status(job),
                 skip_user_message=False,
             )
             return True
@@ -563,22 +700,32 @@ class TelegramMessageHandler:
             return True
 
         if command == "/diff":
-            rewritten = (
-                "Use the built-in coding agent to show and summarize the current diff "
-                f'for coding job {job.id}. Run repo(action="diff") and explain what changed.'
+            output = await self._execute_repo_for_job(
+                message=message,
+                job=job,
+                action="diff",
             )
-            return replace(message, text=rewritten)
+            await self._send_direct_result(
+                message=message,
+                assistant_text=output,
+                skip_user_message=False,
+            )
+            return True
 
         if command == "/test":
             test_command = arguments.strip() or job.last_test_command or "make test"
-            rewritten = (
-                "Use the built-in coding agent to run tests for the active coding job.\n\n"
-                f"Job id: {job.id}\n"
-                f"Command: {test_command}\n\n"
-                'Run repo(action="test", command=the command), update the coding_job '
-                "with the result, and summarize failures if any."
+            output = await self._execute_repo_for_job(
+                message=message,
+                job=job,
+                action="test",
+                command=test_command,
             )
-            return replace(message, text=rewritten)
+            await self._send_direct_result(
+                message=message,
+                assistant_text=output,
+                skip_user_message=False,
+            )
+            return True
 
         return False
 
@@ -632,7 +779,15 @@ class TelegramMessageHandler:
         tool_input = {
             "agent": "coding",
             "message": task,
-            "input": {"job_id": job_id, "repo_path": repo_path},
+            "input": {
+                "job_id": job_id,
+                "repo_path": repo_path,
+                "projects_root": getattr(
+                    getattr(self._config, "coding", None),
+                    "projects_root",
+                    "/workspace/projects",
+                ),
+            },
         }
         tool_context = ToolContext(
             session_id=session_key,
@@ -652,6 +807,7 @@ class TelegramMessageHandler:
             session_manager=session_manager,
             tool_use_id=tool_use_id,
             tool_overrides={progress_tool.name: progress_tool},
+            env=self._coding_env(),
         )
 
         await self._provider.send_typing(message.chat_id)
@@ -1001,6 +1157,9 @@ class TelegramMessageHandler:
             return
         if isinstance(coding_command_result, IncomingMessage):
             message = coding_command_result
+
+        if await self._try_handle_coding_intent(raw_message):
+            return
 
         if await self._try_handle_triggered_skill(message):
             return

@@ -285,7 +285,9 @@ class ReactiveWorkflowRule(BaseModel):
             return isinstance(value, str) and bool(value.strip())
 
         if not (_present(self.match_prefix) or _present(self.match_regex)):
-            raise ValueError("reactive workflow rule requires match_prefix or match_regex")
+            raise ValueError(
+                "reactive workflow rule requires match_prefix or match_regex"
+            )
         if not (
             _present(self.skill) or _present(self.agent) or _present(self.instruction)
         ):
@@ -415,6 +417,9 @@ class CodingConfig(BaseModel):
     enabled: bool = True
     model: str = "codex"
     default_repo_path: str = "/workspace"
+    projects_root: str = "/workspace/projects"
+    auto_route_enabled: bool = True
+    github_token_env: str = "GH_TOKEN"  # noqa: S105 - environment variable name, not a secret
     require_approval_for: list[str] = Field(
         default_factory=lambda: [
             "deploy",

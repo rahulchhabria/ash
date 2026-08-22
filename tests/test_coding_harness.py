@@ -13,7 +13,8 @@ from ash.llm.openai import OpenAIProvider
 from ash.llm.types import Message, Role, ToolDefinition
 from ash.providers.base import IncomingMessage
 from ash.providers.telegram.handlers.message_handler import TelegramMessageHandler
-from ash.tools.builtin.coding import HostedOpenAITool
+from ash.tools.base import ToolResult
+from ash.tools.builtin.coding import HostedOpenAITool, RepoTool
 from ash.tools.registry import ToolRegistry
 
 
@@ -28,6 +29,9 @@ def test_coding_job_store_round_trips(tmp_path):
         provider="telegram",
     )
     job.status = "testing"
+    job.project_name = "demo"
+    job.changed_files = ["app.py"]
+    job.last_pr_url = "https://github.com/example/repo/pull/1"
     job.last_test_result = "Exit code: 0"
     store.save(job)
 
@@ -37,6 +41,9 @@ def test_coding_job_store_round_trips(tmp_path):
     assert loaded.id == job.id
     assert loaded.task == "fix the tests"
     assert loaded.status == "testing"
+    assert loaded.project_name == "demo"
+    assert loaded.changed_files == ["app.py"]
+    assert loaded.last_pr_url == "https://github.com/example/repo/pull/1"
     assert loaded.last_test_result == "Exit code: 0"
     assert (
         store.latest_for_chat(chat_id="c1", user_id="u1", provider="telegram").id
@@ -220,6 +227,142 @@ def test_telegram_coding_command_uses_raw_text_after_preprocessing():
 
     assert command_message.text == "/code fix failing tests"
     assert command_message.metadata == processed.metadata
+
+
+@pytest.mark.asyncio
+async def test_telegram_plain_coding_request_auto_routes(monkeypatch, tmp_path):
+    import ash.coding
+
+    store = CodingJobStore(root=tmp_path)
+    monkeypatch.setattr(ash.coding, "CodingJobStore", lambda: store)
+
+    handler = TelegramMessageHandler.__new__(TelegramMessageHandler)
+    handler._config = SimpleNamespace(
+        coding=SimpleNamespace(
+            enabled=True,
+            auto_route_enabled=True,
+            default_repo_path="/workspace",
+        )
+    )
+    handler._provider = SimpleNamespace(name="telegram")
+    handler._run_coding_agent_command = AsyncMock()
+
+    message = IncomingMessage(
+        id="m1",
+        chat_id="c1",
+        user_id="u1",
+        text="create a new folder called demo-app and initialize git for the project",
+    )
+
+    result = await handler._try_handle_coding_intent(message)
+
+    assert result is True
+    handler._run_coding_agent_command.assert_awaited_once()
+    call = handler._run_coding_agent_command.await_args.kwargs
+    assert call["task"] == message.text
+    assert store.get(call["job_id"]) is not None
+
+
+@pytest.mark.asyncio
+async def test_telegram_diff_command_runs_repo_tool_directly(monkeypatch, tmp_path):
+    import ash.coding
+
+    store = CodingJobStore(root=tmp_path)
+    store.create(
+        task="fix failing tests",
+        repo_path="/workspace/demo",
+        chat_id="c1",
+        user_id="u1",
+        provider="telegram",
+    )
+    monkeypatch.setattr(ash.coding, "CodingJobStore", lambda: store)
+
+    repo_tool = AsyncMock()
+    repo_tool.execute.return_value = ToolResult.success("diff output")
+    handler = TelegramMessageHandler.__new__(TelegramMessageHandler)
+    handler._config = SimpleNamespace(
+        coding=SimpleNamespace(telegram_commands_enabled=True)
+    )
+    handler._provider = SimpleNamespace(name="telegram")
+    handler._tool_registry = MagicMock()
+    handler._tool_registry.has.return_value = True
+    handler._tool_registry.get.return_value = repo_tool
+    handler._session_handler = MagicMock()
+    handler._session_handler.get_session_manager.return_value = MagicMock()
+    handler._send_direct_result = AsyncMock()
+
+    message = IncomingMessage(id="m1", chat_id="c1", user_id="u1", text="/diff")
+
+    result = await handler._try_handle_coding_command(message)
+
+    assert result is True
+    repo_tool.execute.assert_awaited_once()
+    assert repo_tool.execute.await_args.args[0] == {
+        "action": "diff",
+        "repo_path": "/workspace/demo",
+    }
+    handler._send_direct_result.assert_awaited_once()
+
+
+def test_telegram_coding_env_prefers_configured_github_token(monkeypatch):
+    handler = TelegramMessageHandler.__new__(TelegramMessageHandler)
+    handler._config = SimpleNamespace(
+        coding=SimpleNamespace(github_token_env="ASH_GH_TOKEN")
+    )
+    monkeypatch.setenv("ASH_GH_TOKEN", "token-123")
+
+    assert handler._coding_env() == {
+        "GH_TOKEN": "token-123",
+        "GITHUB_TOKEN": "token-123",
+    }
+
+
+class FakeExecutor:
+    def __init__(self):
+        self.calls = []
+
+    async def execute(self, command, **kwargs):
+        self.calls.append({"command": command, **kwargs})
+        return SimpleNamespace(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            timed_out=False,
+            success=True,
+            output="ok",
+        )
+
+
+@pytest.mark.asyncio
+async def test_repo_tool_create_project_uses_safe_workspace_path():
+    executor = FakeExecutor()
+    tool = RepoTool(executor)
+
+    result = await tool.execute(
+        {
+            "action": "create_project",
+            "project_name": "demo-app",
+            "projects_root": "/workspace/projects",
+        },
+        SimpleNamespace(env={}),
+    )
+
+    assert result.is_error is False
+    assert result.metadata["repo_path"] == "/workspace/projects/demo-app"
+    assert "mkdir -p /workspace/projects/demo-app" in executor.calls[0]["command"]
+
+
+@pytest.mark.asyncio
+async def test_repo_tool_rejects_paths_outside_workspace():
+    tool = RepoTool(FakeExecutor())
+
+    result = await tool.execute(
+        {"action": "status", "repo_path": "/etc"},
+        SimpleNamespace(env={}),
+    )
+
+    assert result.is_error is True
+    assert "inside /workspace" in result.content
 
 
 @pytest.mark.asyncio
