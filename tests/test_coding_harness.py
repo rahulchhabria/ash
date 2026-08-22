@@ -1,5 +1,6 @@
 """Tests for the coding harness foundation."""
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -167,6 +168,29 @@ async def test_telegram_code_command_dispatches_directly(monkeypatch, tmp_path):
     assert call["task"] == "fix failing tests"
     assert call["repo_path"] == "/workspace"
     assert store.get(call["job_id"]) is not None
+
+
+def test_telegram_raw_command_snapshot_survives_in_place_preprocessing():
+    raw = IncomingMessage(
+        id="m1",
+        chat_id="c1",
+        user_id="u1",
+        text="/code fix failing tests",
+        metadata={"thread_id": "t1"},
+    )
+    snapshot = replace(raw)
+    raw.text = "--- injected context ---\n/code fix failing tests"
+
+    handler = TelegramMessageHandler.__new__(TelegramMessageHandler)
+    handler._provider = SimpleNamespace(bot_username=None)
+    command_message = handler._message_for_raw_slash_command(
+        raw_message=snapshot,
+        processed_message=raw,
+        commands={"/code"},
+    )
+
+    assert command_message.text == "/code fix failing tests"
+    assert raw.text.startswith("--- injected context ---")
 
 
 def test_telegram_coding_command_uses_raw_text_after_preprocessing():

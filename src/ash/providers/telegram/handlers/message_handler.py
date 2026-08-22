@@ -974,7 +974,7 @@ class TelegramMessageHandler:
     ) -> None:
         """Inner implementation of _process_single_message (runs with log context)."""
         await self._provider.set_reaction(message.chat_id, message.id, "👀")
-        raw_message = message
+        raw_message = replace(message)
         preprocess_fn = getattr(self._agent, "run_incoming_message_preprocessors", None)
         if callable(preprocess_fn):
             preprocessed = preprocess_fn(message)
