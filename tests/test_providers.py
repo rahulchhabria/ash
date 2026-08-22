@@ -890,6 +890,49 @@ class TestTelegramMessageHandler:
         # Verify the callback was answered
         mock_callback.answer.assert_called()
 
+    async def test_external_callback_expired_answer_is_not_raised(
+        self, mock_provider, mock_agent
+    ):
+        """Expired Telegram callback answers should not surface as errors."""
+        from ash.providers.telegram.handlers import TelegramMessageHandler
+
+        handler = TelegramMessageHandler(
+            provider=mock_provider,
+            agent=mock_agent,
+            streaming=False,
+        )
+
+        mock_callback = MagicMock()
+        mock_callback.id = "callback-1"
+        mock_callback.data = "fb:123"
+        mock_callback.answer = AsyncMock(
+            side_effect=TelegramBadRequest(
+                cast(Any, MagicMock()),
+                "Bad Request: query is too old and response timeout expired or query ID is invalid",
+            )
+        )
+        mock_callback.message = MagicMock()
+        mock_callback.message.message_id = 100
+        mock_callback.message.chat = MagicMock()
+        mock_callback.message.chat.id = 456
+        mock_callback.from_user = MagicMock()
+        mock_callback.from_user.id = 789
+
+        class RaisingClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, url, json):
+                raise RuntimeError("callback target unavailable")
+
+        with patch("httpx.AsyncClient", return_value=RaisingClient()):
+            await handler.handle_callback_query(mock_callback)
+
+        mock_callback.answer.assert_awaited_once()
+
     async def test_checkpoint_recovery_from_session_log(
         self, mock_provider, mock_agent, tmp_path
     ):

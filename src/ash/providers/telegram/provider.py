@@ -44,6 +44,11 @@ logger = logging.getLogger("telegram")
 # Minimum interval between message edits (Telegram rate limit)
 EDIT_INTERVAL = 1.0
 LOG_PREVIEW_MAX_LEN = 180
+STALE_CALLBACK_ERROR_PATTERNS = (
+    "query is too old",
+    "response timeout expired",
+    "query id is invalid",
+)
 
 
 def _get_parse_mode(mode: str | None) -> ParseMode:
@@ -73,6 +78,12 @@ def _coerce_reply_to_message_id(value: str | None) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def is_stale_callback_error(exc: Exception) -> bool:
+    """Return whether Telegram rejected an expired callback answer."""
+    error_msg = str(exc).lower()
+    return any(pattern in error_msg for pattern in STALE_CALLBACK_ERROR_PATTERNS)
 
 
 MAX_SEND_LENGTH = 4000  # Below Telegram's 4096 limit to leave room for formatting

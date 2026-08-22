@@ -28,7 +28,7 @@ from ash.providers.telegram.handlers.tool_tracker import (
     ToolTracker,
 )
 from ash.providers.telegram.handlers.utils import append_inline_attribution
-from ash.providers.telegram.provider import _truncate
+from ash.providers.telegram.provider import _truncate, is_stale_callback_error
 from ash.sessions.types import session_key as make_session_key
 from ash.tools.base import ToolContext
 
@@ -1383,14 +1383,38 @@ class TelegramMessageHandler:
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 await client.post(url, json=update)
-        except Exception:
-            logger.exception("external_callback_forward_failed")
-            await callback_query.answer("Forwarding failed", show_alert=False)
+        except Exception as exc:
+            logger.warning(
+                "external_callback_forward_failed",
+                extra={"error.message": str(exc), "callback.data": callback_query.data},
+            )
+            try:
+                await callback_query.answer("Forwarding failed", show_alert=False)
+            except Exception as exc:
+                if is_stale_callback_error(exc):
+                    logger.info(
+                        "telegram_callback_expired",
+                        extra={
+                            "callback.id": getattr(callback_query, "id", None),
+                            "callback.data": callback_query.data,
+                        },
+                    )
+                else:
+                    logger.debug("answer_callback_query_failed", exc_info=True)
             return
         try:
             await callback_query.answer()
-        except Exception:
-            logger.debug("answer_callback_query_failed", exc_info=True)
+        except Exception as exc:
+            if is_stale_callback_error(exc):
+                logger.info(
+                    "telegram_callback_expired",
+                    extra={
+                        "callback.id": getattr(callback_query, "id", None),
+                        "callback.data": callback_query.data,
+                    },
+                )
+            else:
+                logger.debug("answer_callback_query_failed", exc_info=True)
 
     def clear_session(self, chat_id: str) -> None:
         """Clear session data for a chat."""

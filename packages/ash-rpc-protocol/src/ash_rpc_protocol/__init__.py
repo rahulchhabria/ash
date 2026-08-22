@@ -2,6 +2,7 @@
 
 from ash_rpc_protocol.protocol import (
     ErrorCode,
+    MAX_MESSAGE_SIZE,
     RPCError,
     RPCRequest,
     RPCResponse,
@@ -11,6 +12,7 @@ from ash_rpc_protocol.protocol import (
 
 __all__ = [
     "ErrorCode",
+    "MAX_MESSAGE_SIZE",
     "RPCError",
     "RPCRequest",
     "RPCResponse",

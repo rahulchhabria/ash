@@ -210,6 +210,11 @@ class RPCServer:
                 writer.write(response.to_bytes())
                 await writer.drain()
 
+        except ValueError as exc:
+            logger.warning(
+                "rpc_connection_invalid_frame",
+                extra={"error.message": str(exc)},
+            )
         except Exception:
             logger.error("rpc_connection_error", exc_info=True)
         finally:

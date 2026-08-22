@@ -5,6 +5,8 @@ import struct
 from dataclasses import dataclass, field
 from typing import Any
 
+MAX_MESSAGE_SIZE = 10 * 1024 * 1024
+
 
 # JSON-RPC 2.0 error codes
 class ErrorCode:
@@ -125,7 +127,7 @@ async def read_message(reader) -> bytes | None:
         return None
 
     length = struct.unpack("!I", length_bytes)[0]
-    if length > 10 * 1024 * 1024:  # 10MB limit
+    if length > MAX_MESSAGE_SIZE:
         raise ValueError(f"Message too large: {length}")
 
     try:
@@ -144,7 +146,7 @@ def read_message_sync(sock) -> bytes | None:
         return None
 
     length = struct.unpack("!I", length_bytes)[0]
-    if length > 10 * 1024 * 1024:  # 10MB limit
+    if length > MAX_MESSAGE_SIZE:
         raise ValueError(f"Message too large: {length}")
 
     # Read full message

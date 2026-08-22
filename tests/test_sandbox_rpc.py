@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import json
 import socket
+import struct
 import threading
 from pathlib import Path
 from typing import Any
 
-from ash_rpc_protocol import RPCRequest, RPCResponse, read_message_sync
+import pytest
+
+from ash_rpc_protocol import (
+    MAX_MESSAGE_SIZE,
+    RPCRequest,
+    RPCResponse,
+    read_message_sync,
+)
 from ash_sandbox_cli.rpc import rpc_call
 
 
@@ -81,3 +89,14 @@ def test_rpc_call_falls_back_to_tcp_when_unix_connect_fails(
     thread.join(timeout=2)
 
     assert result == {"transport": "tcp"}
+
+
+def test_read_message_sync_rejects_oversized_frames() -> None:
+    left, right = socket.socketpair()
+    try:
+        right.sendall(struct.pack("!I", MAX_MESSAGE_SIZE + 1))
+        with pytest.raises(ValueError, match="Message too large"):
+            read_message_sync(left)
+    finally:
+        left.close()
+        right.close()
