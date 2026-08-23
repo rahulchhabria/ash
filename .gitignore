@@ -71,6 +71,8 @@ workspace/*
 !workspace/SOUL.md
 !workspace/USER.md
 !workspace/TOOLS.md
+.codex
+.tmp-skill-build/
 
 # Dex task tracking (keep config, ignore tasks)
 .dex/*
