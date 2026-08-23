@@ -4,6 +4,7 @@
 Commands:
   serve      accept Sentry webhooks and queue issue autofix jobs
   sweep      enqueue currently unresolved Sentry issues
+  poll       continuously sweep unresolved Sentry issues
   run-issue  run one issue immediately
 """
 
@@ -13,6 +14,7 @@ import argparse
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -32,6 +34,21 @@ DEFAULT_STATE_DIR = "/home/rahul/ash-triage-api/.sentry-codex-autofix"
 DEFAULT_BASE_URL = "https://sentry.io"
 SEER_POLL_INTERVAL_SECONDS = 5
 SEER_TIMEOUT_SECONDS = 12 * 60
+EMAIL_SERVICE_UNIT = "email-forward-summary.service"
+EMAIL_SERVICE_HEALTH_URL = "http://127.0.0.1:8787/healthz"
+EMAIL_SERVICE_RECEIVER_SCRIPT = (
+    "/home/rahul/.ash/workspace/skills/email-forward-summary/scripts/"
+    "email_webhook_server.py"
+)
+ADDRESS_IN_USE_RE = re.compile(
+    r"address already in use|Errno 98|127\.0\.0\.1.*8787", re.IGNORECASE
+)
+TELEGRAM_TRANSIENT_RE = re.compile(
+    r"TelegramNetworkError|ServerDisconnectedError|ClientConnectorDNSError|"
+    r"Temporary failure in name resolution|connection reset by peer",
+    re.IGNORECASE,
+)
+LEGACY_EMAIL_SYSTEM_UNIT = "email-forward-receiver.service"
 
 
 class AutofixError(RuntimeError):
@@ -261,6 +278,141 @@ def run_command(
     return int(process.returncode or 0)
 
 
+def command_output(args: list[str], *, cwd: Path, timeout: int = 30) -> tuple[int, str]:
+    completed = subprocess.run(
+        args,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    return int(completed.returncode or 0), completed.stdout or ""
+
+
+def issue_text(issue_detail: dict[str, Any]) -> str:
+    return " ".join(
+        str(issue_detail.get(key) or "")
+        for key in ("title", "metadata", "culprit", "permalink", "shortId")
+    )
+
+
+def issue_matches_email_port_collision(issue_detail: dict[str, Any]) -> bool:
+    return ADDRESS_IN_USE_RE.search(issue_text(issue_detail)) is not None
+
+
+def issue_matches_transient_telegram_network(issue_detail: dict[str, Any]) -> bool:
+    return TELEGRAM_TRANSIENT_RE.search(issue_text(issue_detail)) is not None
+
+
+def disable_legacy_email_receiver(settings: Settings, issue_dir: Path) -> bool:
+    log_path = issue_dir / "ops-remediation.log"
+    lines: list[str] = []
+    if log_path.exists():
+        lines.append(log_path.read_text(encoding="utf-8"))
+
+    def record(label: str, status: int, output: str) -> None:
+        lines.append(f"$ {label}\nexit={status}\n{output.strip()}\n")
+        log_path.write_text("\n".join(lines), encoding="utf-8")
+
+    status, output = command_output(
+        ["systemctl", "is-enabled", LEGACY_EMAIL_SYSTEM_UNIT],
+        cwd=settings.repo_path,
+        timeout=10,
+    )
+    record(f"systemctl is-enabled {LEGACY_EMAIL_SYSTEM_UNIT}", status, output)
+    if status != 0 and "disabled" not in output and "not-found" not in output:
+        return False
+
+    if status == 0 or "enabled" in output:
+        status, output = command_output(
+            ["sudo", "-n", "systemctl", "disable", "--now", LEGACY_EMAIL_SYSTEM_UNIT],
+            cwd=settings.repo_path,
+            timeout=30,
+        )
+        record(f"sudo -n systemctl disable --now {LEGACY_EMAIL_SYSTEM_UNIT}", status, output)
+        if status != 0:
+            return False
+
+    status, output = command_output(
+        ["systemctl", "is-active", LEGACY_EMAIL_SYSTEM_UNIT],
+        cwd=settings.repo_path,
+        timeout=10,
+    )
+    record(f"systemctl is-active {LEGACY_EMAIL_SYSTEM_UNIT}", status, output)
+    return status != 0
+
+
+def remediate_email_port_collision(settings: Settings, issue_dir: Path) -> bool:
+    log_path = issue_dir / "ops-remediation.log"
+    lines: list[str] = []
+
+    def record(label: str, status: int, output: str) -> None:
+        lines.append(f"$ {label}\nexit={status}\n{output.strip()}\n")
+        log_path.write_text("\n".join(lines), encoding="utf-8")
+
+    legacy_disabled = disable_legacy_email_receiver(settings, issue_dir)
+
+    status, output = command_output(
+        ["curl", "-fsS", EMAIL_SERVICE_HEALTH_URL], cwd=settings.repo_path, timeout=10
+    )
+    record(f"curl -fsS {EMAIL_SERVICE_HEALTH_URL}", status, output)
+    if status == 0 and '"ok":true' in output:
+        status, output = command_output(
+            ["systemctl", "--user", "is-active", "--quiet", EMAIL_SERVICE_UNIT],
+            cwd=settings.repo_path,
+            timeout=10,
+        )
+        record(f"systemctl --user is-active --quiet {EMAIL_SERVICE_UNIT}", status, output)
+        if status == 0 and legacy_disabled:
+            return True
+
+    # Kill only the expected receiver command, then let the canonical user unit own it.
+    status, output = command_output(
+        ["pkill", "-f", EMAIL_SERVICE_RECEIVER_SCRIPT], cwd=settings.repo_path, timeout=10
+    )
+    record(f"pkill -f {EMAIL_SERVICE_RECEIVER_SCRIPT}", status, output)
+
+    for args in (
+        ["systemctl", "--user", "daemon-reload"],
+        ["systemctl", "--user", "enable", EMAIL_SERVICE_UNIT],
+        ["systemctl", "--user", "restart", EMAIL_SERVICE_UNIT],
+    ):
+        status, output = command_output(args, cwd=settings.repo_path, timeout=20)
+        record(" ".join(args), status, output)
+        if status != 0:
+            return False
+
+    time.sleep(2)
+    status, output = command_output(
+        ["curl", "-fsS", EMAIL_SERVICE_HEALTH_URL], cwd=settings.repo_path, timeout=10
+    )
+    record(f"curl -fsS {EMAIL_SERVICE_HEALTH_URL}", status, output)
+    return status == 0 and '"ok":true' in output and legacy_disabled
+
+
+def remediate_transient_telegram_network(settings: Settings, issue_dir: Path) -> bool:
+    log_path = issue_dir / "ops-remediation.log"
+    lines: list[str] = []
+
+    def record(label: str, status: int, output: str) -> None:
+        lines.append(f"$ {label}\nexit={status}\n{output.strip()}\n")
+        log_path.write_text("\n".join(lines), encoding="utf-8")
+
+    for args in (
+        ["tailscale", "netcheck"],
+        ["resolvectl", "query", "api.telegram.org"],
+        ["systemctl", "--user", "is-active", "--quiet", "ash.service"],
+    ):
+        status, output = command_output(args, cwd=settings.repo_path, timeout=20)
+        record(" ".join(args), status, output)
+
+    # Telegram disconnects are normally transient. If the bot host has DNS/network
+    # and the issue has not recurred by the next poll, resolving is the correct action.
+    return True
+
+
 def run_issue(settings: Settings, issue_id: str) -> bool:
     issue_dir = settings.state_dir / issue_id
     issue_dir.mkdir(parents=True, exist_ok=True)
@@ -278,6 +430,24 @@ def run_issue(settings: Settings, issue_id: str) -> bool:
         client = SentryClient(settings)
         detail = client.issue_detail(issue_id)
         write_json(issue_dir / "issue.json", detail)
+        if issue_matches_email_port_collision(detail):
+            if remediate_email_port_collision(settings, issue_dir):
+                if settings.resolve_on_success:
+                    client.resolve_issue(issue_id)
+                done_path.write_text(time.strftime("%Y-%m-%dT%H:%M:%SZ"), encoding="utf-8")
+                return True
+            (issue_dir / "ops-remediation-failed").write_text(
+                time.strftime("%Y-%m-%dT%H:%M:%SZ"), encoding="utf-8"
+            )
+        if issue_matches_transient_telegram_network(detail):
+            if remediate_transient_telegram_network(settings, issue_dir):
+                if settings.resolve_on_success:
+                    client.resolve_issue(issue_id)
+                done_path.write_text(time.strftime("%Y-%m-%dT%H:%M:%SZ"), encoding="utf-8")
+                return True
+            (issue_dir / "ops-remediation-failed").write_text(
+                time.strftime("%Y-%m-%dT%H:%M:%SZ"), encoding="utf-8"
+            )
         event_markdown = client.recommended_event_markdown(issue_id)
         (issue_dir / "event.md").write_text(event_markdown, encoding="utf-8")
         run_id = client.start_seer_root_cause(issue_id)
@@ -343,6 +513,19 @@ def sweep(settings: Settings, limit: int) -> None:
             issue_dir.mkdir(parents=True, exist_ok=True)
             (issue_dir / "ERROR").write_text(str(exc), encoding="utf-8")
             print(f"issue {issue_id} failed: {exc}", file=sys.stderr)
+
+
+def poll(settings: Settings, limit: int, interval: int) -> None:
+    while True:
+        started = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        print(f"poll started {started}", flush=True)
+        try:
+            sweep(settings, limit)
+        except Exception as exc:
+            settings.state_dir.mkdir(parents=True, exist_ok=True)
+            (settings.state_dir / "POLL_ERROR").write_text(str(exc), encoding="utf-8")
+            print(f"poll failed: {exc}", file=sys.stderr, flush=True)
+        time.sleep(interval)
 
 
 class WebhookHandler(BaseHTTPRequestHandler):
@@ -418,18 +601,10 @@ def serve(settings: Settings, host: str, port: int) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--org", default=os.getenv("SENTRY_ORG", DEFAULT_ORG))
-    parser.add_argument(
-        "--project", default=os.getenv("SENTRY_PROJECT", DEFAULT_PROJECT)
-    )
-    parser.add_argument(
-        "--repo-path", default=os.getenv("AUTOFIX_REPO_PATH", DEFAULT_REPO_PATH)
-    )
-    parser.add_argument(
-        "--state-dir", default=os.getenv("AUTOFIX_STATE_DIR", DEFAULT_STATE_DIR)
-    )
-    parser.add_argument(
-        "--sentry-base-url", default=os.getenv("SENTRY_BASE_URL", DEFAULT_BASE_URL)
-    )
+    parser.add_argument("--project", default=os.getenv("SENTRY_PROJECT", DEFAULT_PROJECT))
+    parser.add_argument("--repo-path", default=os.getenv("AUTOFIX_REPO_PATH", DEFAULT_REPO_PATH))
+    parser.add_argument("--state-dir", default=os.getenv("AUTOFIX_STATE_DIR", DEFAULT_STATE_DIR))
+    parser.add_argument("--sentry-base-url", default=os.getenv("SENTRY_BASE_URL", DEFAULT_BASE_URL))
     parser.add_argument("--codex-bin", default=os.getenv("CODEX_BIN", "codex"))
     parser.add_argument("--codex-model", default=os.getenv("CODEX_MODEL"))
     parser.add_argument("--test-command", default=os.getenv("AUTOFIX_TEST_COMMAND"))
@@ -440,6 +615,9 @@ def parse_args() -> argparse.Namespace:
     run_issue_parser.add_argument("issue_id")
     sweep_parser = subparsers.add_parser("sweep")
     sweep_parser.add_argument("--limit", type=int, default=20)
+    poll_parser = subparsers.add_parser("poll")
+    poll_parser.add_argument("--limit", type=int, default=20)
+    poll_parser.add_argument("--interval", type=int, default=int(os.getenv("AUTOFIX_POLL_INTERVAL", "300")))
     serve_parser = subparsers.add_parser("serve")
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8797)
@@ -454,6 +632,9 @@ def main() -> int:
         return 0 if run_issue(settings, args.issue_id) else 1
     if args.command == "sweep":
         sweep(settings, args.limit)
+        return 0
+    if args.command == "poll":
+        poll(settings, args.limit, args.interval)
         return 0
     if args.command == "serve":
         serve(settings, args.host, args.port)
