@@ -18,6 +18,7 @@ ENV_VAR_MAPPINGS = {
     "parallel_search": ("api_key", "PARALLEL_API_KEY"),
     "sentry": ("dsn", "SENTRY_DSN"),
     "browser.kernel": ("api_key", "KERNEL_API_KEY"),
+    "vapi": ("webhook_secret", "VAPI_WEBHOOK_SECRET"),
 }
 
 

@@ -1,5 +1,5 @@
 """Server routes."""
 
-from ash.server.routes import health
+from ash.server.routes import health, vapi
 
-__all__ = ["health"]
+__all__ = ["health", "vapi"]
