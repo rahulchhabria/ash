@@ -253,6 +253,15 @@ class EmailForwardSummaryConfig(BaseModel):
     max_body_chars: int = Field(default=4000, ge=200, le=20_000)
 
 
+class VapiConfig(BaseModel):
+    """Configuration for Vapi voicemail webhook ingestion."""
+
+    enabled: bool = False
+    telegram_chat_id: str | None = None
+    telegram_user_id: str | None = None
+    webhook_secret: SecretStr | None = None
+
+
 class CloseGameAlertConfig(BaseModel):
     """Configuration for the close-game-alert integration.
 
@@ -620,6 +629,7 @@ class AshConfig(BaseModel):
     email_forward_summary: EmailForwardSummaryConfig = Field(
         default_factory=EmailForwardSummaryConfig
     )
+    vapi: VapiConfig = Field(default_factory=VapiConfig)
     close_game_alert: CloseGameAlertConfig = Field(default_factory=CloseGameAlertConfig)
     reactive_workflows: ReactiveWorkflowConfig = Field(
         default_factory=ReactiveWorkflowConfig

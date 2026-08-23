@@ -1,0 +1,26 @@
+{
+  "message": {
+    "type": "end-of-call-report",
+    "endedReason": "customer-ended-call",
+    "startedAt": "2026-08-07T18:00:00Z",
+    "endedAt": "2026-08-07T18:00:42Z",
+    "call": {
+      "id": "call_abc123",
+      "customer": {
+        "number": "+14155551234"
+      },
+      "phoneNumber": {
+        "number": "+14155550000"
+      }
+    },
+    "artifact": {
+      "transcript": "Assistant: Please leave a message after the tone.\nUser: Hey Rahul, it's John. I wanted to see if Tuesday or Wednesday afternoon works for coffee next week.",
+      "recording": {
+        "url": "https://storage.vapi.ai/recordings/call_abc123.wav"
+      }
+    },
+    "analysis": {
+      "summary": "John wants to schedule coffee next week."
+    }
+  }
+}

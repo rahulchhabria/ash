@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
-from ash.server.routes import health
+from ash.server.routes import health, vapi
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -112,9 +112,11 @@ class AshServer:
         # Store references in app state
         app.state.server = self
         app.state.agent = self._agent
+        app.state.config = self._config
 
         # Include routes
         app.include_router(health.router, tags=["health"])
+        app.include_router(vapi.router, tags=["webhooks"])
 
         if self._telegram_provider:
             app.state.telegram_provider = self._telegram_provider
