@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import pytest
 
+from ash.config import AshConfig
+from ash.config.models import ModelConfig
 from ash.deepagents.runtime import (
     AshFilesystemBackend,
     DeepAgentsCodeHelper,
     DeepAgentsRunner,
+    build_default_orchestration_subagents,
 )
 from ash.tools.base import ToolContext
 from ash.tools.builtin.deepagents import DeepAgentsStatusTool, DeepResearchTool
@@ -71,3 +74,101 @@ def test_deepagents_runner_create_uses_workspace_backend(
 
     assert "backend" in captured
     assert captured["model"] == "openai:gpt-5.1"
+    assert captured["backend"]._backend.read_only is True
+    assert [item["name"] for item in captured["subagents"]] == [
+        "general-purpose",
+        "researcher",
+        "planner",
+    ]
+
+
+def test_deepagents_runner_can_use_read_write_backend(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_create_deep_agent(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(
+        "ash.deepagents.runtime.require_deepagents",
+        lambda: fake_create_deep_agent,
+    )
+
+    DeepAgentsRunner(workspace_path=tmp_path, filesystem_mode="read_write").create()
+
+    assert captured["backend"]._backend.read_only is False
+
+
+def test_default_orchestration_subagents_are_minimal() -> None:
+    tools = [lambda: "ok"]
+
+    subagents = build_default_orchestration_subagents(
+        model="openai:gpt-5.1",
+        tools=tools,
+    )
+
+    assert {item["name"] for item in subagents} == {
+        "general-purpose",
+        "researcher",
+        "planner",
+    }
+    assert subagents[0]["tools"] == tools
+    assert subagents[2]["tools"] == []
+
+
+@pytest.mark.asyncio
+async def test_deep_research_respects_disabled_config() -> None:
+    config = AshConfig(
+        workspace="tmp-workspace",
+        models={"default": ModelConfig(provider="openai", model="gpt-5-mini")},
+    )
+    config.deepagents.enabled = False
+
+    result = await DeepResearchTool(config=config).execute(
+        {"task": "research this"},
+        ToolContext(),
+    )
+
+    assert result.is_error
+    assert "disabled" in result.content
+
+
+@pytest.mark.asyncio
+async def test_deep_research_uses_configured_tool_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_ainvoke(self, message: str) -> str:
+        captured["message"] = message
+        captured["tool_names"] = [tool.__name__ for tool in self.tools]
+        captured["filesystem_mode"] = self.filesystem_mode
+        captured["builtin_subagents"] = self.builtin_subagents
+        return "done"
+
+    class FakeExecutor:
+        available_tools = ["read_file", "write_file", "bash"]
+
+    config = AshConfig(
+        workspace="tmp-workspace",
+        models={"default": ModelConfig(provider="openai", model="gpt-5-mini")},
+    )
+    config.deepagents.allowed_tools = ["read_file"]
+
+    monkeypatch.setattr(
+        "ash.tools.builtin.deepagents.DeepAgentsRunner.ainvoke",
+        fake_ainvoke,
+    )
+
+    result = await DeepResearchTool(
+        tool_executor=FakeExecutor(),
+        config=config,
+    ).execute({"task": "x" * 20}, ToolContext())
+
+    assert not result.is_error
+    assert result.content == "done"
+    assert captured["tool_names"] == ["ash_read_file"]
+    assert captured["filesystem_mode"] == "read_only"
+    assert captured["builtin_subagents"] is True

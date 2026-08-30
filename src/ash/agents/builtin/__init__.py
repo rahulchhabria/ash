@@ -21,5 +21,5 @@ def register_builtin_agents(registry, config=None) -> None:
     if coding_model and coding_model not in getattr(config, "models", {}):
         coding_model = None
     registry.register(CodingAgent(model_alias=coding_model))
-    registry.register(DeepAgent())
+    registry.register(DeepAgent(config=config))
     registry.register(ResearchAgent(ResearchService(config=config)))

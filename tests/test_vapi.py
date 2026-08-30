@@ -84,6 +84,27 @@ def test_vapi_route_submits_to_existing_telegram_handler() -> None:
     assert message.metadata["source"] == "vapi_voicemail"
 
 
+def test_vapi_compatibility_route_submits_to_existing_telegram_handler() -> None:
+    app = FastAPI()
+    app.include_router(vapi.router)
+    handler = SimpleNamespace(handle_message=AsyncMock())
+    app.state.config = _config(secret="test-secret")
+    app.state.server = SimpleNamespace(
+        get_telegram_handler=AsyncMock(return_value=handler)
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/vapi/webhook",
+            json=_payload(),
+            headers={"Authorization": "Bearer test-secret"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "accepted"}
+    handler.handle_message.assert_awaited_once()
+
+
 def test_vapi_route_rejects_invalid_secret() -> None:
     app = FastAPI()
     app.include_router(vapi.router)

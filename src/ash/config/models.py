@@ -351,6 +351,24 @@ class EventRouterConfig(BaseModel):
     allowed_sources: list[str] = Field(default_factory=list)
 
 
+class DeepAgentsConfig(BaseModel):
+    """Policy for LangChain Deep Agents orchestration inside Ash."""
+
+    enabled: bool = True
+    model: str = "openai:gpt-5.1"
+    filesystem_mode: Literal["read_only", "read_write"] = "read_only"
+    builtin_subagents: bool = True
+    allowed_tools: list[str] = Field(
+        default_factory=lambda: [
+            "web_search",
+            "web_fetch",
+            "read_file",
+            "ash_triage_guidance",
+        ]
+    )
+    max_task_chars: int = Field(default=12_000, ge=100, le=100_000)
+
+
 class SkillPackagesConfig(BaseModel):
     """Metadata scanner for local skill packages."""
 
@@ -688,6 +706,7 @@ class AshConfig(BaseModel):
     )
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
     event_router: EventRouterConfig = Field(default_factory=EventRouterConfig)
+    deepagents: DeepAgentsConfig = Field(default_factory=DeepAgentsConfig)
     skill_packages: SkillPackagesConfig = Field(default_factory=SkillPackagesConfig)
     memory_hygiene: MemoryHygieneConfig = Field(default_factory=MemoryHygieneConfig)
     capabilities: CapabilitiesConfig = Field(default_factory=CapabilitiesConfig)

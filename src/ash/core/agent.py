@@ -1340,7 +1340,7 @@ async def create_agent(
         logger.debug("memory_tools_registered")
 
     tool_executor = ToolExecutor(tool_registry)
-    tool_registry.register(DeepResearchTool(tool_executor=tool_executor))
+    tool_registry.register(DeepResearchTool(tool_executor=tool_executor, config=config))
     logger.info("tools_registered", extra={"count": len(tool_registry)})
 
     agent_registry = AgentRegistry()

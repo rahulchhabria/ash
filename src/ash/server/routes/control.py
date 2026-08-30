@@ -1,4 +1,4 @@
-"""Local control dashboard, event intake, and voice webhook routes."""
+"""Local control dashboard and event intake routes."""
 
 from __future__ import annotations
 
@@ -96,6 +96,7 @@ async def dashboard_status(request: Request) -> dict[str, Any]:
             "auth_required": config.event_router.bearer_token is not None,
             "allowed_sources": config.event_router.allowed_sources,
         },
+        "deepagents": config.deepagents.model_dump(),
         "vapi": {"enabled": config.vapi.enabled},
         "integrations": health,
     }
@@ -137,25 +138,3 @@ async def post_event(
         metadata=payload.metadata,
     )
     return {"ok": True, "event": event_to_dict(event)}
-
-
-@router.post("/vapi/webhook")
-async def vapi_webhook(
-    request: Request,
-    authorization: str | None = Header(default=None),
-) -> dict[str, Any]:
-    config = _config(request)
-    if not config.vapi.enabled:
-        raise HTTPException(status_code=404, detail="vapi disabled")
-    secret = config.vapi.webhook_secret
-    if secret is not None and authorization != f"Bearer {secret.get_secret_value()}":
-        raise HTTPException(status_code=401, detail="invalid bearer token")
-    payload = await request.json()
-    event = record_event(
-        source="vapi",
-        kind=str(payload.get("type") or payload.get("message", {}).get("type") or "webhook"),
-        title="Vapi webhook",
-        body=str(payload)[: config.event_router.max_body_chars],
-        metadata={"received_from": "vapi"},
-    )
-    return {"ok": True, "event_id": event.id}

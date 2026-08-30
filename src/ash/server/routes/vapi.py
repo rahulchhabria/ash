@@ -14,6 +14,7 @@ logger = logging.getLogger("vapi")
 router = APIRouter()
 
 
+@router.post("/vapi/webhook", include_in_schema=False)
 @router.post("/webhooks/vapi")
 async def vapi_webhook(
     request: Request, background_tasks: BackgroundTasks
