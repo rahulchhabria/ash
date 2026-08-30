@@ -19,10 +19,12 @@ specs/close_game_alert.md.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from ash.chats.history import HistoryEntry, read_recent_chat_history
+from ash.context_firewall import check_context_injection
 from ash.integrations.runtime import IntegrationContext, IntegrationContributor
 
 if TYPE_CHECKING:
@@ -78,6 +80,17 @@ class CloseGameAlertIntegration(IntegrationContributor):
         context: IntegrationContext,
     ) -> IncomingMessage:
         if not self._enabled:
+            return message
+        trigger = "reply" if message.reply_to_message_id else "explicit"
+        if trigger == "explicit" and not self._looks_like_game_followup(message.text):
+            return message
+        decision = check_context_injection(
+            context.config,
+            integration=self.name,
+            trigger=trigger,
+            message=message,
+        )
+        if not decision.allowed:
             return message
 
         provider = message.metadata.get("provider_name") or "telegram"
@@ -145,6 +158,15 @@ class CloseGameAlertIntegration(IntegrationContributor):
     def _matches_alert(self, content: str) -> bool:
         head = content.lstrip()
         return any(head.startswith(prefix) for prefix in self._alert_prefixes)
+
+    def _looks_like_game_followup(self, text: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(score|game|lakers|valkyries|nba|wnba|quarter|q4|close|alert)\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+        )
 
     def _render_context_block(self, entry: HistoryEntry) -> str:
         created = entry.created_at

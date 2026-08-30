@@ -17,6 +17,7 @@ import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ash.context_firewall import check_context_injection
 from ash.integrations.runtime import IntegrationContext, IntegrationContributor
 
 if TYPE_CHECKING:
@@ -26,7 +27,6 @@ logger = logging.getLogger("email_forward_summary")
 
 
 CONTEXT_HEADER = "Email-forward-summary context (reply target)"
-CONTEXT_HEADER_RECENT = "Email-forward-summary context (most recent email)"
 CONTEXT_FOOTER = "End email-forward-summary context"
 
 
@@ -85,44 +85,39 @@ class EmailForwardSummaryIntegration(IntegrationContributor):
             return message
 
         reply_to = message.reply_to_message_id
-        row: dict[str, Any] | None = None
-        source: str = ""
+        if not reply_to:
+            return message
 
-        if reply_to:
-            try:
-                tg_message_id = int(reply_to)
-            except (TypeError, ValueError):
-                tg_message_id = None
-            if tg_message_id is not None:
-                try:
-                    row = self._lookup_email(tg_message_id)
-                except sqlite3.Error as exc:
-                    logger.warning(
-                        "email_forward_summary_lookup_failed",
-                        extra={
-                            "error.message": str(exc),
-                            "email_forward_summary.telegram_message_id": tg_message_id,
-                        },
-                    )
-                if row is not None:
-                    source = "reply"
+        try:
+            tg_message_id = int(reply_to)
+        except (TypeError, ValueError):
+            return message
 
-        if row is None:
-            try:
-                row = self._lookup_most_recent_email()
-            except sqlite3.Error as exc:
-                logger.warning(
-                    "email_forward_summary_recent_lookup_failed",
-                    extra={"error.message": str(exc)},
-                )
-            if row is not None:
-                source = "recent"
+        try:
+            row = self._lookup_email(tg_message_id)
+        except sqlite3.Error as exc:
+            logger.warning(
+                "email_forward_summary_lookup_failed",
+                extra={
+                    "error.message": str(exc),
+                    "email_forward_summary.telegram_message_id": tg_message_id,
+                },
+            )
+            return message
 
         if row is None:
             return message
 
-        header = CONTEXT_HEADER if source == "reply" else CONTEXT_HEADER_RECENT
-        context_block = self._render_context_block(row, header=header)
+        decision = check_context_injection(
+            context.config,
+            integration=self.name,
+            trigger="reply",
+            message=message,
+        )
+        if not decision.allowed:
+            return message
+
+        context_block = self._render_context_block(row)
         if not context_block:
             return message
 
@@ -132,13 +127,13 @@ class EmailForwardSummaryIntegration(IntegrationContributor):
             **message.metadata,
             "email_forward_summary.email_id": row["id"],
             "email_forward_summary.subject": row["subject"] or "",
-            "email_forward_summary.source": source,
+            "email_forward_summary.source": "reply",
         }
         logger.info(
             "email_forward_summary_context_injected",
             extra={
                 "email_forward_summary.email_id": row["id"],
-                "email_forward_summary.source": source,
+                "email_forward_summary.source": "reply",
             },
         )
         return message
@@ -164,24 +159,6 @@ class EmailForwardSummaryIntegration(IntegrationContributor):
             return None
         return {key: row[key] for key in row.keys()}
 
-    def _lookup_most_recent_email(self) -> dict[str, Any] | None:
-        assert self._db_path is not None
-        with sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
-                """
-                SELECT id, subject, sender, received_at, cleaned_body,
-                       structured_parse_json, processing_status
-                FROM emails
-                WHERE processing_status = 'delivered'
-                ORDER BY id DESC
-                LIMIT 1
-                """,
-            )
-            row = cursor.fetchone()
-        if row is None:
-            return None
-        return {key: row[key] for key in row.keys()}
 
     def _render_context_block(
         self, row: dict[str, Any], *, header: str = CONTEXT_HEADER

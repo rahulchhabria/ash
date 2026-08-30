@@ -320,6 +320,52 @@ class ReactiveWorkflowConfig(BaseModel):
     rules: list[ReactiveWorkflowRule] = Field(default_factory=list)
 
 
+class ContextFirewallConfig(BaseModel):
+    """Policy for integration-supplied context injection."""
+
+    enabled: bool = True
+    allowed_triggers: list[str] = Field(default_factory=lambda: ["reply", "explicit"])
+    allowed_integrations: list[str] = Field(default_factory=list)
+    blocked_integrations: list[str] = Field(default_factory=list)
+
+
+class CapabilityPermissionsConfig(BaseModel):
+    """Allow/block list for sensitive and external capability IDs."""
+
+    allowed: list[str] = Field(default_factory=list)
+    blocked: list[str] = Field(default_factory=lambda: ["gog.calendar"])
+
+
+class DashboardConfig(BaseModel):
+    """Local operational dashboard config."""
+
+    enabled: bool = True
+
+
+class EventRouterConfig(BaseModel):
+    """Sanitized external event intake config."""
+
+    enabled: bool = True
+    bearer_token: SecretStr | None = None
+    max_body_chars: int = Field(default=8000, ge=100, le=50_000)
+    allowed_sources: list[str] = Field(default_factory=list)
+
+
+class SkillPackagesConfig(BaseModel):
+    """Metadata scanner for local skill packages."""
+
+    enabled: bool = True
+
+
+class MemoryHygieneConfig(BaseModel):
+    """Memory inspection and retrieval hygiene config."""
+
+    enabled: bool = True
+    sensitive_source_prefixes: list[str] = Field(
+        default_factory=lambda: ["email", "gmail", "calendar"]
+    )
+
+
 class CapabilityProviderConfig(BaseModel):
     """Configuration for one capability provider plugin."""
 
@@ -634,6 +680,16 @@ class AshConfig(BaseModel):
     reactive_workflows: ReactiveWorkflowConfig = Field(
         default_factory=ReactiveWorkflowConfig
     )
+    context_firewall: ContextFirewallConfig = Field(
+        default_factory=ContextFirewallConfig
+    )
+    capability_permissions: CapabilityPermissionsConfig = Field(
+        default_factory=CapabilityPermissionsConfig
+    )
+    dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
+    event_router: EventRouterConfig = Field(default_factory=EventRouterConfig)
+    skill_packages: SkillPackagesConfig = Field(default_factory=SkillPackagesConfig)
+    memory_hygiene: MemoryHygieneConfig = Field(default_factory=MemoryHygieneConfig)
     capabilities: CapabilitiesConfig = Field(default_factory=CapabilitiesConfig)
     tool_output_trust: ToolOutputTrustConfig = Field(
         default_factory=ToolOutputTrustConfig

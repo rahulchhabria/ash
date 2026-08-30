@@ -22,6 +22,7 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ash.context_firewall import check_context_injection
 from ash.integrations.runtime import IntegrationContext, IntegrationContributor
 
 if TYPE_CHECKING:
@@ -135,6 +136,14 @@ class ReactiveWorkflowIntegration(IntegrationContributor):
         chat_type = message.metadata.get("chat_type")
         rule = self._first_match(message.text, chat_type)
         if rule is None:
+            return message
+        decision = check_context_injection(
+            context.config,
+            integration=self.name,
+            trigger="explicit",
+            message=message,
+        )
+        if not decision.allowed:
             return message
 
         block = self._render_context_block(rule)

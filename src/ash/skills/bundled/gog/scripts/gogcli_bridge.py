@@ -71,8 +71,6 @@ AUTH_CODE_REDIRECT_URI = "http://localhost"
 
 ENV_GOOGLE_GMAIL_API_BASE_URL = "GOOGLE_GMAIL_API_BASE_URL"
 DEFAULT_GOOGLE_GMAIL_API_BASE_URL = "https://gmail.googleapis.com"
-ENV_GOOGLE_CALENDAR_API_BASE_URL = "GOOGLE_CALENDAR_API_BASE_URL"
-DEFAULT_GOOGLE_CALENDAR_API_BASE_URL = "https://www.googleapis.com"
 
 GMAIL_FOLDER_LABELS: dict[str, str] = {
     "inbox": "INBOX",
@@ -91,7 +89,6 @@ CAPABILITY_SCOPES: dict[str, str] = {
         " https://www.googleapis.com/auth/gmail.send"
         " https://www.googleapis.com/auth/gmail.modify"
     ),
-    "gog.calendar": "https://www.googleapis.com/auth/calendar",
 }
 
 
@@ -419,10 +416,6 @@ def _google_gmail_api_base_url() -> str:
     return value or DEFAULT_GOOGLE_GMAIL_API_BASE_URL
 
 
-def _google_calendar_api_base_url() -> str:
-    value = _optional_text(os.environ.get(ENV_GOOGLE_CALENDAR_API_BASE_URL))
-    return value or DEFAULT_GOOGLE_CALENDAR_API_BASE_URL
-
 
 def _google_api_request(
     method: str,
@@ -741,26 +734,6 @@ def _handle_definitions() -> dict[str, Any]:
                     {
                         "name": "update_labels",
                         "description": "Add/remove labels on one or more messages",
-                        "requires_auth": True,
-                        "mutating": True,
-                    },
-                ],
-            },
-            {
-                "id": "gog.calendar",
-                "description": "Google Calendar operations",
-                "sensitive": True,
-                "allowed_chat_types": ["private"],
-                "operations": [
-                    {
-                        "name": "list_events",
-                        "description": "List calendar events",
-                        "requires_auth": True,
-                        "mutating": False,
-                    },
-                    {
-                        "name": "create_event",
-                        "description": "Create a calendar event",
                         "requires_auth": True,
                         "mutating": True,
                     },
@@ -1457,20 +1430,6 @@ def _invoke_operation(
             account_ref=account_ref,
         )
 
-    if capability_id == "gog.calendar" and operation == "list_events":
-        return _invoke_list_events(
-            input_data=input_data,
-            access_token=access_token,
-            account_ref=account_ref,
-        )
-
-    if capability_id == "gog.calendar" and operation == "create_event":
-        return _invoke_create_event(
-            input_data=input_data,
-            access_token=access_token,
-            account_ref=account_ref,
-        )
-
     raise BridgeError(
         "capability_invalid_input",
         f"unsupported operation for {capability_id}: {operation}",
@@ -2068,179 +2027,6 @@ def _invoke_update_labels(
         }
     }
 
-
-def _invoke_list_events(
-    *,
-    input_data: dict[str, Any],
-    access_token: str,
-    account_ref: str,
-) -> dict[str, Any]:
-    window = _optional_text(input_data.get("window")) or "7d"
-    calendar_id = _optional_text(input_data.get("calendar")) or "primary"
-    limit_value = input_data.get("limit", 25)
-    try:
-        limit = int(limit_value)
-    except (TypeError, ValueError):
-        limit = 25
-    limit = max(1, min(limit, 250))
-
-    now_epoch = int(time.time())
-    window_seconds = _parse_window(window)
-    time_min = _iso8601_utc(now_epoch)
-    time_max = _iso8601_utc(now_epoch + window_seconds)
-
-    cal_base = _google_calendar_api_base_url()
-    from urllib.parse import quote
-
-    list_resp = _google_api_request(
-        "GET",
-        f"{cal_base}/calendar/v3/calendars/{quote(calendar_id, safe='')}/events",
-        access_token=access_token,
-        params=[
-            ("timeMin", time_min),
-            ("timeMax", time_max),
-            ("singleEvents", "true"),
-            ("orderBy", "startTime"),
-            ("maxResults", str(limit)),
-        ],
-    )
-
-    raw_items = list_resp.get("items")
-    if not isinstance(raw_items, list):
-        raw_items = []
-
-    events: list[dict[str, Any]] = []
-    for item in raw_items:
-        if not isinstance(item, dict):
-            continue
-        start_obj = item.get("start", {})
-        end_obj = item.get("end", {})
-        if isinstance(start_obj, dict):
-            start_val = start_obj.get("dateTime") or start_obj.get("date") or ""
-        else:
-            start_val = ""
-        if isinstance(end_obj, dict):
-            end_val = end_obj.get("dateTime") or end_obj.get("date") or ""
-        else:
-            end_val = ""
-        events.append(
-            {
-                "id": _optional_text(item.get("id")) or "",
-                "title": _optional_text(item.get("summary")) or "",
-                "start": start_val,
-                "end": end_val,
-                "calendar": calendar_id,
-                "location": _optional_text(item.get("location")) or "",
-                "description": _optional_text(item.get("description")) or "",
-            }
-        )
-
-    return {
-        "output": {
-            "window": window,
-            "events": events,
-            "count": len(events),
-            "account_ref": account_ref,
-        }
-    }
-
-
-def _invoke_create_event(
-    *,
-    input_data: dict[str, Any],
-    access_token: str,
-    account_ref: str,
-) -> dict[str, Any]:
-    title = _required_text(
-        input_data.get("title"),
-        code="capability_invalid_input",
-        message="title is required",
-    )
-    start = _required_text(
-        input_data.get("start"),
-        code="capability_invalid_input",
-        message="start is required",
-    )
-    end = _optional_text(input_data.get("end"))
-    description = _optional_text(input_data.get("description"))
-    location = _optional_text(input_data.get("location"))
-    calendar_id = _optional_text(input_data.get("calendar")) or "primary"
-
-    is_all_day = len(start) == 10  # "2026-03-02" format
-
-    if is_all_day:
-        from datetime import date, timedelta
-
-        start_body: dict[str, str] = {"date": start}
-        if end:
-            end_body: dict[str, str] = {"date": end}
-        else:
-            try:
-                end_body = {
-                    "date": (date.fromisoformat(start) + timedelta(days=1)).isoformat()
-                }
-            except ValueError:
-                end_body = {"date": start}
-    else:
-        start_body = {"dateTime": start}
-        if end:
-            end_body = {"dateTime": end}
-        else:
-            # Default: start + 1 hour
-            try:
-                # Parse ISO datetime and add 1 hour
-                from datetime import datetime, timedelta
-
-                dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
-                end_dt = dt + timedelta(hours=1)
-                end_body = {"dateTime": end_dt.isoformat()}
-            except (ValueError, OSError):
-                end_body = {"dateTime": start}
-
-    event_body: dict[str, Any] = {
-        "summary": title,
-        "start": start_body,
-        "end": end_body,
-    }
-    if description:
-        event_body["description"] = description
-    if location:
-        event_body["location"] = location
-
-    cal_base = _google_calendar_api_base_url()
-    from urllib.parse import quote
-
-    created = _google_api_request(
-        "POST",
-        f"{cal_base}/calendar/v3/calendars/{quote(calendar_id, safe='')}/events",
-        access_token=access_token,
-        json_body=event_body,
-    )
-
-    created_start = created.get("start", {})
-    created_end = created.get("end", {})
-    if isinstance(created_start, dict):
-        start_val = created_start.get("dateTime") or created_start.get("date") or start
-    else:
-        start_val = start
-    if isinstance(created_end, dict):
-        end_val = created_end.get("dateTime") or created_end.get("date") or ""
-    else:
-        end_val = ""
-
-    return {
-        "output": {
-            "status": "created",
-            "event_id": _optional_text(created.get("id")) or "",
-            "title": _optional_text(created.get("summary")) or title,
-            "start": start_val,
-            "end": end_val,
-            "calendar": calendar_id,
-            "location": _optional_text(created.get("location")) or "",
-            "description": _optional_text(created.get("description")) or "",
-            "account_ref": account_ref,
-        }
-    }
 
 
 def _dispatch(method: str, params: dict[str, Any]) -> dict[str, Any]:

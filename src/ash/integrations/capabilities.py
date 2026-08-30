@@ -12,6 +12,7 @@ from ash.core.prompt import PromptContext
 from ash.core.prompt_keys import TOOL_ROUTING_RULES_KEY
 from ash.core.session import SessionState
 from ash.integrations.runtime import IntegrationContext, IntegrationContributor
+from ash.permissions import capability_allowed
 
 if TYPE_CHECKING:
     from ash.capabilities import CapabilityProvider
@@ -39,6 +40,28 @@ class CapabilitiesIntegration(IntegrationContributor):
 
         for provider in providers:
             try:
+                definitions = await provider.definitions()
+                allowed_definitions = [
+                    definition
+                    for definition in definitions
+                    if capability_allowed(context.config, definition.id)
+                ]
+                blocked = [
+                    definition.id
+                    for definition in definitions
+                    if not capability_allowed(context.config, definition.id)
+                ]
+                if blocked:
+                    logger.info(
+                        "capability_definitions_blocked",
+                        extra={
+                            "provider.namespace": getattr(
+                                provider, "namespace", "unknown"
+                            ),
+                            "capability.ids": blocked,
+                        },
+                    )
+                provider = _DefinitionFilteredProvider(provider, allowed_definitions)
                 await manager.register_provider(provider)
             except Exception as e:
                 logger.warning(
@@ -86,7 +109,42 @@ class CapabilitiesIntegration(IntegrationContributor):
             )
             if line not in lines:
                 lines.append(line)
+            blocked = sorted(context.config.capability_permissions.blocked)
+            if blocked:
+                block_line = (
+                    "- Capability permissions currently block: "
+                    f"{', '.join(blocked)}. Do not attempt these operations."
+                )
+                if block_line not in lines:
+                    lines.append(block_line)
         return prompt_context
+
+
+class _DefinitionFilteredProvider:
+    """Provider wrapper that applies host capability allow/block policy."""
+
+    def __init__(self, provider: CapabilityProvider, definitions: list) -> None:
+        self._provider = provider
+        self._definitions = definitions
+
+    @property
+    def namespace(self) -> str:
+        return self._provider.namespace
+
+    async def definitions(self):
+        return self._definitions
+
+    async def auth_begin(self, *args, **kwargs):
+        return await self._provider.auth_begin(*args, **kwargs)
+
+    async def auth_poll(self, *args, **kwargs):
+        return await self._provider.auth_poll(*args, **kwargs)
+
+    async def auth_complete(self, *args, **kwargs):
+        return await self._provider.auth_complete(*args, **kwargs)
+
+    async def invoke(self, *args, **kwargs):
+        return await self._provider.invoke(*args, **kwargs)
 
 
 def _build_configured_capability_providers(
