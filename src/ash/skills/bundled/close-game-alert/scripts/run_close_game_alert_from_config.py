@@ -19,6 +19,7 @@ SCRIPT_PATH = (
     / "scripts"
     / "nba_close_game_alert.py"
 )
+DEFAULT_ASH_PYTHON = Path.home() / "GitHub" / "ash-main" / ".venv" / "bin" / "python3"
 
 
 def _load_config() -> dict:
@@ -27,6 +28,15 @@ def _load_config() -> dict:
     with CONFIG_PATH.open("rb") as handle:
         payload = tomllib.load(handle)
     return payload if isinstance(payload, dict) else {}
+
+
+def _ash_python() -> str:
+    configured = os.environ.get("ASH_PYTHON", "").strip()
+    if configured:
+        return configured
+    if DEFAULT_ASH_PYTHON.is_file():
+        return str(DEFAULT_ASH_PYTHON)
+    return sys.executable
 
 
 def main() -> int:
@@ -66,7 +76,7 @@ def main() -> int:
     minutes_left = os.environ.get("CLOSE_GAME_MINUTES_LEFT", "5")
 
     cmd = [
-        sys.executable,
+        _ash_python(),
         "-u",
         str(SCRIPT_PATH),
         "daemon",
