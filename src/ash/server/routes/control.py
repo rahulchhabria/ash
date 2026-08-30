@@ -33,9 +33,14 @@ def _config(request: Request):
 
 def _require_event_auth(request: Request, authorization: str | None) -> None:
     config = _config(request)
+    if not config.event_router.auth_required:
+        return
     token = config.event_router.bearer_token
     if token is None:
-        return
+        raise HTTPException(
+            status_code=503,
+            detail="event router authentication is required but not configured",
+        )
     expected = f"Bearer {token.get_secret_value()}"
     if authorization != expected:
         raise HTTPException(status_code=401, detail="invalid bearer token")
@@ -93,7 +98,8 @@ async def dashboard_status(request: Request) -> dict[str, Any]:
         "capability_permissions": config.capability_permissions.model_dump(),
         "event_router": {
             "enabled": config.event_router.enabled,
-            "auth_required": config.event_router.bearer_token is not None,
+            "auth_required": config.event_router.auth_required,
+            "auth_configured": config.event_router.bearer_token is not None,
             "allowed_sources": config.event_router.allowed_sources,
         },
         "deepagents": config.deepagents.model_dump(),

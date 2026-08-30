@@ -177,6 +177,30 @@ async def test_telegram_code_command_dispatches_directly(monkeypatch, tmp_path):
     assert store.get(call["job_id"]) is not None
 
 
+@pytest.mark.asyncio
+async def test_telegram_do_command_dispatches_conduit_directly():
+    handler = TelegramMessageHandler.__new__(TelegramMessageHandler)
+    handler._run_checkpoint_agent_command = AsyncMock()
+
+    message = IncomingMessage(
+        id="m1",
+        chat_id="c1",
+        user_id="u1",
+        text="/do find a restaurant and ask about walk-ins",
+    )
+
+    result = await handler._try_handle_conduit_command(message)
+
+    assert result is True
+    handler._run_checkpoint_agent_command.assert_awaited_once_with(
+        message=message,
+        task="find a restaurant and ask about walk-ins",
+        agent_name="conduit",
+        tool_use_prefix="conduit",
+        unavailable_label="Conduit agent",
+    )
+
+
 def test_telegram_raw_command_snapshot_survives_in_place_preprocessing():
     raw = IncomingMessage(
         id="m1",

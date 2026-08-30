@@ -260,6 +260,11 @@ class VapiConfig(BaseModel):
     telegram_chat_id: str | None = None
     telegram_user_id: str | None = None
     webhook_secret: SecretStr | None = None
+    auth_required: bool = True
+    api_key: SecretStr | None = None
+    assistant_id: str | None = None
+    phone_number_id: str | None = None
+    base_url: str = "https://api.vapi.ai"
 
 
 class CloseGameAlertConfig(BaseModel):
@@ -347,6 +352,7 @@ class EventRouterConfig(BaseModel):
 
     enabled: bool = True
     bearer_token: SecretStr | None = None
+    auth_required: bool = True
     max_body_chars: int = Field(default=8000, ge=100, le=50_000)
     allowed_sources: list[str] = Field(default_factory=list)
 
@@ -465,7 +471,7 @@ class BrowserKernelConfig(BaseModel):
     """Kernel provider config for browser integration."""
 
     api_key: SecretStr | None = None
-    base_url: str = "https://api.kernel.sh"
+    base_url: str = "https://api.onkernel.com"
     project_id: str | None = None
 
 

@@ -177,16 +177,6 @@ class BrowserManager:
                 error_code="invalid_provider",
                 error_message=f"unsupported provider: {provider_key}",
             )
-        if provider_key == "kernel" and action.startswith("page."):
-            return BrowserActionResult(
-                ok=False,
-                action=action,
-                error_code="provider_not_supported",
-                error_message=(
-                    "kernel provider does not currently support page actions; "
-                    "use sandbox provider"
-                ),
-            )
         if (
             provider_key == "sandbox"
             and not self._is_sandbox_runtime()

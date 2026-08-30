@@ -729,6 +729,33 @@ class TelegramMessageHandler:
 
         return False
 
+    async def _try_handle_conduit_command(
+        self, message: IncomingMessage
+    ) -> IncomingMessage | bool:
+        """Dispatch `/do` directly to the checkpoint-capable Conduit agent."""
+        parsed = self._parse_slash_command(message.text)
+        if parsed is None:
+            return False
+        command, arguments = parsed
+        if command != "/do":
+            return False
+        task = arguments.strip()
+        if not task:
+            await self._send_direct_result(
+                message=message,
+                assistant_text="Usage: /do <task>",
+                skip_user_message=False,
+            )
+            return True
+        await self._run_checkpoint_agent_command(
+            message=message,
+            task=task,
+            agent_name="conduit",
+            tool_use_prefix="conduit",
+            unavailable_label="Conduit agent",
+        )
+        return True
+
     async def _run_coding_agent_command(
         self,
         *,
@@ -738,10 +765,40 @@ class TelegramMessageHandler:
         repo_path: str,
     ) -> None:
         """Invoke the coding agent directly for /code without LLM re-routing."""
+        await self._run_checkpoint_agent_command(
+            message=message,
+            task=task,
+            agent_name="coding",
+            tool_use_prefix="code",
+            unavailable_label="Coding agent",
+            agent_input={
+                "job_id": job_id,
+                "repo_path": repo_path,
+                "projects_root": getattr(
+                    getattr(self._config, "coding", None),
+                    "projects_root",
+                    "/workspace/projects",
+                ),
+            },
+            env=self._coding_env(),
+        )
+
+    async def _run_checkpoint_agent_command(
+        self,
+        *,
+        message: IncomingMessage,
+        task: str,
+        agent_name: str,
+        tool_use_prefix: str,
+        unavailable_label: str,
+        agent_input: dict[str, Any] | None = None,
+        env: dict[str, str] | None = None,
+    ) -> None:
+        """Invoke a checkpoint-capable agent and render its Telegram response."""
         if self._tool_registry is None or not self._tool_registry.has("use_agent"):
             await self._send_direct_result(
                 message=message,
-                assistant_text="Coding agent is not available in this runtime.",
+                assistant_text=f"{unavailable_label} is not available in this runtime.",
                 skip_user_message=False,
             )
             return
@@ -756,7 +813,7 @@ class TelegramMessageHandler:
         if not isinstance(use_agent_tool, UseAgentTool):
             await self._send_direct_result(
                 message=message,
-                assistant_text="Coding agent is not properly configured.",
+                assistant_text=f"{unavailable_label} is not properly configured.",
                 skip_user_message=False,
             )
             return
@@ -775,19 +832,11 @@ class TelegramMessageHandler:
         )
         tracker = self._create_tool_tracker(message)
         progress_tool = ProgressMessageTool(tracker)
-        tool_use_id = f"code_{uuid.uuid4().hex[:12]}"
+        tool_use_id = f"{tool_use_prefix}_{uuid.uuid4().hex[:12]}"
         tool_input = {
-            "agent": "coding",
+            "agent": agent_name,
             "message": task,
-            "input": {
-                "job_id": job_id,
-                "repo_path": repo_path,
-                "projects_root": getattr(
-                    getattr(self._config, "coding", None),
-                    "projects_root",
-                    "/workspace/projects",
-                ),
-            },
+            "input": agent_input or {},
         }
         tool_context = ToolContext(
             session_id=session_key,
@@ -807,7 +856,7 @@ class TelegramMessageHandler:
             session_manager=session_manager,
             tool_use_id=tool_use_id,
             tool_overrides={progress_tool.name: progress_tool},
-            env=self._coding_env(),
+            env=env or {},
         )
 
         await self._provider.send_typing(message.chat_id)
@@ -819,7 +868,7 @@ class TelegramMessageHandler:
             self._checkpoint_handler.store_checkpoint(
                 checkpoint,
                 message,
-                agent_name="coding",
+                agent_name=agent_name,
                 original_message=task,
                 tool_use_id=tool_use_id,
             )
@@ -835,7 +884,7 @@ class TelegramMessageHandler:
                         message.chat_id, tracker.thinking_msg_id
                     )
                 except Exception:
-                    logger.debug("Failed to delete coding thinking message")
+                    logger.debug("Failed to delete agent thinking message")
             sent_message_id = await self._provider.send(
                 OutgoingMessage(
                     chat_id=message.chat_id,
@@ -1146,6 +1195,19 @@ class TelegramMessageHandler:
 
         if await self._try_handle_capability_oauth_callback(message):
             return
+
+        conduit_message = self._message_for_raw_slash_command(
+            raw_message=raw_message,
+            processed_message=message,
+            commands={"/do"},
+        )
+        conduit_command_result = await self._try_handle_conduit_command(
+            conduit_message
+        )
+        if conduit_command_result is True:
+            return
+        if isinstance(conduit_command_result, IncomingMessage):
+            message = conduit_command_result
 
         coding_message = self._message_for_raw_slash_command(
             raw_message=raw_message,

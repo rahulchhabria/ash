@@ -1228,6 +1228,7 @@ async def create_agent(
         RememberTool,
         RepoTool,
         SearchMemoriesTool,
+        VapiOutboundCallTool,
         WebFetchTool,
         WebSearchTool,
     )
@@ -1341,6 +1342,7 @@ async def create_agent(
 
     tool_executor = ToolExecutor(tool_registry)
     tool_registry.register(DeepResearchTool(tool_executor=tool_executor, config=config))
+    tool_registry.register(VapiOutboundCallTool(config.vapi))
     logger.info("tools_registered", extra={"count": len(tool_registry)})
 
     agent_registry = AgentRegistry()

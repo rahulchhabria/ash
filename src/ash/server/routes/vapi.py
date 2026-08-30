@@ -25,7 +25,11 @@ async def vapi_webhook(
     if vapi_config is None or not vapi_config.enabled:
         raise HTTPException(status_code=404, detail="Vapi webhook is not enabled")
 
-    _verify_secret(request, vapi_config.webhook_secret)
+    _verify_secret(
+        request,
+        vapi_config.webhook_secret,
+        auth_required=vapi_config.auth_required,
+    )
 
     try:
         payload = await request.json()
@@ -60,8 +64,18 @@ async def vapi_webhook(
     return {"status": "accepted"}
 
 
-def _verify_secret(secret_header_source: Request, secret: Any) -> None:
+def _verify_secret(
+    secret_header_source: Request,
+    secret: Any,
+    *,
+    auth_required: bool = True,
+) -> None:
     if secret is None:
+        if auth_required:
+            raise HTTPException(
+                status_code=503,
+                detail="Vapi webhook authentication is required but not configured",
+            )
         return
 
     expected = secret.get_secret_value()

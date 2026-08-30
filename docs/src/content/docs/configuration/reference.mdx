@@ -195,7 +195,7 @@ runtime_required = true
 
 [browser.kernel]
 api_key = null
-base_url = "https://api.kernel.sh"
+base_url = "https://api.onkernel.com"
 project_id = null
 ```
 
@@ -213,17 +213,48 @@ project_id = null
 | `browser.sandbox.browser_channel` | `chromium` | `chromium` |
 | `browser.sandbox.runtime_required` | bool | `true` |
 | `browser.kernel.api_key` | secret \| null | `null` |
-| `browser.kernel.base_url` | string | `https://api.kernel.sh` |
+| `browser.kernel.base_url` | string | `https://api.onkernel.com` |
 | `browser.kernel.project_id` | string \| null | `null` |
 
 For `provider = "sandbox"`, browser execution is expected in sandbox/container runtime.
 Set `browser.sandbox.runtime_required = false` only for local development/testing.
+
+For Kernel, set `provider = "kernel"` and provide `KERNEL_API_KEY`. Ash creates a
+remote browser session, connects over CDP, and deletes the session when it closes.
 
 Install Playwright Chromium:
 
 ```bash
 uv run playwright install chromium
 ```
+
+## Vapi (`[vapi]`)
+
+```toml
+[vapi]
+enabled = false
+auth_required = true
+assistant_id = null
+phone_number_id = null
+base_url = "https://api.vapi.ai"
+```
+
+Set `VAPI_API_KEY` and `VAPI_WEBHOOK_SECRET` in the service environment. Outbound
+calls require an assistant and an outbound-capable phone number. Ash restricts call
+creation to Telegram-dispatched Conduit tasks after an explicit checkpoint approval.
+
+## Event Router (`[event_router]`)
+
+```toml
+[event_router]
+enabled = true
+auth_required = true
+max_body_chars = 8000
+allowed_sources = []
+```
+
+Set `ASH_EVENT_ROUTER_TOKEN` in the service environment. When authentication is
+required but no token is configured, event intake fails closed.
 
 ## Conversation (`[conversation]`)
 

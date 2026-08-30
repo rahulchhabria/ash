@@ -7,6 +7,7 @@ from ash.integrations.browser import BrowserIntegration
 from ash.integrations.capabilities import CapabilitiesIntegration
 from ash.integrations.close_game_alert import CloseGameAlertIntegration
 from ash.integrations.composer import active_integrations, compose_integrations
+from ash.integrations.conduit import ConduitIntegration
 from ash.integrations.deepagents import DeepAgentsIntegration
 from ash.integrations.defaults import DefaultIntegrations, create_default_integrations
 from ash.integrations.email_forward_summary import EmailForwardSummaryIntegration
@@ -29,6 +30,7 @@ __all__ = [
     "BrowserIntegration",
     "CapabilitiesIntegration",
     "CloseGameAlertIntegration",
+    "ConduitIntegration",
     "DeepAgentsIntegration",
     "EmailForwardSummaryIntegration",
     "ReactiveWorkflowIntegration",

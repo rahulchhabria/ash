@@ -371,7 +371,7 @@ def test_bridge_definitions() -> None:
     ids = {
         item["id"] for item in definitions if isinstance(item, dict) and "id" in item
     }
-    assert ids == {"gog.email", "gog.calendar"}
+    assert ids == {"gog.email"}
     email_def = next(
         item
         for item in definitions
@@ -839,6 +839,7 @@ def test_bridge_rejects_invalid_context_signature(tmp_path: Path) -> None:
     assert response["error"]["code"] == "capability_invalid_input"
 
 
+@pytest.mark.skip(reason="Google Calendar capability is intentionally disabled")
 def test_bridge_auth_code_flow_for_calendar(
     tmp_path: Path,
     fake_google_oauth: str,
@@ -975,6 +976,7 @@ def test_bridge_auth_code_complete_invalid_code(
     assert "authorization_code is required" in response["error"]["message"]
 
 
+@pytest.mark.skip(reason="Google Calendar capability is intentionally disabled")
 def test_bridge_auth_complete_rejects_callback_url_without_normalized_code(
     tmp_path: Path,
     fake_google_oauth: str,
@@ -1129,6 +1131,7 @@ def test_bridge_auth_complete_preserves_existing_refresh_token_when_omitted(
     assert vault_payload["refresh_token"] == _FAKE_REFRESH_TOKEN
 
 
+@pytest.mark.skip(reason="Google Calendar capability is intentionally disabled")
 def test_bridge_auth_complete_reuses_refresh_token_from_related_capability(
     tmp_path: Path,
     fake_google_oauth: str,
@@ -1227,6 +1230,7 @@ def test_bridge_auth_complete_reuses_refresh_token_from_related_capability(
     assert calendar_vault_payload["refresh_token"] == _FAKE_REFRESH_TOKEN
 
 
+@pytest.mark.skip(reason="Google Calendar capability is intentionally disabled")
 def test_bridge_auth_complete_does_not_reuse_refresh_token_across_google_sub(
     tmp_path: Path,
     fake_google_oauth: str,
@@ -1332,6 +1336,7 @@ def test_bridge_auth_complete_does_not_reuse_refresh_token_across_google_sub(
     assert calendar_vault_payload.get("refresh_token") is None
 
 
+@pytest.mark.skip(reason="Google Calendar capability is intentionally disabled")
 @pytest.mark.asyncio
 async def test_subprocess_provider_auth_code_round_trip(
     tmp_path: Path,
@@ -1820,6 +1825,7 @@ def test_bridge_invoke_search_messages(
     assert output["count"] == 2
 
 
+@pytest.mark.skip(reason="Google Calendar capability is intentionally disabled")
 def test_bridge_invoke_calendar_create_event(
     tmp_path: Path,
     fake_google_oauth: str,
@@ -1924,6 +1930,7 @@ def test_bridge_invoke_refreshes_access_token_after_401(
     assert refreshed_creds["access_token"] == _FAKE_ACCESS_TOKEN
 
 
+@pytest.mark.skip(reason="Google Calendar capability is intentionally disabled")
 def test_bridge_invoke_list_events_rejects_invalid_window(
     tmp_path: Path,
     fake_google_oauth: str,
@@ -1960,6 +1967,7 @@ def test_bridge_invoke_list_events_rejects_invalid_window(
     assert "window" in invoke["error"]["message"]
 
 
+@pytest.mark.skip(reason="Google Calendar capability is intentionally disabled")
 def test_bridge_invoke_calendar_create_event_defaults_all_day_end_to_next_day(
     tmp_path: Path,
     fake_google_oauth: str,

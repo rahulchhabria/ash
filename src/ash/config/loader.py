@@ -19,6 +19,7 @@ ENV_VAR_MAPPINGS = {
     "sentry": ("dsn", "SENTRY_DSN"),
     "browser.kernel": ("api_key", "KERNEL_API_KEY"),
     "vapi": ("webhook_secret", "VAPI_WEBHOOK_SECRET"),
+    "event_router": ("bearer_token", "ASH_EVENT_ROUTER_TOKEN"),
 }
 
 
@@ -33,6 +34,11 @@ def _resolve_env_secrets(config: dict[str, Any]) -> dict[str, Any]:
         if section is not None and isinstance(section, dict):
             if section.get(key) is None and (value := os.environ.get(env_var)):
                 section[key] = SecretStr(value)
+
+    vapi = config.get("vapi")
+    if isinstance(vapi, dict) and vapi.get("api_key") is None:
+        if value := os.environ.get("VAPI_API_KEY"):
+            vapi["api_key"] = SecretStr(value)
 
     return config
 

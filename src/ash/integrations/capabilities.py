@@ -40,28 +40,32 @@ class CapabilitiesIntegration(IntegrationContributor):
 
         for provider in providers:
             try:
-                definitions = await provider.definitions()
-                allowed_definitions = [
-                    definition
-                    for definition in definitions
-                    if capability_allowed(context.config, definition.id)
-                ]
-                blocked = [
-                    definition.id
-                    for definition in definitions
-                    if not capability_allowed(context.config, definition.id)
-                ]
-                if blocked:
-                    logger.info(
-                        "capability_definitions_blocked",
-                        extra={
-                            "provider.namespace": getattr(
-                                provider, "namespace", "unknown"
-                            ),
-                            "capability.ids": blocked,
-                        },
+                definitions_method = getattr(provider, "definitions", None)
+                if callable(definitions_method):
+                    definitions = await definitions_method()
+                    allowed_definitions = [
+                        definition
+                        for definition in definitions
+                        if capability_allowed(context.config, definition.id)
+                    ]
+                    blocked = [
+                        definition.id
+                        for definition in definitions
+                        if not capability_allowed(context.config, definition.id)
+                    ]
+                    if blocked:
+                        logger.info(
+                            "capability_definitions_blocked",
+                            extra={
+                                "provider.namespace": getattr(
+                                    provider, "namespace", "unknown"
+                                ),
+                                "capability.ids": blocked,
+                            },
+                        )
+                    provider = _DefinitionFilteredProvider(
+                        provider, allowed_definitions
                     )
-                provider = _DefinitionFilteredProvider(provider, allowed_definitions)
                 await manager.register_provider(provider)
             except Exception as e:
                 logger.warning(

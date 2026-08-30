@@ -38,7 +38,7 @@ def test_init_sentry_enables_sentry_logs(monkeypatch) -> None:
     assert calls["logging_integration"] == {
         "level": logging.INFO,
         "event_level": logging.ERROR,
-        "sentry_logs_level": logging.DEBUG,
+        "sentry_logs_level": logging.INFO,
     }
     assert calls["init"]["enable_logs"] is True
     assert calls["init"]["stream_gen_ai_spans"] is True
