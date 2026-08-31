@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
+from ash.chats import ChatStateManager
 from ash.config import AshConfig
+from ash.config.paths import get_ash_home
 from ash.config.models import ModelConfig
 from ash.integrations.email_forward_summary import (
     CONTEXT_FOOTER,
@@ -192,3 +195,105 @@ async def test_truncates_long_body(tmp_path) -> None:
     updated = await integration.preprocess_incoming_message(message, context)
 
     assert "\u2026" in updated.text
+
+
+@pytest.mark.asyncio
+async def test_injects_context_from_active_email_focus_for_followup(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ASH_HOME", str(tmp_path / "ash-home"))
+    get_ash_home.cache_clear()
+    db = tmp_path / "school.sqlite3"
+    _seed_db(db, telegram_message_id=1013)
+
+    manager = ChatStateManager(provider="telegram", chat_id="c-1")
+    state = manager.load()
+    state.add_active_focus(
+        kind="email",
+        source_id="email:1",
+        title="Soccer practice update",
+        summary="Practice is at Kezar Field after school.",
+        telegram_message_id="1013",
+        thread_id="1013",
+        entities=["practice", "soccer", "kezar"],
+        now=datetime.now(UTC),
+    )
+    manager.save()
+
+    integration = EmailForwardSummaryIntegration()
+    context = _context(_config(db_path=db))
+    await integration.setup(context)
+
+    message = _message(text="where is practice?", reply_to=None)
+    updated = await integration.preprocess_incoming_message(message, context)
+
+    assert "Email-forward-summary context (active focus)" in updated.text
+    assert "Professional Community Updates" in updated.text
+    assert "where is practice?" in updated.text
+    assert updated.metadata["email_forward_summary.email_id"] == 1
+    assert updated.metadata["email_forward_summary.source"] == "active_focus"
+
+
+@pytest.mark.asyncio
+async def test_noop_when_active_email_focus_does_not_match_followup(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("ASH_HOME", str(tmp_path / "ash-home"))
+    get_ash_home.cache_clear()
+    db = tmp_path / "school.sqlite3"
+    _seed_db(db, telegram_message_id=1013)
+
+    manager = ChatStateManager(provider="telegram", chat_id="c-1")
+    state = manager.load()
+    state.add_active_focus(
+        kind="email",
+        source_id="email:1",
+        title="Soccer practice update",
+        summary="Practice is at Kezar Field after school.",
+        telegram_message_id="1013",
+        entities=["practice", "soccer", "kezar"],
+        now=datetime.now(UTC),
+    )
+    manager.save()
+
+    integration = EmailForwardSummaryIntegration()
+    context = _context(_config(db_path=db))
+    await integration.setup(context)
+
+    message = _message(text="where is the rust project?", reply_to=None)
+    updated = await integration.preprocess_incoming_message(message, context)
+
+    assert updated.text == "where is the rust project?"
+    assert "email_forward_summary.email_id" not in updated.metadata
+
+
+@pytest.mark.asyncio
+async def test_noop_when_active_email_focus_is_expired(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("ASH_HOME", str(tmp_path / "ash-home"))
+    get_ash_home.cache_clear()
+    db = tmp_path / "school.sqlite3"
+    _seed_db(db, telegram_message_id=1013)
+
+    manager = ChatStateManager(provider="telegram", chat_id="c-1")
+    state = manager.load()
+    state.add_active_focus(
+        kind="email",
+        source_id="email:1",
+        title="Soccer practice update",
+        summary="Practice is at Kezar Field after school.",
+        telegram_message_id="1013",
+        entities=["practice", "soccer", "kezar"],
+        now=datetime.now(UTC) - timedelta(hours=5),
+        ttl_minutes=60,
+    )
+    manager.save()
+
+    integration = EmailForwardSummaryIntegration()
+    context = _context(_config(db_path=db))
+    await integration.setup(context)
+
+    message = _message(text="where is practice?", reply_to=None)
+    updated = await integration.preprocess_incoming_message(message, context)
+
+    assert updated.text == "where is practice?"
+    assert "email_forward_summary.email_id" not in updated.metadata

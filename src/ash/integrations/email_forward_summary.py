@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ash.chats import ChatStateManager
 from ash.context_firewall import check_context_injection
 from ash.integrations.runtime import IntegrationContext, IntegrationContributor
 
@@ -27,6 +29,7 @@ logger = logging.getLogger("email_forward_summary")
 
 
 CONTEXT_HEADER = "Email-forward-summary context (reply target)"
+ACTIVE_FOCUS_CONTEXT_HEADER = "Email-forward-summary context (active focus)"
 CONTEXT_FOOTER = "End email-forward-summary context"
 
 
@@ -84,26 +87,49 @@ class EmailForwardSummaryIntegration(IntegrationContributor):
         if not self._enabled or self._db_path is None:
             return message
 
+        row: dict[str, Any] | None = None
+        source = "reply"
+        header = CONTEXT_HEADER
         reply_to = message.reply_to_message_id
-        if not reply_to:
-            return message
 
-        try:
-            tg_message_id = int(reply_to)
-        except (TypeError, ValueError):
-            return message
+        if reply_to:
+            try:
+                tg_message_id = int(reply_to)
+            except (TypeError, ValueError):
+                return message
 
-        try:
-            row = self._lookup_email(tg_message_id)
-        except sqlite3.Error as exc:
-            logger.warning(
-                "email_forward_summary_lookup_failed",
-                extra={
-                    "error.message": str(exc),
-                    "email_forward_summary.telegram_message_id": tg_message_id,
-                },
-            )
-            return message
+            try:
+                row = self._lookup_email(tg_message_id)
+            except sqlite3.Error as exc:
+                logger.warning(
+                    "email_forward_summary_lookup_failed",
+                    extra={
+                        "error.message": str(exc),
+                        "email_forward_summary.telegram_message_id": tg_message_id,
+                    },
+                )
+                return message
+        else:
+            focus = self._select_active_email_focus(message)
+            if focus is None:
+                return message
+            email_id = self._email_id_from_source_id(focus.source_id)
+            if email_id is None:
+                return message
+            try:
+                row = self._lookup_email_by_id(email_id)
+            except sqlite3.Error as exc:
+                logger.warning(
+                    "email_forward_summary_lookup_failed",
+                    extra={
+                        "error.message": str(exc),
+                        "email_forward_summary.email_id": email_id,
+                        "email_forward_summary.source": "active_focus",
+                    },
+                )
+                return message
+            source = "active_focus"
+            header = ACTIVE_FOCUS_CONTEXT_HEADER
 
         if row is None:
             return message
@@ -111,13 +137,13 @@ class EmailForwardSummaryIntegration(IntegrationContributor):
         decision = check_context_injection(
             context.config,
             integration=self.name,
-            trigger="reply",
+            trigger="reply" if source == "reply" else "explicit",
             message=message,
         )
         if not decision.allowed:
             return message
 
-        context_block = self._render_context_block(row)
+        context_block = self._render_context_block(row, header=header)
         if not context_block:
             return message
 
@@ -127,13 +153,13 @@ class EmailForwardSummaryIntegration(IntegrationContributor):
             **message.metadata,
             "email_forward_summary.email_id": row["id"],
             "email_forward_summary.subject": row["subject"] or "",
-            "email_forward_summary.source": "reply",
+            "email_forward_summary.source": source,
         }
         logger.info(
             "email_forward_summary_context_injected",
             extra={
                 "email_forward_summary.email_id": row["id"],
-                "email_forward_summary.source": "reply",
+                "email_forward_summary.source": source,
             },
         )
         return message
@@ -158,6 +184,55 @@ class EmailForwardSummaryIntegration(IntegrationContributor):
         if row is None:
             return None
         return {key: row[key] for key in row.keys()}
+
+    def _lookup_email_by_id(self, email_id: int) -> dict[str, Any] | None:
+        assert self._db_path is not None
+        with sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                """
+                SELECT id, subject, sender, received_at, cleaned_body,
+                       structured_parse_json, processing_status
+                FROM emails
+                WHERE id = ?
+                  AND processing_status = 'delivered'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (email_id,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return {key: row[key] for key in row.keys()}
+
+    def _select_active_email_focus(self, message: IncomingMessage) -> Any | None:
+        text = (message.text or "").strip()
+        if not _looks_like_contextual_followup(text):
+            return None
+
+        manager = ChatStateManager(provider="telegram", chat_id=message.chat_id)
+        state = manager.load()
+        matches = []
+        for focus in state.get_recent_focus(kind="email"):
+            if _focus_matches_text(focus, text):
+                matches.append(focus)
+
+        if not matches:
+            return None
+
+        manager.save()
+        return matches[0]
+
+    @staticmethod
+    def _email_id_from_source_id(source_id: str) -> int | None:
+        if not source_id.startswith("email:"):
+            return None
+        try:
+            return int(source_id.split(":", 1)[1])
+        except ValueError:
+            return None
+
 
 
     def _render_context_block(
@@ -214,3 +289,49 @@ class EmailForwardSummaryIntegration(IntegrationContributor):
             return json.dumps(slim, ensure_ascii=False, indent=2)
         except (TypeError, ValueError):
             return ""
+
+
+_CONTEXTUAL_START_RE = re.compile(
+    r"^\s*(where|when|what|who|which|how|is|are|do|does|did|can|could|should|"
+    r"need|remind|tell me|what about)\b",
+    re.I,
+)
+_CONTEXTUAL_PRONOUN_RE = re.compile(r"\b(it|that|this|there|they|them|those|one)\b", re.I)
+_WORD_RE = re.compile(r"[a-z0-9][a-z0-9'-]*", re.I)
+_STOPWORDS = {
+    "about", "after", "again", "also", "and", "are", "can", "could",
+    "did", "do", "does", "for", "from", "how", "is", "it", "me",
+    "need", "of", "on", "or", "should", "tell", "that", "the", "them",
+    "there", "they", "this", "to", "was", "what", "when", "where",
+    "which", "who", "with", "you", "i", "my", "we", "our",
+}
+
+
+def _looks_like_contextual_followup(text: str) -> bool:
+    if not text:
+        return False
+    words = _content_words(text)
+    return bool(
+        _CONTEXTUAL_START_RE.search(text)
+        or _CONTEXTUAL_PRONOUN_RE.search(text)
+        or len(words) <= 4
+    )
+
+
+def _focus_matches_text(focus: Any, text: str) -> bool:
+    words = set(_content_words(text))
+    focus_terms = set()
+    for value in [focus.title, focus.summary or "", *focus.entities]:
+        focus_terms.update(_content_words(value))
+
+    if words & focus_terms:
+        return True
+    return bool(_CONTEXTUAL_PRONOUN_RE.search(text)) and len(words) <= 5
+
+
+def _content_words(text: str) -> list[str]:
+    return [
+        word.lower()
+        for word in _WORD_RE.findall(text or "")
+        if len(word) > 1 and word.lower() not in _STOPWORDS
+    ]
