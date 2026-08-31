@@ -48,7 +48,9 @@ def _validate_model_credentials(ash_config: AshConfig, alias: str) -> None:
     if model_config.provider == "openai-oauth":
         oauth_creds = ash_config.resolve_oauth_credentials("openai-oauth")
         if oauth_creds is None:
-            error("No OAuth credentials for openai-oauth. Run 'ash auth login' first.")
+            error(
+                "No OAuth credentials for openai-oauth. Run 'pigeon auth login' first."
+            )
             raise typer.Exit(1) from None
         return
 
@@ -73,7 +75,7 @@ def _new_cli_session_state(session_id: str) -> SessionState:
         user_id="local-user",
     )
     session.context.chat_type = "private"
-    session.context.chat_title = "Ash CLI"
+    session.context.chat_title = "Pigeon CLI"
     return session
 
 
@@ -122,11 +124,11 @@ def register(app: typer.Typer) -> None:
         """Start an interactive chat session, or run a single prompt.
 
         Examples:
-            ash chat                     # Interactive mode
-            ash chat "Hello, how are you?"  # Single prompt
-            ash chat "List files" --no-streaming
-            ash chat --model fast "Quick question"  # Use model alias
-            ash chat --dump-prompt       # Print system prompt for debugging
+            pigeon chat                     # Interactive mode
+            pigeon chat "Hello, how are you?"  # Single prompt
+            pigeon chat "List files" --no-streaming
+            pigeon chat --model fast "Quick question"  # Use model alias
+            pigeon chat --dump-prompt       # Print system prompt for debugging
         """
         try:
             asyncio.run(
@@ -351,7 +353,9 @@ async def _run_chat(
                     try:
                         if streaming:
                             if show_prefix:
-                                console.print("[bold green]Ash:[/bold green] ", end="")
+                                console.print(
+                                    "[bold green]Pigeon:[/bold green] ", end=""
+                                )
                             response_text = ""
                             async for chunk in agent.process_message_streaming(
                                 user_input, session
@@ -370,7 +374,7 @@ async def _run_chat(
                                 )
 
                             if show_prefix:
-                                console.print("[bold green]Ash:[/bold green]")
+                                console.print("[bold green]Pigeon:[/bold green]")
                                 console.print(Markdown(response.text))
                                 if show_meta and response.tool_calls:
                                     console.print(
@@ -405,7 +409,7 @@ async def _run_chat(
                             )
                             if result_text:
                                 if show_prefix:
-                                    console.print("[bold green]Ash:[/bold green]")
+                                    console.print("[bold green]Pigeon:[/bold green]")
                                     console.print(Markdown(result_text))
                                     console.print()
                                 else:
@@ -418,7 +422,7 @@ async def _run_chat(
 
                 console.print(
                     Panel(
-                        "[bold]Ash Chat[/bold]\n\n"
+                        "[bold]Pigeon Chat[/bold]\n\n"
                         "Type your message and press Enter. "
                         "Type 'exit' or 'quit' to end the session.\n"
                         "Press Ctrl+C to cancel a response.",

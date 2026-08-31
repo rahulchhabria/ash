@@ -2,7 +2,8 @@
 
 import importlib
 import logging
-from typing import TYPE_CHECKING
+import re
+from typing import TYPE_CHECKING, Any
 
 __all__ = ["init_sentry", "set_sentry_conversation_id"]
 
@@ -10,6 +11,57 @@ if TYPE_CHECKING:
     from ash.config import SentryConfig
 
 logger = logging.getLogger(__name__)
+
+_REDACTED = "[Filtered]"
+_SENSITIVE_KEYS = {
+    "api_key",
+    "authorization",
+    "bot_token",
+    "cookie",
+    "password",
+    "secret",
+    "set-cookie",
+    "token",
+}
+_TELEGRAM_BOT_URL = re.compile(
+    r"(https?://api\.telegram\.org/bot)[^/\s?#]+",
+    flags=re.IGNORECASE,
+)
+_BEARER_TOKEN = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
+
+
+def _scrub_sentry_value(value: Any, *, key: str | None = None) -> Any:
+    """Remove credentials from nested Sentry event, breadcrumb, and log data."""
+    if key and key.lower() in _SENSITIVE_KEYS:
+        return _REDACTED
+    if isinstance(value, dict):
+        return {
+            item_key: _scrub_sentry_value(item, key=str(item_key))
+            for item_key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_scrub_sentry_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_scrub_sentry_value(item) for item in value)
+    if isinstance(value, str):
+        value = _TELEGRAM_BOT_URL.sub(r"\1[Filtered]", value)
+        return _BEARER_TOKEN.sub("Bearer [Filtered]", value)
+    return value
+
+
+def _before_send(event: dict[str, Any], _hint: dict[str, Any]) -> dict[str, Any]:
+    return _scrub_sentry_value(event)
+
+
+def _before_breadcrumb(
+    breadcrumb: dict[str, Any], _hint: dict[str, Any]
+) -> dict[str, Any]:
+    return _scrub_sentry_value(breadcrumb)
+
+
+def _before_send_log(log: dict[str, Any], _hint: dict[str, Any]) -> dict[str, Any]:
+    return _scrub_sentry_value(log)
+
 
 try:
     import sentry_sdk
@@ -65,6 +117,9 @@ def init_sentry(config: "SentryConfig", server_mode: bool = False) -> bool:
         send_default_pii=config.send_default_pii,
         debug=config.debug,
         enable_logs=True,
+        before_send=_before_send,
+        before_breadcrumb=_before_breadcrumb,
+        before_send_log=_before_send_log,
         integrations=integrations,
     )
 

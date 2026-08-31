@@ -323,7 +323,7 @@ class DeepAgentsRunner:
     """
 
     model: str = "openai:gpt-5.1"
-    system_prompt: str = "You are a focused deep work subagent for Ash."
+    system_prompt: str = "You are a focused deep work subagent for Pigeon."
     tools: list[Any] = field(default_factory=list)
     workspace_path: Path | None = None
     filesystem_mode: str = "read_only"
@@ -400,7 +400,7 @@ def build_default_orchestration_subagents(
                 "tasks while keeping intermediate context isolated."
             ),
             "system_prompt": (
-                "You are Ash's general-purpose orchestration subagent. Break down "
+                "You are Pigeon's general-purpose orchestration subagent. Break down "
                 "the task, inspect only relevant context, and return a concise "
                 f"actionable result.\n\n{concise_output}"
             ),
@@ -414,7 +414,7 @@ def build_default_orchestration_subagents(
                 "decision-ready summary."
             ),
             "system_prompt": (
-                "You are Ash's research subagent. Use available search/fetch/read "
+                "You are Pigeon's research subagent. Use available search/fetch/read "
                 "tools to verify facts. Prefer primary sources. Keep the final "
                 f"answer under 700 words unless the parent asks otherwise.\n\n{concise_output}"
             ),
@@ -428,7 +428,7 @@ def build_default_orchestration_subagents(
                 "plan with assumptions, blockers, and next actions."
             ),
             "system_prompt": (
-                "You are Ash's planning subagent. Produce a practical plan that "
+                "You are Pigeon's planning subagent. Produce a practical plan that "
                 "separates reversible steps from actions requiring user approval. "
                 f"{concise_output}"
             ),
@@ -778,13 +778,13 @@ class TelegramHITLApprover:
 
 @dataclass(slots=True)
 class DeepAgentsCodeHelper:
-    """Instructions for installing/running Deep Agents Code beside Ash (#10)."""
+    """Instructions for installing/running Deep Agents Code beside Pigeon (#10)."""
 
     workspace: Path = field(default_factory=get_workspace_path)
 
     def instructions(self) -> str:
         return (
-            "Deep Agents Code can run alongside Ash for terminal coding tasks.\n\n"
+            "Deep Agents Code can run alongside Pigeon for terminal coding tasks.\n\n"
             "Install:\n"
             "  1. Open https://docs.langchain.com/deep-agents in a browser.\n"
             "  2. Follow the documented Deep Agents Code installation steps for your platform.\n"
@@ -792,9 +792,9 @@ class DeepAgentsCodeHelper:
             "     remote scripts directly into a shell without explicit confirmation.\n\n"
             "Suggested handoff workspace:\n"
             f"  {self.workspace}\n\n"
-            "Keep Ash as the memory/personality/Telegram orchestrator and use Deep Agents "
+            "Keep Pigeon as the memory/personality/Telegram orchestrator and use Deep Agents "
             "Code for focused repository edits. Store handoff briefs and artifacts under "
-            "the Ash workspace so both tools can see them."
+            "the Pigeon workspace so both tools can see them."
         )
 
 
@@ -802,9 +802,9 @@ def build_workspace_system_prompt(base: str, workspace: Path | None = None) -> s
     workspace = workspace or get_workspace_path()
     return (
         f"{base}\n\n"
-        "## Ash Integration Contract\n"
+        "## Pigeon Integration Contract\n"
         f"- Treat {workspace} as the shared filesystem of record.\n"
-        "- Prefer Ash-provided tools/backends for shell, files, memory, and approvals.\n"
+        "- Prefer Pigeon-provided tools/backends for shell, files, memory, and approvals.\n"
         "- Return a concise final answer plus paths to any artifacts you created."
     )
 

@@ -695,7 +695,7 @@ class TestDoctorCommand:
             get_ash_home.cache_clear()
 
         assert result.exit_code == 0
-        assert "Ash Doctor" in result.stdout
+        assert "Pigeon Doctor" in result.stdout
         assert "Summary:" in result.stdout
         assert "Doctor checks passed" in result.stdout
         assert "Doctor Commands" in result.stdout
@@ -1042,7 +1042,7 @@ class TestStatsCommand:
             get_ash_home.cache_clear()
 
         assert result.exit_code == 0
-        assert "Ash Home" in result.stdout
+        assert "Pigeon Home" in result.stdout
 
     def test_stats_includes_memory_quality_from_logs(
         self, cli_runner, monkeypatch, tmp_path

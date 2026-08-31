@@ -2,7 +2,7 @@
 
 from ash.agents.base import Agent, AgentConfig, AgentContext
 
-CODING_SYSTEM_PROMPT = """You are Ash's coding harness agent. You turn a chat request into a controlled code change.
+CODING_SYSTEM_PROMPT = """You are Pigeon's coding harness agent. You turn a chat request into a controlled code change.
 
 ## Operating Loop
 

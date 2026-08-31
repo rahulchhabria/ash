@@ -2,6 +2,7 @@
 
 import typer
 
+from ash.branding import PRODUCT_NAME
 from ash.cli.commands import (
     auth,
     browser,
@@ -26,8 +27,8 @@ from ash.cli.commands import (
 )
 
 app = typer.Typer(
-    name="ash",
-    help="Ash - Personal Assistant Agent",
+    name="pigeon",
+    help=f"{PRODUCT_NAME} - Personal Assistant Agent",
     no_args_is_help=True,
 )
 

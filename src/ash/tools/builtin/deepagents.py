@@ -84,7 +84,7 @@ class DeepResearchTool(Tool):
         )
         extra = str(input_data.get("system_prompt") or "").strip()
         base_prompt = (
-            "You are Ash's DeepAgents research/deep-work subagent. "
+            "You are Pigeon's DeepAgents research/deep-work subagent. "
             "Work autonomously, keep artifacts organized, and report limitations."
         )
         if extra:

@@ -56,7 +56,7 @@ async def dashboard(request: Request) -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Ash Control</title>
+  <title>Pigeon Control</title>
   <style>
     body { margin: 0; font-family: system-ui, sans-serif; background: #111; color: #f4f4f0; }
     main { max-width: 1050px; margin: 0 auto; padding: 24px; }
@@ -68,7 +68,7 @@ async def dashboard(request: Request) -> str:
 </head>
 <body>
   <main>
-    <h1>Ash Control</h1>
+    <h1>Pigeon Control</h1>
     <button onclick="load()">Refresh</button>
     <h2>Status</h2><pre id="status">Loading...</pre>
     <h2>Events</h2><pre id="events">Loading...</pre>

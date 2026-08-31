@@ -26,8 +26,8 @@ def register(app: typer.Typer) -> None:
         Currently supported: openai-oauth (ChatGPT Plus/Pro)
 
         Examples:
-            ash auth login                  # Login to OpenAI OAuth (default)
-            ash auth login openai-oauth     # Explicit provider
+            pigeon auth login                  # Login to OpenAI OAuth (default)
+            pigeon auth login openai-oauth     # Explicit provider
         """
         if provider != "openai-oauth":
             error(f"Unknown provider: {provider}. Supported: openai-oauth")
@@ -52,7 +52,7 @@ def register(app: typer.Typer) -> None:
 
         if not providers:
             console.print("[dim]No authenticated providers.[/dim]")
-            console.print("Run [bold]ash auth login[/bold] to authenticate.")
+            console.print("Run [bold]pigeon auth login[/bold] to authenticate.")
             return
 
         for provider_id in providers:
@@ -83,8 +83,8 @@ def register(app: typer.Typer) -> None:
         """Remove stored credentials for a provider.
 
         Examples:
-            ash auth logout                 # Logout from OpenAI OAuth (default)
-            ash auth logout openai-oauth    # Explicit provider
+            pigeon auth logout                 # Logout from OpenAI OAuth (default)
+            pigeon auth logout openai-oauth    # Explicit provider
         """
         from ash.auth.storage import AuthStorage
 

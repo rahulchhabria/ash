@@ -19,7 +19,7 @@ router = APIRouter()
 async def vapi_webhook(
     request: Request, background_tasks: BackgroundTasks
 ) -> dict[str, str]:
-    """Receive Vapi server messages and submit voicemails to Ash."""
+    """Receive Vapi server messages and submit voicemails to Pigeon."""
     config = getattr(request.app.state, "config", None)
     vapi_config = getattr(config, "vapi", None)
     if vapi_config is None or not vapi_config.enabled:
@@ -54,7 +54,7 @@ async def vapi_webhook(
 
     server = getattr(request.app.state, "server", None)
     if server is None:
-        raise HTTPException(status_code=503, detail="Ash server is unavailable")
+        raise HTTPException(status_code=503, detail="Pigeon server is unavailable")
     handler = await server.get_telegram_handler()
     if handler is None:
         raise HTTPException(status_code=503, detail="Telegram handler is unavailable")

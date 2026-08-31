@@ -105,7 +105,7 @@ class AshServer:
                 await self._telegram_provider.stop()
 
         app = FastAPI(
-            title="Ash",
+            title="Pigeon",
             description="Personal Assistant Agent API",
             version="0.1.0",
             lifespan=lifespan,

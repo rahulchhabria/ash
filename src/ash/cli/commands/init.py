@@ -30,7 +30,7 @@ def register(app: typer.Typer) -> None:
             ),
         ] = None,
     ) -> None:
-        """Initialize a new Ash configuration file with sensible defaults."""
+        """Initialize a new Pigeon configuration file with sensible defaults."""
         from ash.cli.context import generate_config_template
         from ash.config.paths import get_config_path, get_workspace_path
         from ash.config.workspace import WorkspaceLoader
@@ -59,4 +59,4 @@ def register(app: typer.Typer) -> None:
         loader.ensure_workspace()
         dim(f"Created workspace at {workspace_path}")
 
-        console.print("Add your API key, then run: [cyan]ash upgrade[/cyan]")
+        console.print("Add your API key, then run: [cyan]pigeon upgrade[/cyan]")

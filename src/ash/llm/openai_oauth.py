@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 DEFAULT_CODEX_INSTRUCTIONS = (
-    "You are Ash, a helpful assistant. Follow instructions carefully."
+    "You are Pigeon, a helpful assistant. Follow instructions carefully."
 )
 
 # Refresh tokens 5 minutes before expiry

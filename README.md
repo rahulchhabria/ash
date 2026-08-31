@@ -1,6 +1,10 @@
-# Ash
+# Pigeon
 
-A personal assistant agent with customizable personality, memory, and sandboxed tool execution.
+A personal agent for Telegram-dispatched research, browser work, phone inquiries,
+school-email triage, memory, and sandboxed tool execution.
+
+The Python package, `ash` command, and `~/.ash` state directory remain available
+as compatibility interfaces. New command-line usage should use `pigeon`.
 
 ## Features
 
@@ -62,7 +66,7 @@ claude plugin add anthropics/code-simplifier
 | `/write-spec <feature>` | Create/update a feature spec |
 | `/verify-spec <feature>` | Verify implementation matches spec |
 | `/create-migration` | Database schema changes |
-| `/create-skill <name>` | Create Ash skills in workspace |
+| `/create-skill <name>` | Create Pigeon skills in workspace |
 
 ## License
 

@@ -1128,7 +1128,7 @@ class TestTelegramMessageHandler:
             id="99",
             chat_id="group_123",
             user_id="user_456",
-            text="Hey Ash, what do you think about this?",
+            text="Hey Pigeon, what do you think about this?",
             username="otheruser",
             display_name="Other User",
         )

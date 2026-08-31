@@ -54,12 +54,10 @@ class DeepAgent(Agent):
         system_prompt = str(context.input_data.get("system_prompt") or "").strip()
         base = (
             system_prompt
-            or "You are Ash's deep mode subagent. Work autonomously on the requested task."
+            or "You are Pigeon's deep mode subagent. Work autonomously on the requested task."
         )
         if context.voice:
-            base = (
-                f"{base}\n\n## Ash voice for final user-facing prose\n{context.voice}"
-            )
+            base = f"{base}\n\n## Pigeon voice for final user-facing prose\n{context.voice}"
         runner = DeepAgentsRunner(
             model=str(requested_model),
             system_prompt=build_workspace_system_prompt(base),

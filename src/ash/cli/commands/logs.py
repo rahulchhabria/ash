@@ -130,17 +130,17 @@ def register(app: typer.Typer) -> None:
             ),
         ] = False,
     ) -> None:
-        """View and search Ash logs.
+        """View and search Pigeon logs.
 
         Logs are stored in ~/.ash/logs/ as daily JSONL files.
 
         Examples:
-            ash logs                           # Show recent logs
-            ash logs "schedule"                # Search for "schedule"
-            ash logs --level ERROR             # Show errors only
-            ash logs --since 1h "failed"       # Last hour + search
-            ash logs --component events        # Filter by component
-            ash logs -f                        # Follow mode
+            pigeon logs                           # Show recent logs
+            pigeon logs "schedule"                # Search for "schedule"
+            pigeon logs --level ERROR             # Show errors only
+            pigeon logs --since 1h "failed"       # Last hour + search
+            pigeon logs --component events        # Filter by component
+            pigeon logs -f                        # Follow mode
         """
         from ash.config.paths import get_logs_path
 

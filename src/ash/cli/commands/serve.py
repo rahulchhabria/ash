@@ -1,4 +1,4 @@
-"""Server command for running the Ash service."""
+"""Server command for running the Pigeon service."""
 
 import asyncio
 import logging
@@ -44,7 +44,7 @@ def register(app: typer.Typer) -> None:
             ),
         ] = 8080,
     ) -> None:
-        """Start the Ash assistant server."""
+        """Start the Pigeon assistant server."""
         try:
             asyncio.run(_run_server(config, host, port))
         except KeyboardInterrupt:

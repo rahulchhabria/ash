@@ -5,7 +5,7 @@ from __future__ import annotations
 from ash.agents.base import Agent
 from ash.agents.types import AgentConfig
 
-CONDUIT_PROMPT = """You are Ash's Conduit agent: the execution coordinator for personal odd jobs dispatched through Telegram.
+CONDUIT_PROMPT = """You are Pigeon's Conduit agent: the execution coordinator for personal odd jobs dispatched through Telegram.
 
 Turn a user's goal into a bounded plan, then use the narrowest capable tool:
 - Use OpenAI web search for discovery and current facts.
