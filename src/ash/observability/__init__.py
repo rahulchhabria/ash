@@ -60,38 +60,43 @@ def _scrub_sentry_value(value: Any, *, key: str | None = None) -> Any:
     return value
 
 
-def _is_telegram_poll_disconnect(payload: dict[str, Any]) -> bool:
-    logger_name = str(payload.get("logger") or "")
-    raw_logentry = payload.get("logentry")
-    logentry = raw_logentry if isinstance(raw_logentry, dict) else {}
-    candidate_text = " ".join(
-        str(value)
-        for value in (
-            payload.get("message"),
-            logentry.get("message"),
-            payload.get("body"),
+def _payload_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return " ".join(_payload_text(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return " ".join(_payload_text(item) for item in value)
+    return ""
+
+
+def _payload_has_logger(payload: dict[str, Any], expected: str) -> bool:
+    if str(payload.get("logger") or "") == expected:
+        return True
+    tags = payload.get("tags")
+    if isinstance(tags, dict):
+        return str(tags.get("logger") or "") == expected
+    if isinstance(tags, list):
+        return any(
+            isinstance(tag, (list, tuple))
+            and len(tag) >= 2
+            and str(tag[0]) == "logger"
+            and str(tag[1]) == expected
+            for tag in tags
         )
-        if value
-    )
-    return logger_name == "aiogram.dispatcher" and all(
+    return False
+
+
+def _is_telegram_poll_disconnect(payload: dict[str, Any]) -> bool:
+    candidate_text = _payload_text(payload)
+    return _payload_has_logger(payload, "aiogram.dispatcher") and all(
         marker in candidate_text for marker in _TELEGRAM_POLL_DISCONNECT_MARKERS
     )
 
 
 def _is_playwright_screenshot_future_timeout(payload: dict[str, Any]) -> bool:
-    logger_name = str(payload.get("logger") or "")
-    raw_logentry = payload.get("logentry")
-    logentry = raw_logentry if isinstance(raw_logentry, dict) else {}
-    candidate_text = " ".join(
-        str(value)
-        for value in (
-            payload.get("message"),
-            logentry.get("message"),
-            payload.get("body"),
-        )
-        if value
-    )
-    return logger_name == "asyncio" and all(
+    candidate_text = _payload_text(payload)
+    return _payload_has_logger(payload, "asyncio") and all(
         marker in candidate_text for marker in _PLAYWRIGHT_SCREENSHOT_TIMEOUT_MARKERS
     )
 

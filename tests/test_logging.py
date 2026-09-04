@@ -781,6 +781,19 @@ class TestSentryFiltering:
 
         assert _before_send_log(log, {}) is None
 
+    def test_drops_telegram_poll_disconnect_event_with_logger_tag(self):
+        event = {
+            "tags": [["logger", "aiogram.dispatcher"]],
+            "logentry": {
+                "formatted": (
+                    "Failed to fetch updates - TelegramNetworkError: HTTP Client says "
+                    "- ServerDisconnectedError: Server disconnected"
+                )
+            },
+        }
+
+        assert _before_send(event, {}) is None
+
     def test_drops_playwright_screenshot_future_timeout(self):
         event = {
             "logger": "asyncio",
