@@ -257,6 +257,7 @@ class VapiConfig(BaseModel):
     """Configuration for Vapi voicemail webhook ingestion."""
 
     enabled: bool = False
+    dry_run: bool = False
     telegram_chat_id: str | None = None
     telegram_user_id: str | None = None
     webhook_secret: SecretStr | None = None

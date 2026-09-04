@@ -81,13 +81,6 @@ class VapiOutboundCallTool(Tool):
             )
         if not self._config.enabled:
             return ToolResult.error("Vapi is disabled")
-        api_key = self._config.api_key
-        if api_key is None:
-            return ToolResult.error("VAPI_API_KEY is not configured")
-        if not self._config.assistant_id or not self._config.phone_number_id:
-            return ToolResult.error(
-                "Vapi outbound calling requires assistant_id and phone_number_id"
-            )
 
         number = str(input_data.get("customer_number") or "").strip()
         if not E164_RE.fullmatch(number):
@@ -104,6 +97,24 @@ class VapiOutboundCallTool(Tool):
             "ash_context": str(input_data.get("context") or "")[:4000],
             "ash_customer_name": str(input_data.get("customer_name") or "")[:300],
         }
+        if self._config.dry_run:
+            summary = {
+                "call_id": None,
+                "status": "dry_run",
+                "customer_number": number,
+                "business_name": variables["ash_business_name"] or None,
+                "objective": objective,
+            }
+            return ToolResult.success(json.dumps(summary, indent=2))
+
+        api_key = self._config.api_key
+        if api_key is None:
+            return ToolResult.error("VAPI_API_KEY is not configured")
+        if not self._config.assistant_id or not self._config.phone_number_id:
+            return ToolResult.error(
+                "Vapi outbound calling requires assistant_id and phone_number_id"
+            )
+
         payload = {
             "assistantId": self._config.assistant_id,
             "phoneNumberId": self._config.phone_number_id,

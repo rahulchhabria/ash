@@ -7,6 +7,7 @@ checkpoint storage/retrieval and high-level callback routing.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -14,6 +15,15 @@ if TYPE_CHECKING:
     from aiogram.types import CallbackQuery
 
 logger = logging.getLogger("telegram")
+_SUBAGENT_OUTPUT_PATTERN = re.compile(
+    r"^\s*<instruction>.*?</instruction>\s*<output>\s*(.*?)\s*</output>\s*$",
+    re.DOTALL,
+)
+
+
+def _unwrap_direct_agent_output(text: str) -> str:
+    match = _SUBAGENT_OUTPUT_PATTERN.match(text)
+    return match.group(1).strip() if match else text
 
 
 @dataclass
@@ -168,7 +178,7 @@ class ResponseFinalizer:
         from ash.tools.builtin.agents import CHECKPOINT_METADATA_KEY
 
         reply_markup = None
-        response_text = result.content
+        response_text = _unwrap_direct_agent_output(result.content)
 
         # Check for nested checkpoint in the result
         if CHECKPOINT_METADATA_KEY in result.metadata:

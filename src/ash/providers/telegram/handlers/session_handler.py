@@ -127,6 +127,16 @@ class SessionHandler:
             thread_id=None,
         )
 
+    def mark_active_thread(
+        self, chat_id: str, thread_id: str | None, *, reason: str
+    ) -> None:
+        if not thread_id:
+            return
+        state_manager = self._get_chat_state_manager(chat_id)
+        state = state_manager.load()
+        state.set_active_thread(thread_id, reason=reason)
+        state_manager.save()
+
     def maybe_record_mutation_confirmation_from_user(
         self, message: IncomingMessage
     ) -> None:

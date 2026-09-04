@@ -12,7 +12,10 @@ from ash.config.models import AshConfig, ModelConfig
 from ash.llm.openai import OpenAIProvider
 from ash.llm.types import Message, Role, ToolDefinition
 from ash.providers.base import IncomingMessage
-from ash.providers.telegram.handlers.message_handler import TelegramMessageHandler
+from ash.providers.telegram.handlers.message_handler import (
+    TelegramMessageHandler,
+    _unwrap_direct_agent_output,
+)
 from ash.tools.base import ToolResult
 from ash.tools.builtin.coding import HostedOpenAITool, RepoTool
 from ash.tools.registry import ToolRegistry
@@ -201,6 +204,23 @@ async def test_telegram_do_command_dispatches_conduit_directly():
     )
 
 
+def test_direct_agent_output_unwraps_internal_subagent_envelope():
+    wrapped = """<instruction>
+This is the result from the \"conduit\" agent.
+The user has NOT seen this output.
+</instruction>
+<output>
+can’t do that lookup rn
+
+1) paste the phone #
+</output>"""
+
+    assert (
+        _unwrap_direct_agent_output(wrapped)
+        == "can’t do that lookup rn\n\n1) paste the phone #"
+    )
+
+
 def test_telegram_raw_command_snapshot_survives_in_place_preprocessing():
     raw = IncomingMessage(
         id="m1",
@@ -251,6 +271,45 @@ def test_telegram_coding_command_uses_raw_text_after_preprocessing():
 
     assert command_message.text == "/code fix failing tests"
     assert command_message.metadata == processed.metadata
+
+
+@pytest.mark.asyncio
+async def test_telegram_plain_call_request_auto_routes_to_conduit():
+    handler = TelegramMessageHandler.__new__(TelegramMessageHandler)
+    handler._run_checkpoint_agent_command = AsyncMock()
+
+    message = IncomingMessage(
+        id="m1",
+        chat_id="c1",
+        user_id="u1",
+        text="Call the Ace Hardware on 25th and Geary to see if they're still open.",
+    )
+
+    result = await handler._try_handle_conduit_intent(message)
+
+    assert result is True
+    handler._run_checkpoint_agent_command.assert_awaited_once_with(
+        message=message,
+        task=message.text,
+        agent_name="conduit",
+        tool_use_prefix="conduit",
+        unavailable_label="Conduit agent",
+    )
+
+
+def test_telegram_plain_call_request_detector_is_narrow():
+    handler = TelegramMessageHandler.__new__(TelegramMessageHandler)
+
+    assert handler._looks_like_phone_call_request("please phone Standard Plumbing")
+    assert handler._looks_like_phone_call_request(
+        "ask Ace Hardware by phone if they are open"
+    )
+    assert not handler._looks_like_phone_call_request(
+        "what is the phone number for Ace Hardware?"
+    )
+    assert not handler._looks_like_phone_call_request(
+        "tell me whether Ace Hardware is open"
+    )
 
 
 @pytest.mark.asyncio

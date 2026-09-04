@@ -49,6 +49,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("telegram")
 _LOCALHOST_CALLBACK_URL_PATTERN = re.compile(r"https?://localhost[^\s]*[?&]code=[^\s]*")
+_SUBAGENT_OUTPUT_PATTERN = re.compile(
+    r"^\s*<instruction>.*?</instruction>\s*<output>\s*(.*?)\s*</output>\s*$",
+    re.DOTALL,
+)
+
+
+def _unwrap_direct_agent_output(text: str) -> str:
+    match = _SUBAGENT_OUTPUT_PATTERN.match(text)
+    return match.group(1).strip() if match else text
 
 
 def _extract_tool_calls_from_session(session: SessionState) -> list[dict[str, Any]]:
@@ -473,6 +482,29 @@ class TelegramMessageHandler:
                 break
         return env
 
+    def _looks_like_phone_call_request(self, message_text: str) -> bool:
+        text = (message_text or "").strip().lower()
+        if not text or text.startswith("/"):
+            return False
+
+        if re.search(r"\b(phone number|number for|what'?s the number)\b", text):
+            return False
+
+        direct_call_verbs = ("call", "ring", "dial")
+        if any(
+            re.search(rf"\b{re.escape(verb)}\b", text) for verb in direct_call_verbs
+        ):
+            return True
+
+        if re.search(r"\b(phone|place a call|make a call)\b.+\b(to|for|with)\b", text):
+            return True
+        if re.search(r"\b(phone)\b\s+[^?]+$", text):
+            return True
+
+        return bool(
+            re.search(r"\bask\b.+\b(by phone|over the phone|on the phone)\b", text)
+        )
+
     def _looks_like_coding_request(self, message_text: str) -> bool:
         text = (message_text or "").strip().lower()
         if not text or text.startswith("/"):
@@ -729,6 +761,18 @@ class TelegramMessageHandler:
 
         return False
 
+    async def _try_handle_conduit_intent(self, message: IncomingMessage) -> bool:
+        if not self._looks_like_phone_call_request(message.text or ""):
+            return False
+        await self._run_checkpoint_agent_command(
+            message=message,
+            task=message.text.strip(),
+            agent_name="conduit",
+            tool_use_prefix="conduit",
+            unavailable_label="Conduit agent",
+        )
+        return True
+
     async def _try_handle_conduit_command(
         self, message: IncomingMessage
     ) -> IncomingMessage | bool:
@@ -861,7 +905,7 @@ class TelegramMessageHandler:
 
         await self._provider.send_typing(message.chat_id)
         result = await use_agent_tool.execute(tool_input, tool_context)
-        response_text = result.content
+        response_text = _unwrap_direct_agent_output(result.content)
         reply_markup = None
         checkpoint = result.metadata.get(CHECKPOINT_METADATA_KEY)
         if isinstance(checkpoint, dict):
@@ -917,6 +961,9 @@ class TelegramMessageHandler:
             output=result.content,
             success=not result.is_error,
             metadata=result.metadata,
+        )
+        self._session_handler.mark_active_thread(
+            message.chat_id, thread_id, reason="direct_agent_command"
         )
         self._log_response(response_text)
 
@@ -1193,6 +1240,9 @@ class TelegramMessageHandler:
 
         self._session_handler.maybe_record_mutation_confirmation_from_user(message)
 
+        if await self._checkpoint_handler.handle_text_response(message):
+            return
+
         if await self._try_handle_capability_oauth_callback(message):
             return
 
@@ -1201,9 +1251,7 @@ class TelegramMessageHandler:
             processed_message=message,
             commands={"/do"},
         )
-        conduit_command_result = await self._try_handle_conduit_command(
-            conduit_message
-        )
+        conduit_command_result = await self._try_handle_conduit_command(conduit_message)
         if conduit_command_result is True:
             return
         if isinstance(conduit_command_result, IncomingMessage):
@@ -1219,6 +1267,9 @@ class TelegramMessageHandler:
             return
         if isinstance(coding_command_result, IncomingMessage):
             message = coding_command_result
+
+        if await self._try_handle_conduit_intent(raw_message):
+            return
 
         if await self._try_handle_coding_intent(raw_message):
             return

@@ -233,6 +233,7 @@ uv run playwright install chromium
 ```toml
 [vapi]
 enabled = false
+dry_run = false
 auth_required = true
 assistant_id = null
 phone_number_id = null
@@ -242,6 +243,8 @@ base_url = "https://api.vapi.ai"
 Set `VAPI_API_KEY` and `VAPI_WEBHOOK_SECRET` in the service environment. Outbound
 calls require an assistant and an outbound-capable phone number. Ash restricts call
 creation to Telegram-dispatched Conduit tasks after an explicit checkpoint approval.
+Set `dry_run = true` to test the Telegram approval flow without Vapi credentials or
+network call creation; the tool validates the request and returns a dry-run summary.
 
 ## Event Router (`[event_router]`)
 

@@ -28,6 +28,9 @@ class SearchProviderError(Exception):
         self.code = code
         self.status_code = code
 
+    def is_quota_or_billing_error(self) -> bool:
+        return self.code in {402, 429}
+
 
 def _extract_domains(response: SearchResponse) -> list[str]:
     domains: list[str] = []
@@ -416,6 +419,11 @@ class WebSearchTool(Tool):
                     "error.message": e.message,
                 },
             )
+            if e.is_quota_or_billing_error():
+                return ToolResult.error(
+                    f"Search error: {e}. Upstream search quota/billing is unavailable; "
+                    "try `openai_web_search` if available, or use `browser` for a public web lookup before giving up."
+                )
             return ToolResult.error(f"Search error: {e}")
         except Exception as e:
             logger.exception(f"Search error for query: {query}")

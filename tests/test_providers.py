@@ -176,6 +176,18 @@ class TestTelegramProvider:
         assert provider._bot.send_message.call_count == 1
 
 
+def test_checkpoint_text_option_selection_accepts_common_replies():
+    from ash.providers.telegram.handlers.checkpoint_handler import (
+        _select_checkpoint_option,
+    )
+
+    assert _select_checkpoint_option("a", ["Call", "Cancel"]) == "Call"
+    assert _select_checkpoint_option("1", ["Call", "Cancel"]) == "Call"
+    assert _select_checkpoint_option("approve", ["Proceed", "Cancel"]) == "Proceed"
+    assert _select_checkpoint_option("no", ["Proceed", "Cancel"]) == "Cancel"
+    assert _select_checkpoint_option("yes sf", ["Yes", "No"]) is None
+
+
 class TestTelegramMessageHandler:
     """Tests for TelegramMessageHandler."""
 

@@ -48,6 +48,26 @@ async def test_vapi_outbound_validates_e164() -> None:
 
 
 @pytest.mark.asyncio
+async def test_vapi_outbound_dry_run_requires_no_credentials() -> None:
+    config = VapiConfig(enabled=True, dry_run=True)
+
+    result = await VapiOutboundCallTool(config).execute(
+        {
+            "customer_number": "+14155550100",
+            "objective": "Ask whether walk-ins are accepted",
+            "business_name": "Example Cafe",
+            "approved": True,
+        },
+        ToolContext(provider="telegram"),
+    )
+
+    assert not result.is_error
+    assert '"status": "dry_run"' in result.content
+    assert "+14155550100" in result.content
+    assert "Ask whether walk-ins are accepted" in result.content
+
+
+@pytest.mark.asyncio
 async def test_vapi_outbound_creates_call(monkeypatch) -> None:
     captured = {}
 
@@ -93,9 +113,10 @@ async def test_vapi_outbound_creates_call(monkeypatch) -> None:
     assert not result.is_error
     assert "call-123" in result.content
     assert captured["url"] == "https://api.vapi.ai/call"
-    assert captured["payload"]["assistantOverrides"]["variableValues"][
-        "ash_objective"
-    ] == "Ask whether walk-ins are accepted"
+    assert (
+        captured["payload"]["assistantOverrides"]["variableValues"]["ash_objective"]
+        == "Ask whether walk-ins are accepted"
+    )
     assert "key" not in result.content
 
 
@@ -126,3 +147,14 @@ def test_conduit_agent_requires_approval_tools() -> None:
     assert "interrupt" in config.allowed_tools
     assert "browser" in config.allowed_tools
     assert "vapi_outbound_call" in config.allowed_tools
+
+
+def test_conduit_agent_instructs_place_resolution_before_calls() -> None:
+    from ash.agents.builtin.conduit import ConduitAgent
+
+    prompt = ConduitAgent().config.system_prompt
+
+    assert "If the user names a business/place without a phone number" in prompt
+    assert "if search fails, use browser" in prompt
+    assert "phone number in E.164 format" in prompt
+    assert "ask whether they still want a phone confirmation" in prompt

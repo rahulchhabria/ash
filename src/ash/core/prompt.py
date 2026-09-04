@@ -352,6 +352,7 @@ class SystemPromptBuilder:
         "- For recommendation/ranking/comparison questions about real-world things, run `web_search` first before answering.",
         "- Use `web_fetch` when you already have a URL and need content reading without interaction.",
         "- For capability checks (e.g., 'can we do X?'), attempt the task now with tools instead of answering hypothetically.",
+        "- If `web_search` fails with a quota/billing/provider error such as HTTP 402 or 429, try `openai_web_search` if available, or `browser` for public web lookup, before saying you cannot verify.",
         "- If a step fails, report the exact error and escalate to the next viable tool. Never claim success without verification.",
     ]
 
