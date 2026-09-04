@@ -113,6 +113,13 @@ class CapabilitiesIntegration(IntegrationContributor):
             )
             if line not in lines:
                 lines.append(line)
+            calendar_line = (
+                "- For Google Calendar questions, agenda questions, first/next event "
+                "questions, and date-only follow-ups to a calendar question, invoke "
+                "the `google` skill. Do not use `browser` for calendar data."
+            )
+            if calendar_line not in lines:
+                lines.append(calendar_line)
             blocked = sorted(context.config.capability_permissions.blocked)
             if blocked:
                 block_line = (
