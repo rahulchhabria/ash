@@ -1,5 +1,6 @@
 """Tests for tool registry and executor."""
 
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -330,6 +331,31 @@ class TestWebSearchTool:
 
         assert result.is_error
         assert "Rate limit" in result.content
+
+    async def test_provider_payment_error_is_not_logged_as_exception(
+        self, mock_sandbox_config, mock_executor, caplog
+    ):
+        """Provider payment/quota errors should be returned cleanly."""
+        import json
+
+        mock_executor.execute.return_value = ExecutionResult(
+            exit_code=1,
+            stdout=json.dumps({"error": "HTTP 402", "code": 402}),
+            stderr="",
+            timed_out=False,
+        )
+
+        tool = WebSearchTool(
+            api_key="test-key",
+            sandbox_config=mock_sandbox_config,
+        )
+        with caplog.at_level(logging.WARNING, logger="ash.tools.builtin.web_search"):
+            result = await tool.execute({"query": "test"}, ToolContext())
+
+        assert result.is_error
+        assert "HTTP 402" in result.content
+        assert any(r.message == "search_provider_error" for r in caplog.records)
+        assert all(r.exc_info is None for r in caplog.records)
 
     async def test_no_results(self, mock_sandbox_config, mock_executor):
         """Test handling of no results."""

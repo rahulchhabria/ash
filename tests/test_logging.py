@@ -8,6 +8,7 @@ from ash.logging import (
     SecretRedactor,
     prune_old_logs,
 )
+from ash.observability import _before_send, _before_send_log
 
 
 class TestSecretRedactor:
@@ -753,3 +754,52 @@ class TestJSONLHandlerContext:
         entry = json.loads(log_files[0].read_text().strip())
 
         assert "context" not in entry
+
+
+class TestSentryFiltering:
+    def test_drops_telegram_poll_disconnect_error_event(self):
+        event = {
+            "logger": "aiogram.dispatcher",
+            "logentry": {
+                "message": (
+                    "Failed to fetch updates - TelegramNetworkError: HTTP Client says "
+                    "- ServerDisconnectedError: Server disconnected"
+                )
+            },
+        }
+
+        assert _before_send(event, {}) is None
+
+    def test_drops_telegram_poll_disconnect_log(self):
+        log = {
+            "logger": "aiogram.dispatcher",
+            "body": (
+                "Failed to fetch updates - TelegramNetworkError: HTTP Client says "
+                "- ServerDisconnectedError: Server disconnected"
+            ),
+        }
+
+        assert _before_send_log(log, {}) is None
+
+    def test_drops_playwright_screenshot_future_timeout(self):
+        event = {
+            "logger": "asyncio",
+            "logentry": {
+                "message": (
+                    "Future exception was never retrieved future: "
+                    "<Future finished exception=TimeoutError("
+                    "'Timeout 30000ms exceeded.\nCall log:\n"
+                    "  - taking page screenshot\n')>"
+                )
+            },
+        }
+
+        assert _before_send(event, {}) is None
+
+    def test_keeps_other_telegram_errors(self):
+        event = {
+            "logger": "aiogram.dispatcher",
+            "logentry": {"message": "TelegramBadRequest: message is not modified"},
+        }
+
+        assert _before_send(event, {}) == event

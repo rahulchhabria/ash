@@ -28,6 +28,17 @@ _TELEGRAM_BOT_URL = re.compile(
     flags=re.IGNORECASE,
 )
 _BEARER_TOKEN = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
+_TELEGRAM_POLL_DISCONNECT_MARKERS = (
+    "Failed to fetch updates",
+    "TelegramNetworkError",
+    "ServerDisconnectedError",
+    "Server disconnected",
+)
+_PLAYWRIGHT_SCREENSHOT_TIMEOUT_MARKERS = (
+    "Future exception was never retrieved",
+    "Timeout",
+    "taking page screenshot",
+)
 
 
 def _scrub_sentry_value(value: Any, *, key: str | None = None) -> Any:
@@ -49,7 +60,51 @@ def _scrub_sentry_value(value: Any, *, key: str | None = None) -> Any:
     return value
 
 
-def _before_send(event: dict[str, Any], _hint: dict[str, Any]) -> dict[str, Any]:
+def _is_telegram_poll_disconnect(payload: dict[str, Any]) -> bool:
+    logger_name = str(payload.get("logger") or "")
+    raw_logentry = payload.get("logentry")
+    logentry = raw_logentry if isinstance(raw_logentry, dict) else {}
+    candidate_text = " ".join(
+        str(value)
+        for value in (
+            payload.get("message"),
+            logentry.get("message"),
+            payload.get("body"),
+        )
+        if value
+    )
+    return logger_name == "aiogram.dispatcher" and all(
+        marker in candidate_text for marker in _TELEGRAM_POLL_DISCONNECT_MARKERS
+    )
+
+
+def _is_playwright_screenshot_future_timeout(payload: dict[str, Any]) -> bool:
+    logger_name = str(payload.get("logger") or "")
+    raw_logentry = payload.get("logentry")
+    logentry = raw_logentry if isinstance(raw_logentry, dict) else {}
+    candidate_text = " ".join(
+        str(value)
+        for value in (
+            payload.get("message"),
+            logentry.get("message"),
+            payload.get("body"),
+        )
+        if value
+    )
+    return logger_name == "asyncio" and all(
+        marker in candidate_text for marker in _PLAYWRIGHT_SCREENSHOT_TIMEOUT_MARKERS
+    )
+
+
+def _should_drop_sentry_payload(payload: dict[str, Any]) -> bool:
+    return _is_telegram_poll_disconnect(
+        payload
+    ) or _is_playwright_screenshot_future_timeout(payload)
+
+
+def _before_send(event: dict[str, Any], _hint: dict[str, Any]) -> dict[str, Any] | None:
+    if _should_drop_sentry_payload(event):
+        return None
     return _scrub_sentry_value(event)
 
 
@@ -59,7 +114,11 @@ def _before_breadcrumb(
     return _scrub_sentry_value(breadcrumb)
 
 
-def _before_send_log(log: dict[str, Any], _hint: dict[str, Any]) -> dict[str, Any]:
+def _before_send_log(
+    log: dict[str, Any], _hint: dict[str, Any]
+) -> dict[str, Any] | None:
+    if _should_drop_sentry_payload(log):
+        return None
     return _scrub_sentry_value(log)
 
 
