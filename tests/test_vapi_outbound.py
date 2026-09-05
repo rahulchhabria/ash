@@ -115,6 +115,7 @@ async def test_vapi_outbound_creates_call(monkeypatch) -> None:
             "customer_number": "+14155550100",
             "objective": "Ask whether walk-ins are accepted",
             "business_name": "Example Cafe",
+            "allow_ivr_navigation": True,
             "approved": True,
         },
         ToolContext(provider="telegram"),
@@ -133,6 +134,12 @@ async def test_vapi_outbound_creates_call(monkeypatch) -> None:
     )
     assert captured["payload"]["assistantOverrides"]["firstMessageMode"] == (
         "assistant-speaks-first-with-model-generated-message"
+    )
+    assert (
+        captured["payload"]["assistantOverrides"]["variableValues"][
+            "ash_ivr_navigation"
+        ]
+        == "routing-only"
     )
     assert captured["preflight"][0] == "https://api.vapi.ai/call"
     assert "key" not in result.content
@@ -197,7 +204,16 @@ async def test_vapi_outbound_cleans_voice_text_and_passes_voicemail(
         "Ask when he's arriving-then confirm."
     )
     assert overrides["variableValues"]["ash_context"] == "Keep it brief."
+    assert overrides["variableValues"]["ash_ivr_navigation"] == "disabled"
     assert overrides["voicemailMessage"] == "Hi-Rahul called. Please call back."
+
+
+def test_vapi_outbound_requires_explicit_ivr_policy() -> None:
+    schema = VapiOutboundCallTool(VapiConfig()).input_schema
+
+    assert "allow_ivr_navigation" in schema["required"]
+    description = schema["properties"]["allow_ivr_navigation"]["description"]
+    assert "non-consequential IVR routing" in description
 
 
 @pytest.mark.asyncio
@@ -539,4 +555,6 @@ def test_conduit_agent_instructs_place_resolution_before_calls() -> None:
     assert "If the user names a business/place without a phone number" in prompt
     assert "if search fails, use browser" in prompt
     assert "phone number in E.164 format" in prompt
+    assert "ordinary routing-only IVR navigation" in prompt
+    assert "Set allow_ivr_navigation=true only" in prompt
     assert "ask whether they still want a phone confirmation" in prompt

@@ -78,6 +78,14 @@ class VapiOutboundCallTool(Tool):
                         "recipient, not the Telegram user placing the call."
                     ),
                 },
+                "allow_ivr_navigation": {
+                    "type": "boolean",
+                    "description": (
+                        "Allow DTMF only for ordinary, non-consequential IVR routing "
+                        "needed to reach the approved person or department. This "
+                        "permission must be disclosed in the call approval."
+                    ),
+                },
                 "voicemail_message": {
                     "type": "string",
                     "description": (
@@ -93,7 +101,12 @@ class VapiOutboundCallTool(Tool):
                     ),
                 },
             },
-            "required": ["customer_number", "objective", "approved"],
+            "required": [
+                "customer_number",
+                "objective",
+                "allow_ivr_navigation",
+                "approved",
+            ],
         }
 
     async def execute(
@@ -120,6 +133,7 @@ class VapiOutboundCallTool(Tool):
         business_name = _clean_voice_text(input_data.get("business_name"), limit=300)
         call_context = _clean_voice_text(input_data.get("context"), limit=4000)
         customer_name = _clean_voice_text(input_data.get("customer_name"), limit=300)
+        allow_ivr_navigation = input_data.get("allow_ivr_navigation") is True
         voicemail_message = _clean_voice_text(
             input_data.get("voicemail_message"), limit=500
         )
@@ -142,6 +156,9 @@ class VapiOutboundCallTool(Tool):
             "ash_business_name": business_name,
             "ash_context": call_context,
             "ash_customer_name": customer_name,
+            "ash_ivr_navigation": (
+                "routing-only" if allow_ivr_navigation else "disabled"
+            ),
         }
         if self._config.dry_run:
             summary = {
@@ -150,6 +167,7 @@ class VapiOutboundCallTool(Tool):
                 "customer_number": number,
                 "business_name": variables["ash_business_name"] or None,
                 "objective": objective,
+                "ivr_navigation": allow_ivr_navigation,
             }
             return ToolResult.success(json.dumps(summary, indent=2))
 
@@ -224,6 +242,7 @@ class VapiOutboundCallTool(Tool):
             "call_id": call_id or None,
             "status": result.get("status") or "queued",
             "business_name": variables["ash_business_name"] or None,
+            "ivr_navigation": allow_ivr_navigation,
             "summary_delivery": (
                 "telegram"
                 if call_id
