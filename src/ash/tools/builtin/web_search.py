@@ -422,7 +422,8 @@ class WebSearchTool(Tool):
             if e.is_quota_or_billing_error():
                 return ToolResult.error(
                     f"Search error: {e}. Upstream search quota/billing is unavailable; "
-                    "try `openai_web_search` if available, or use `browser` for a public web lookup before giving up."
+                    "try `openai_web_search` if available before giving up. "
+                    "Use `browser` only when the page requires interaction, authentication, or dynamic rendering."
                 )
             return ToolResult.error(f"Search error: {e}")
         except Exception as e:

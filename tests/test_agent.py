@@ -911,9 +911,10 @@ class TestSystemPromptBuilder:
         assert "Tool Call Style" in prompt
         assert "Sandbox" in prompt
         assert "Web/Search Routing" in prompt
-        assert "`web_search` -> `web_fetch`" in prompt
+        assert "`openai_web_search` or `web_search`" in prompt
         assert "HTTP 402 or 429" in prompt
-        assert "`browser` for public web lookup" in prompt
+        assert "Use `browser` only for interactive" in prompt
+        assert "kernel HTTP fails with an access/payment error" in prompt
         assert "test assistant" in prompt.lower()
 
     def test_build_full_mode_narration_not_in_tools_section(self, prompt_builder):

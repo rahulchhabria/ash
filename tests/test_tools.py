@@ -355,7 +355,8 @@ class TestWebSearchTool:
         assert result.is_error
         assert "HTTP 402" in result.content
         assert "quota/billing" in result.content
-        assert "browser" in result.content
+        assert "openai_web_search" in result.content
+        assert "Use `browser` only" in result.content
         assert any(r.message == "search_provider_error" for r in caplog.records)
         assert all(r.exc_info is None for r in caplog.records)
 
