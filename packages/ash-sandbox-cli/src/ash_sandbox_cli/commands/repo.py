@@ -56,7 +56,9 @@ def changed_files() -> None:
 
 
 @app.command("diff")
-def diff(base: Annotated[str, typer.Option(help="Base ref to diff against.")] = "HEAD") -> None:
+def diff(
+    base: Annotated[str, typer.Option(help="Base ref to diff against.")] = "HEAD",
+) -> None:
     """Show diff stat and patch."""
     stat = _run(["git", "diff", "--stat", base])
     patch = _run(["git", "diff", base])
@@ -70,7 +72,9 @@ def diff(base: Annotated[str, typer.Option(help="Base ref to diff against.")] = 
 
 
 @app.command("branch")
-def branch(name: Annotated[str, typer.Argument(help="Branch name to create/switch to.")]) -> None:
+def branch(
+    name: Annotated[str, typer.Argument(help="Branch name to create/switch to.")],
+) -> None:
     """Create or switch to a branch."""
     result = _run(["git", "switch", "-c", name])
     if result.returncode != 0:
@@ -82,7 +86,9 @@ def branch(name: Annotated[str, typer.Argument(help="Branch name to create/switc
 def test(command: Annotated[list[str], typer.Argument(help="Command to run.")]) -> None:
     """Run a test command and echo self-verifying output."""
     if not command:
-        typer.echo("Error: provide a test command, e.g. ash-sb repo test uv run pytest tests/test_cli.py")
+        typer.echo(
+            "Error: provide a test command, e.g. ash-sb repo test uv run pytest tests/test_cli.py"
+        )
         raise typer.Exit(2)
     result = _run(command, timeout=600)
     _print_result("test", result)
@@ -90,16 +96,73 @@ def test(command: Annotated[list[str], typer.Argument(help="Command to run.")]) 
 
 
 @app.command("pr-summary")
-def pr_summary(base: Annotated[str, typer.Option(help="Base ref to compare.")] = "HEAD") -> None:
+def pr_summary(
+    base: Annotated[str, typer.Option(help="Base ref to compare.")] = "HEAD",
+) -> None:
     """Show branch, changed files, and diff stat for PR drafting."""
     branch_result = _run(["git", "branch", "--show-current"])
     files = _run(["git", "diff", "--name-status", base])
     stat = _run(["git", "diff", "--stat", base])
     typer.echo("Repo action: pr_summary")
     typer.echo(f"Repo path: {_repo()}")
-    typer.echo(f"Exit code: {branch_result.returncode or files.returncode or stat.returncode}")
+    typer.echo(
+        f"Exit code: {branch_result.returncode or files.returncode or stat.returncode}"
+    )
     typer.echo(f"Branch: {(branch_result.stdout or '').strip() or '(unknown)'}")
     typer.echo("Changed files:")
     typer.echo(files.stdout or "(none)")
     typer.echo("Diff stat:")
     typer.echo(stat.stdout or "(none)")
+
+
+@app.command("pull")
+def pull() -> None:
+    """Pull the current branch with fast-forward only."""
+    _print_result("pull", _run(["git", "pull", "--ff-only"]))
+
+
+@app.command("push")
+def push() -> None:
+    """Push the current branch to origin."""
+    _print_result("push", _run(["git", "push", "-u", "origin", "HEAD"], timeout=300))
+
+
+@app.command("merge")
+def merge(
+    branch: Annotated[
+        str, typer.Argument(help="Branch/ref to merge into the current branch.")
+    ],
+) -> None:
+    """Merge a branch/ref into the current branch."""
+    _print_result("merge", _run(["git", "merge", "--no-ff", branch], timeout=300))
+
+
+@app.command("commit")
+def commit(
+    message: Annotated[str, typer.Option("--message", "-m", help="Commit message.")],
+) -> None:
+    """Commit all current changes."""
+    add = _run(["git", "add", "-A"])
+    if add.returncode != 0:
+        _print_result("commit", add)
+        return
+    _print_result("commit", _run(["git", "commit", "-m", message], timeout=300))
+
+
+@app.command("pr-create")
+def pr_create(
+    base: Annotated[
+        str, typer.Option(help="Base branch for the pull request.")
+    ] = "main",
+    title: Annotated[str | None, typer.Option(help="Pull request title.")] = None,
+    body: Annotated[str | None, typer.Option(help="Pull request body.")] = None,
+) -> None:
+    """Create a GitHub pull request for the current branch."""
+    command = ["gh", "pr", "create", "--base", base]
+    if title:
+        command.extend(["--title", title])
+    if body:
+        command.extend(["--body", body])
+    if not title and not body:
+        command.append("--fill")
+    _print_result("pr_create", _run(command, timeout=300))

@@ -1,5 +1,11 @@
 """Coding harness primitives for Ash."""
 
-from ash.coding.jobs import CodingJob, CodingJobStore
+from ash.coding.jobs import (
+    CodingJob,
+    CodingJobStore,
+)
 
-__all__ = ["CodingJob", "CodingJobStore"]
+__all__ = [
+    "CodingJob",
+    "CodingJobStore",
+]

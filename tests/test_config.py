@@ -51,6 +51,8 @@ class TestSandboxConfig:
         assert config.dns_servers == []
         assert config.http_proxy is None
         assert config.workspace_access == "rw"
+        assert config.github_auth_access == "ro"
+        assert config.github_config_path.name == "gh"
 
     def test_gvisor_runtime(self):
         config = SandboxConfig(runtime="runsc")
