@@ -179,6 +179,7 @@ class TestTelegramProvider:
 def test_checkpoint_text_option_selection_accepts_common_replies():
     from ash.providers.telegram.handlers.checkpoint_handler import (
         _select_checkpoint_option,
+        _select_checkpoint_response,
     )
 
     assert _select_checkpoint_option("a", ["Call", "Cancel"]) == "Call"
@@ -186,6 +187,11 @@ def test_checkpoint_text_option_selection_accepts_common_replies():
     assert _select_checkpoint_option("approve", ["Proceed", "Cancel"]) == "Proceed"
     assert _select_checkpoint_option("no", ["Proceed", "Cancel"]) == "Cancel"
     assert _select_checkpoint_option("yes sf", ["Yes", "No"]) is None
+    assert (
+        _select_checkpoint_response("Roshan + yes, proceed", None)
+        == "Roshan + yes, proceed"
+    )
+    assert _select_checkpoint_response("yes sf", ["Yes", "No"]) is None
 
 
 class TestTelegramMessageHandler:
@@ -981,6 +987,75 @@ class TestTelegramMessageHandler:
         assert synthetic.metadata["is_checkpoint_response"] is True
         assert synthetic.metadata["checkpoint.id"] == checkpoint_id
         assert truncated_id not in handler._checkpoint_handler._pending_checkpoints
+
+    async def test_open_ended_checkpoint_reply_preserves_full_agent_context(
+        self, mock_provider, mock_agent, tmp_path
+    ):
+        """Free-text details resume the waiting agent instead of starting over."""
+        from ash.providers.base import IncomingMessage
+        from ash.providers.telegram.handlers import TelegramMessageHandler
+        from ash.sessions import SessionManager
+
+        handler = TelegramMessageHandler(
+            provider=mock_provider,
+            agent=mock_agent,
+            streaming=False,
+        )
+        checkpoint_id = "checkpoint_conduit_details_12345"
+        truncated_id = checkpoint_id[:55]
+        thread_id = "1729"
+        session_manager = SessionManager(
+            provider="telegram",
+            chat_id="456",
+            user_id="789",
+            thread_id=thread_id,
+            sessions_path=tmp_path,
+        )
+        await session_manager.ensure_session()
+        handler._session_handler._session_managers[session_manager.session_key] = (
+            session_manager
+        )
+        await session_manager.add_tool_use(
+            tool_use_id="tool_conduit",
+            name="use_agent",
+            input_data={
+                "agent": "conduit",
+                "message": "Call this number and ask when he is arriving.",
+            },
+        )
+        await session_manager.add_tool_result(
+            tool_use_id="tool_conduit",
+            output="Who is the recipient, and is tomorrow September 6?",
+            success=True,
+            metadata={
+                "checkpoint": {
+                    "checkpoint_id": checkpoint_id,
+                    "prompt": "Who is the recipient, and is tomorrow September 6?",
+                }
+            },
+        )
+        handler._checkpoint_handler._pending_checkpoints[truncated_id] = {
+            "session_key": session_manager.session_key,
+            "chat_id": "456",
+            "user_id": "789",
+            "thread_id": thread_id,
+            "agent_name": "conduit",
+            "original_message": "Call this number and ask when he is arriving.",
+        }
+        message = IncomingMessage(
+            id="1731",
+            chat_id="456",
+            user_id="789",
+            text="Roshan + yes, proceed",
+            metadata={"chat_type": "private", "thread_id": thread_id},
+        )
+        resume = AsyncMock()
+        handler._checkpoint_handler._resume_checkpoint_from_text = resume
+
+        assert await handler._checkpoint_handler.handle_text_response(message) is True
+        assert resume.await_args.kwargs["selected_option"] == ("Roshan + yes, proceed")
+        assert resume.await_args.kwargs["routing"]["agent_name"] == "conduit"
+        assert resume.await_args.kwargs["checkpoint"]["checkpoint_id"] == checkpoint_id
 
     async def test_external_callback_expired_answer_is_not_raised(
         self, mock_provider, mock_agent

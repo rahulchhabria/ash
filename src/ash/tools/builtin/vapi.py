@@ -15,11 +15,14 @@ from ash.config.models import VapiConfig
 from ash.tools.base import Tool, ToolContext, ToolResult
 
 E164_RE = re.compile(r"^\+[1-9][0-9]{7,14}$")
+UNRESOLVED_PLACEHOLDER_RE = re.compile(r"(?:<[^<>]{1,80}>|{{[^{}]{1,80}}})")
+CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x18\x1a-\x1f\x7f]")
 POLL_INTERVAL_SECONDS = 5
 POLL_TIMEOUT_SECONDS = 15 * 60
 
 logger = logging.getLogger(__name__)
 _BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
+_CALL_CREATION_LOCK = asyncio.Lock()
 ACTIVE_CALL_STATUSES = {"queued", "ringing", "in-progress", "forwarding"}
 
 
@@ -70,7 +73,17 @@ class VapiOutboundCallTool(Tool):
                 },
                 "customer_name": {
                     "type": "string",
-                    "description": "Optional name for the called party or business.",
+                    "description": (
+                        "Optional name of the person being called. This is the "
+                        "recipient, not the Telegram user placing the call."
+                    ),
+                },
+                "voicemail_message": {
+                    "type": "string",
+                    "description": (
+                        "Exact short message to leave only when the user explicitly "
+                        "approved leaving voicemail. Omit to hang up silently."
+                    ),
                 },
                 "approved": {
                     "type": "boolean",
@@ -100,18 +113,35 @@ class VapiOutboundCallTool(Tool):
         number = str(input_data.get("customer_number") or "").strip()
         if not E164_RE.fullmatch(number):
             return ToolResult.error("customer_number must use E.164 format")
-        objective = str(input_data.get("objective") or "").strip()
+        objective = _clean_voice_text(input_data.get("objective"), limit=2000)
         if not objective:
             return ToolResult.error("objective is required")
-        if len(objective) > 2000:
-            return ToolResult.error("objective must be 2000 characters or fewer")
+
+        business_name = _clean_voice_text(input_data.get("business_name"), limit=300)
+        call_context = _clean_voice_text(input_data.get("context"), limit=4000)
+        customer_name = _clean_voice_text(input_data.get("customer_name"), limit=300)
+        voicemail_message = _clean_voice_text(
+            input_data.get("voicemail_message"), limit=500
+        )
+        for field_name, value in (
+            ("objective", objective),
+            ("business_name", business_name),
+            ("context", call_context),
+            ("customer_name", customer_name),
+            ("voicemail_message", voicemail_message),
+        ):
+            if UNRESOLVED_PLACEHOLDER_RE.search(value):
+                return ToolResult.error(
+                    f"{field_name} contains an unresolved placeholder; replace it "
+                    "with the approved call detail before placing the call"
+                )
 
         variables = {
             "objective": objective,
             "ash_objective": objective,
-            "ash_business_name": str(input_data.get("business_name") or "")[:300],
-            "ash_context": str(input_data.get("context") or "")[:4000],
-            "ash_customer_name": str(input_data.get("customer_name") or "")[:300],
+            "ash_business_name": business_name,
+            "ash_context": call_context,
+            "ash_customer_name": customer_name,
         }
         if self._config.dry_run:
             summary = {
@@ -131,24 +161,47 @@ class VapiOutboundCallTool(Tool):
                 "Vapi outbound calling requires assistant_id and phone_number_id"
             )
 
+        assistant_overrides: dict[str, Any] = {
+            "variableValues": variables,
+            "firstMessageMode": "assistant-speaks-first-with-model-generated-message",
+        }
+        if voicemail_message:
+            assistant_overrides["voicemailMessage"] = voicemail_message
         payload = {
             "assistantId": self._config.assistant_id,
             "phoneNumberId": self._config.phone_number_id,
             "customer": {"number": number},
-            "assistantOverrides": {"variableValues": variables},
+            "assistantOverrides": assistant_overrides,
         }
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                response = await client.post(
-                    f"{self._config.base_url.rstrip('/')}/call",
-                    headers={
-                        "Authorization": f"Bearer {api_key.get_secret_value()}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-                response.raise_for_status()
-                result = response.json()
+                headers = {
+                    "Authorization": f"Bearer {api_key.get_secret_value()}",
+                    "Content-Type": "application/json",
+                }
+                base_url = self._config.base_url.rstrip("/")
+                async with _CALL_CREATION_LOCK:
+                    response = await client.get(
+                        f"{base_url}/call",
+                        headers=headers,
+                        params={"limit": 20},
+                    )
+                    response.raise_for_status()
+                    active_call = _active_call_to_number(
+                        response.json(), self._config, number
+                    )
+                    if active_call is not None:
+                        return ToolResult.error(
+                            "A call to this number is already active; no duplicate "
+                            f"was placed (call ID: {active_call.get('id')})"
+                        )
+                    response = await client.post(
+                        f"{base_url}/call",
+                        headers=headers,
+                        json=payload,
+                    )
+                    response.raise_for_status()
+                    result = response.json()
         except httpx.HTTPStatusError as exc:
             detail = exc.response.text[:500]
             return ToolResult.error(
@@ -415,6 +468,24 @@ def _latest_active_call(calls: Any, config: VapiConfig) -> dict[str, Any] | None
     return max(matching, key=lambda call: str(call.get("createdAt") or ""))
 
 
+def _active_call_to_number(
+    calls: Any, config: VapiConfig, customer_number: str
+) -> dict[str, Any] | None:
+    if not isinstance(calls, list):
+        return None
+    matching = []
+    for call in calls:
+        if not _is_configured_call(call, config):
+            continue
+        customer = call.get("customer")
+        if not isinstance(customer, dict) or customer.get("number") != customer_number:
+            continue
+        matching.append(call)
+    if not matching:
+        return None
+    return max(matching, key=lambda call: str(call.get("createdAt") or ""))
+
+
 def _is_configured_call(call: Any, config: VapiConfig) -> bool:
     return (
         isinstance(call, dict)
@@ -440,6 +511,25 @@ def _control_url(call: Any) -> str | None:
     ):
         return None
     return value
+
+
+def _clean_voice_text(value: Any, *, limit: int) -> str:
+    text = str(value or "")
+    text = text.translate(
+        str.maketrans(
+            {
+                "\x19": "'",
+                "\u2018": "'",
+                "\u2019": "'",
+                "\u201c": '"',
+                "\u201d": '"',
+                "\u2013": "-",
+                "\u2014": "-",
+            }
+        )
+    )
+    text = CONTROL_CHAR_RE.sub(" ", text)
+    return " ".join(text.split())[:limit].strip()
 
 
 def _render_call_summary(

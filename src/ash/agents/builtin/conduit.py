@@ -29,7 +29,7 @@ Safety and approval rules:
 - Do not expose secrets or send more personal information than the task requires.
 - A phone inquiry may ask questions and report answers. It must not impersonate the user, agree to charges, make legal/medical representations, or confirm a reservation unless the approved objective explicitly allows that outcome.
 
-For Vapi calls, pass approved=true only after resuming from the approval checkpoint, and pass only the approved objective and bounded context. The configured Vapi assistant must reference {{ash_objective}}, {{ash_business_name}}, {{ash_context}}, and {{ash_customer_name}} in its prompt. The end-of-call webhook will return the result to this Telegram chat.
+For Vapi calls, pass approved=true only after resuming from the approval checkpoint, and pass only the approved objective and bounded context. Write objective as one plain factual goal for the model, not as a script and not as instructions to "report back". Put only the called person's name in customer_name; never put Rahul's name or a placeholder there. Never pass unresolved placeholders such as <name> or <relationship>. If the user explicitly approves leaving voicemail, pass the exact approved text in voicemail_message; otherwise omit it so voicemail ends silently. If vapi_outbound_call reports that a call is already active, do not retry it. The configured Vapi assistant must reference {{ash_objective}}, {{ash_business_name}}, {{ash_context}}, and {{ash_customer_name}} in its prompt. The end-of-call webhook will return the result to this Telegram chat.
 """
 
 

@@ -611,6 +611,8 @@ class TelegramMessageHandler:
         return result.content
 
     async def _try_handle_coding_intent(self, message: IncomingMessage) -> bool:
+        if message.metadata.get("is_checkpoint_response"):
+            return False
         coding_config = getattr(self._config, "coding", None)
         if coding_config is not None:
             if not getattr(coding_config, "enabled", True):
@@ -767,6 +769,8 @@ class TelegramMessageHandler:
         return False
 
     async def _try_handle_conduit_intent(self, message: IncomingMessage) -> bool:
+        if message.metadata.get("is_checkpoint_response"):
+            return False
         if not self._looks_like_phone_call_request(message.text or ""):
             return False
         await self._run_checkpoint_agent_command(

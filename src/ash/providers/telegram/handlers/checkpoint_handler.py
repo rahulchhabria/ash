@@ -79,6 +79,16 @@ def _select_checkpoint_option(text: str, options: list[str]) -> str | None:
     return None
 
 
+def _select_checkpoint_response(text: str, options: Any) -> str | None:
+    """Return free text for open prompts, or a validated explicit option."""
+    response = text.strip()
+    if not response:
+        return None
+    if not isinstance(options, list) or not options:
+        return response
+    return _select_checkpoint_option(response, [str(option) for option in options])
+
+
 class CheckpointHandler:
     """Handles checkpoint storage and resume via inline keyboard callbacks.
 
@@ -182,8 +192,7 @@ class CheckpointHandler:
             if not result:
                 continue
             _, _, checkpoint = result
-            options = checkpoint.get("options") or ["Proceed", "Cancel"]
-            if _select_checkpoint_option(text, [str(o) for o in options]) is not None:
+            if _select_checkpoint_response(text, checkpoint.get("options")) is not None:
                 return routing.get("thread_id")
 
         return None
@@ -279,8 +288,9 @@ class CheckpointHandler:
             if not result:
                 continue
             _, _, checkpoint = result
-            options = checkpoint.get("options") or ["Proceed", "Cancel"]
-            selected_option = _select_checkpoint_option(text, [str(o) for o in options])
+            selected_option = _select_checkpoint_response(
+                text, checkpoint.get("options")
+            )
             if selected_option is None:
                 return False
 

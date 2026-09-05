@@ -297,6 +297,25 @@ async def test_telegram_plain_call_request_auto_routes_to_conduit():
     )
 
 
+@pytest.mark.asyncio
+async def test_telegram_checkpoint_response_does_not_start_fresh_conduit():
+    handler = TelegramMessageHandler.__new__(TelegramMessageHandler)
+    handler._run_checkpoint_agent_command = AsyncMock()
+
+    message = IncomingMessage(
+        id="m1",
+        chat_id="c1",
+        user_id="u1",
+        text="approve call",
+        metadata={"is_checkpoint_response": True},
+    )
+
+    result = await handler._try_handle_conduit_intent(message)
+
+    assert result is False
+    handler._run_checkpoint_agent_command.assert_not_awaited()
+
+
 def test_telegram_plain_call_request_detector_is_narrow():
     handler = TelegramMessageHandler.__new__(TelegramMessageHandler)
 

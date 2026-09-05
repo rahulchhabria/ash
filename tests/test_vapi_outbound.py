@@ -91,6 +91,10 @@ async def test_vapi_outbound_creates_call(monkeypatch) -> None:
         async def __aexit__(self, *args):
             return None
 
+        async def get(self, url, *, headers, params):
+            captured["preflight"] = (url, headers, params)
+            return FakeResponse()
+
         async def post(self, url, *, headers, json):
             captured.update(url=url, headers=headers, payload=json)
             return FakeResponse()
@@ -127,7 +131,150 @@ async def test_vapi_outbound_creates_call(monkeypatch) -> None:
         captured["payload"]["assistantOverrides"]["variableValues"]["objective"]
         == "Ask whether walk-ins are accepted"
     )
+    assert captured["payload"]["assistantOverrides"]["firstMessageMode"] == (
+        "assistant-speaks-first-with-model-generated-message"
+    )
+    assert captured["preflight"][0] == "https://api.vapi.ai/call"
     assert "key" not in result.content
+
+
+@pytest.mark.asyncio
+async def test_vapi_outbound_cleans_voice_text_and_passes_voicemail(
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    class FakeResponse:
+        def __init__(self, payload=None):
+            self._payload = [] if payload is None else payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, *, headers, params):
+            return FakeResponse()
+
+        async def post(self, url, *, headers, json):
+            captured["payload"] = json
+            return FakeResponse({"id": "call-123", "status": "queued"})
+
+    monkeypatch.setattr(
+        "ash.tools.builtin.vapi.httpx.AsyncClient",
+        lambda **kwargs: FakeClient(),
+    )
+    config = VapiConfig(
+        enabled=True,
+        api_key=SecretStr("key"),
+        assistant_id="assistant",
+        phone_number_id="phone",
+    )
+
+    result = await VapiOutboundCallTool(config).execute(
+        {
+            "customer_number": "+14155550100",
+            "objective": "Ask when he\x19s arriving\u2014then confirm.",
+            "context": "Keep it\nbrief.",
+            "customer_name": "Roshan",
+            "voicemail_message": "Hi\u2014Rahul called. Please call back.",
+            "approved": True,
+        },
+        ToolContext(provider="telegram"),
+    )
+
+    assert not result.is_error
+    overrides = captured["payload"]["assistantOverrides"]
+    assert overrides["variableValues"]["ash_objective"] == (
+        "Ask when he's arriving-then confirm."
+    )
+    assert overrides["variableValues"]["ash_context"] == "Keep it brief."
+    assert overrides["voicemailMessage"] == "Hi-Rahul called. Please call back."
+
+
+@pytest.mark.asyncio
+async def test_vapi_outbound_rejects_unresolved_placeholders() -> None:
+    config = VapiConfig(enabled=True, dry_run=True)
+
+    result = await VapiOutboundCallTool(config).execute(
+        {
+            "customer_number": "+14155550100",
+            "objective": "Ask Roshan what time he is arriving",
+            "context": "Say this is <name>, <relationship>.",
+            "approved": True,
+        },
+        ToolContext(provider="telegram"),
+    )
+
+    assert result.is_error
+    assert "unresolved placeholder" in result.content
+
+
+@pytest.mark.asyncio
+async def test_vapi_outbound_blocks_duplicate_active_call(monkeypatch) -> None:
+    post = AsyncMock()
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return [
+                {
+                    "id": "call-active",
+                    "status": "in-progress",
+                    "assistantId": "assistant",
+                    "phoneNumberId": "phone",
+                    "customer": {"number": "+14155550100"},
+                    "createdAt": "2026-09-05T17:44:50Z",
+                }
+            ]
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, *, headers, params):
+            return FakeResponse()
+
+        async def post(self, url, *, headers, json):
+            return await post(url, headers=headers, json=json)
+
+    monkeypatch.setattr(
+        "ash.tools.builtin.vapi.httpx.AsyncClient",
+        lambda **kwargs: FakeClient(),
+    )
+    config = VapiConfig(
+        enabled=True,
+        api_key=SecretStr("key"),
+        assistant_id="assistant",
+        phone_number_id="phone",
+    )
+
+    result = await VapiOutboundCallTool(config).execute(
+        {
+            "customer_number": "+14155550100",
+            "objective": "Ask about hours",
+            "approved": True,
+        },
+        ToolContext(provider="telegram"),
+    )
+
+    assert result.is_error
+    assert "already active" in result.content
+    assert "call-active" in result.content
+    post.assert_not_awaited()
 
 
 def test_vapi_call_summary_includes_actions() -> None:
