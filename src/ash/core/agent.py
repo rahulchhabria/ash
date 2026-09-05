@@ -1228,6 +1228,7 @@ async def create_agent(
         RememberTool,
         RepoTool,
         SearchMemoriesTool,
+        VapiEndCallTool,
         VapiOutboundCallTool,
         WebFetchTool,
         WebSearchTool,
@@ -1342,7 +1343,18 @@ async def create_agent(
 
     tool_executor = ToolExecutor(tool_registry)
     tool_registry.register(DeepResearchTool(tool_executor=tool_executor, config=config))
-    tool_registry.register(VapiOutboundCallTool(config.vapi))
+    telegram_bot_token = (
+        config.telegram.bot_token.get_secret_value()
+        if config.telegram and config.telegram.bot_token
+        else None
+    )
+    tool_registry.register(
+        VapiOutboundCallTool(
+            config.vapi,
+            telegram_bot_token=telegram_bot_token,
+        )
+    )
+    tool_registry.register(VapiEndCallTool(config.vapi))
     logger.info("tools_registered", extra={"count": len(tool_registry)})
 
     agent_registry = AgentRegistry()

@@ -10,6 +10,7 @@ import logging
 import re
 import uuid
 from collections.abc import Callable, Coroutine
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from ash.providers.base import IncomingMessage, OutgoingMessage
@@ -94,6 +95,7 @@ class CheckpointHandler:
         get_session_managers_dict: Callable[[], dict[str, SessionManager]],
         get_thread_index: Callable[[str], ThreadIndex],
         handle_message: Callable[[IncomingMessage], Coroutine[Any, Any, None]],
+        mark_active_thread: Callable[[str, str | None], None] | None = None,
         config: AshConfig | None = None,
         agent_registry: AgentRegistry | None = None,
         skill_registry: SkillRegistry | None = None,
@@ -104,6 +106,7 @@ class CheckpointHandler:
         self._get_session_managers_dict = get_session_managers_dict
         self._get_thread_index = get_thread_index
         self._handle_message = handle_message
+        self._mark_active_thread = mark_active_thread
         self._config = config
         self._agent_registry = agent_registry
         self._skill_registry = skill_registry
@@ -150,8 +153,40 @@ class CheckpointHandler:
             "agent_name": agent_name,
             "original_message": original_message,
         }
+        if self._mark_active_thread:
+            self._mark_active_thread(message.chat_id, thread_id)
 
         return truncated_id
+
+    async def resolve_text_response_thread(
+        self, message: IncomingMessage
+    ) -> str | None:
+        """Return the originating thread for an unambiguous checkpoint reply."""
+        if message.metadata.get("thread_id"):
+            return None
+
+        text = (message.text or "").strip()
+        if not text or not self._pending_checkpoints:
+            return None
+
+        for truncated_id, routing in reversed(self._pending_checkpoints.items()):
+            if routing.get("chat_id") != message.chat_id:
+                continue
+            if routing.get("user_id") != message.user_id:
+                continue
+
+            session_manager = self._get_session_manager(
+                routing["chat_id"], routing["user_id"], routing.get("thread_id")
+            )
+            result = await session_manager.get_pending_checkpoint_from_log(truncated_id)
+            if not result:
+                continue
+            _, _, checkpoint = result
+            options = checkpoint.get("options") or ["Proceed", "Cancel"]
+            if _select_checkpoint_option(text, [str(o) for o in options]) is not None:
+                return routing.get("thread_id")
+
+        return None
 
     async def get_checkpoint(
         self,
@@ -286,20 +321,24 @@ class CheckpointHandler:
         has_agent_context = agent_name and original_message and checkpoint_id
         has_tool_registry = self._tool_registry and self._tool_registry.has("use_agent")
         if not has_agent_context or not has_tool_registry:
-            logger.warning(
-                "checkpoint_text_response_missing_resume_context",
-                extra={"checkpoint.id": truncated_id},
+            logger.info(
+                "checkpoint_text_response_via_message_flow",
+                extra={"checkpoint.id": truncated_id[:20]},
             )
-            await self._provider.send(
-                OutgoingMessage(
-                    chat_id=chat_id,
-                    text=(
-                        "I found that approval, but its execution context is missing. "
-                        "Please restart the action with /do so I can checkpoint it cleanly."
-                    ),
-                    reply_to_message_id=message.id,
-                )
+            self.clear_checkpoint(truncated_id)
+            metadata = {
+                **message.metadata,
+                "is_checkpoint_response": True,
+                "checkpoint.id": checkpoint_id,
+            }
+            if thread_id:
+                metadata["thread_id"] = thread_id
+            synthetic_message = replace(
+                message,
+                text=selected_option,
+                metadata=metadata,
             )
+            await self._handle_message(synthetic_message)
             return
 
         assert checkpoint_id is not None

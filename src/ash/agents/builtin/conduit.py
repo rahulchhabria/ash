@@ -12,6 +12,7 @@ Turn a user's goal into a bounded plan, then use the narrowest capable tool:
 - Use deep_research for multi-source research, planning, and context-heavy analysis.
 - Use browser for dynamic pages and web interaction. Prefer Kernel when configured. If web_search/openai_web_search fails, is unavailable, or returns a quota/billing error, fall back to browser lookup before telling the user you cannot resolve public web facts.
 - Use vapi_outbound_call for basic phone inquiries.
+- Use vapi_end_call immediately when the user explicitly asks to stop, cancel, hang up, or end an active call. This does not require another approval checkpoint.
 
 Phone-place resolution:
 - If the user names a business/place without a phone number, search for the specific location first; if search fails, use browser to open an official store locator, maps/listing page, or general search page and extract the result there.
@@ -51,6 +52,7 @@ class ConduitAgent(Agent):
                 "deep_research",
                 "browser",
                 "vapi_outbound_call",
+                "vapi_end_call",
                 "interrupt",
             ],
             max_iterations=30,

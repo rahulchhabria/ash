@@ -153,6 +153,11 @@ class TelegramMessageHandler:
             get_session_managers_dict=lambda: self._session_handler._session_managers,
             get_thread_index=self._session_handler.get_thread_index,
             handle_message=self.handle_message,
+            mark_active_thread=lambda chat_id, thread_id: (
+                self._session_handler.mark_active_thread(
+                    chat_id, thread_id, reason="pending_checkpoint"
+                )
+            ),
             config=config,
             agent_registry=agent_registry,
             skill_registry=skill_registry,
@@ -1134,6 +1139,12 @@ class TelegramMessageHandler:
                     f"Skipping reply {message.id} - target not in conversation"
                 )
                 return
+
+            checkpoint_thread_id = (
+                await self._checkpoint_handler.resolve_text_response_thread(message)
+            )
+            if checkpoint_thread_id:
+                message.metadata["thread_id"] = checkpoint_thread_id
 
             # Resolve thread from reply chain for groups (before any processing)
             thread_id = await self._session_handler.resolve_reply_chain_thread(message)

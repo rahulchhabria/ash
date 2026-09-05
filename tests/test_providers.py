@@ -902,6 +902,86 @@ class TestTelegramMessageHandler:
         # Verify the callback was answered
         mock_callback.answer.assert_called()
 
+    async def test_plain_text_checkpoint_reply_keeps_originating_thread(
+        self, mock_provider, mock_agent, tmp_path
+    ):
+        """Plain approve resumes a main-agent checkpoint in its original DM thread."""
+        from unittest.mock import AsyncMock
+
+        from ash.providers.base import IncomingMessage
+        from ash.providers.telegram.handlers import TelegramMessageHandler
+        from ash.sessions import SessionManager
+
+        handler = TelegramMessageHandler(
+            provider=mock_provider,
+            agent=mock_agent,
+            streaming=False,
+        )
+        checkpoint_id = "checkpoint_main_agent_12345"
+        truncated_id = checkpoint_id[:55]
+        thread_id = "1706"
+        session_manager = SessionManager(
+            provider="telegram",
+            chat_id="456",
+            user_id="789",
+            thread_id=thread_id,
+            sessions_path=tmp_path,
+        )
+        await session_manager.ensure_session()
+        handler._session_handler._session_managers[session_manager.session_key] = (
+            session_manager
+        )
+        await session_manager.add_tool_use(
+            tool_use_id="tool_main",
+            name="interrupt",
+            input_data={"prompt": "Approve this call?"},
+        )
+        await session_manager.add_tool_result(
+            tool_use_id="tool_main",
+            output="Approve this call?",
+            success=True,
+            metadata={
+                "checkpoint": {
+                    "checkpoint_id": checkpoint_id,
+                    "prompt": "Approve this call?",
+                    "options": ["approve", "change script", "cancel"],
+                }
+            },
+        )
+        handler._checkpoint_handler._pending_checkpoints[truncated_id] = {
+            "session_key": session_manager.session_key,
+            "chat_id": "456",
+            "user_id": "789",
+            "thread_id": thread_id,
+            "agent_name": None,
+            "original_message": None,
+        }
+        message = IncomingMessage(
+            id="1710",
+            chat_id="456",
+            user_id="789",
+            text="approve",
+            metadata={"chat_type": "private"},
+        )
+
+        resolved = await handler._checkpoint_handler.resolve_text_response_thread(
+            message
+        )
+        assert resolved == thread_id
+        message.metadata["thread_id"] = resolved
+
+        fallback = AsyncMock()
+        handler._checkpoint_handler._handle_message = fallback
+        assert await handler._checkpoint_handler.handle_text_response(message) is True
+
+        synthetic = fallback.await_args.args[0]
+        assert synthetic.id == message.id
+        assert synthetic.text == "approve"
+        assert synthetic.metadata["thread_id"] == thread_id
+        assert synthetic.metadata["is_checkpoint_response"] is True
+        assert synthetic.metadata["checkpoint.id"] == checkpoint_id
+        assert truncated_id not in handler._checkpoint_handler._pending_checkpoints
+
     async def test_external_callback_expired_answer_is_not_raised(
         self, mock_provider, mock_agent
     ):
