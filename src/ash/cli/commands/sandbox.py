@@ -202,7 +202,7 @@ def _sandbox_build(dockerfile_path: Path, config_path: Path | None = None) -> bo
                 )
         console.print()
         success("Sandbox image built successfully!")
-        console.print("You can now use the sandbox with [cyan]ash chat[/cyan]")
+        console.print("You can now use the sandbox with [cyan]pigeon chat[/cyan]")
         return True
     else:
         console.print()

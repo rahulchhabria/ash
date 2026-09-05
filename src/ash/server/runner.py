@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import signal as signal_module
 import time
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Protocol
 
 import uvicorn
@@ -26,6 +28,14 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_HANDLER_POLL_INTERVAL_SECONDS = 0.1
 TELEGRAM_HANDLER_WAIT_TIMEOUT_SECONDS = 60.0
+
+
+class _AshUvicornServer(uvicorn.Server):
+    """Uvicorn server variant whose signals are managed by ServerRunner."""
+
+    @contextlib.contextmanager
+    def capture_signals(self) -> Iterator[None]:
+        yield
 
 
 class ServerRunner:
@@ -53,36 +63,32 @@ class ServerRunner:
             log_level="info",
             log_config=None,  # Use shared logging config, not uvicorn's
         )
-        server = uvicorn.Server(uvicorn_config)
+        server = _AshUvicornServer(uvicorn_config)
 
         # Track tasks for cleanup
         telegram_task: asyncio.Task | None = None
 
         # Set up signal handlers for graceful shutdown
         loop = asyncio.get_running_loop()
-        shutdown_count = 0
+        shutdown_started = False
 
         def handle_signal() -> None:
-            nonlocal shutdown_count
-            shutdown_count += 1
+            nonlocal shutdown_started
 
-            if shutdown_count == 1:
-                # First signal: graceful shutdown
-                logger.info("server_shutting_down")
-                server.should_exit = True
-                # Stop telegram polling before cancelling task
-                provider = self._telegram_provider
-                if provider:
-                    loop.call_soon(lambda: asyncio.create_task(provider.stop()))
-                # Cancel telegram task after stop is scheduled
-                if telegram_task and not telegram_task.done():
-                    telegram_task.cancel()
-            else:
-                # Second signal: force immediate exit
-                logger.warning("server_force_shutdown")
-                import os
+            if shutdown_started:
+                logger.info("server_shutdown_already_started")
+                return
 
-                os._exit(1)
+            shutdown_started = True
+            logger.info("server_shutting_down")
+            server.should_exit = True
+            # Stop telegram polling before cancelling task.
+            provider = self._telegram_provider
+            if provider:
+                loop.call_soon(lambda: asyncio.create_task(provider.stop()))
+            # Cancel telegram task after stop is scheduled.
+            if telegram_task and not telegram_task.done():
+                telegram_task.cancel()
 
         for sig in (signal_module.SIGTERM, signal_module.SIGINT):
             loop.add_signal_handler(sig, handle_signal)

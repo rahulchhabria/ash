@@ -35,8 +35,11 @@ if TYPE_CHECKING:
 class _AshToDeepAgentBackendAdapter:
     """Thin adapter so AshFilesystemBackend satisfies deepagents BackendProtocol."""
 
-    def __init__(self, root: Path | None = None):
-        self._backend = AshFilesystemBackend(root=root or get_workspace_path())
+    def __init__(self, root: Path | None = None, *, read_only: bool = True):
+        self._backend = AshFilesystemBackend(
+            root=root or get_workspace_path(),
+            read_only=read_only,
+        )
         self._root = self._backend.root
 
     # --- sync surface (BackendProtocol requires sync + async) ---
@@ -320,9 +323,11 @@ class DeepAgentsRunner:
     """
 
     model: str = "openai:gpt-5.1"
-    system_prompt: str = "You are a focused deep work subagent for Ash."
+    system_prompt: str = "You are a focused deep work subagent for Pigeon."
     tools: list[Any] = field(default_factory=list)
     workspace_path: Path | None = None
+    filesystem_mode: str = "read_only"
+    builtin_subagents: bool = True
     extra_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def create(self) -> Any:
@@ -332,7 +337,15 @@ class DeepAgentsRunner:
         # Wire the AshFilesystemBackend as a DeepAgents BackendProtocol adapter
         # if no backend was provided and a workspace_path is configured.
         if kwargs.get("backend") is None and self.workspace_path is not None:
-            kwargs["backend"] = _AshToDeepAgentBackendAdapter(root=self.workspace_path)
+            kwargs["backend"] = _AshToDeepAgentBackendAdapter(
+                root=self.workspace_path,
+                read_only=self.filesystem_mode != "read_write",
+            )
+        if self.builtin_subagents and kwargs.get("subagents") is None:
+            kwargs["subagents"] = build_default_orchestration_subagents(
+                model=self._normalize_model(self.model),
+                tools=self.tools,
+            )
         # Normalize the model string: langchain needs a known provider prefix
         # (e.g. "openai:gpt-5.6") to infer the provider.  Bare model IDs won't
         # work.  If no provider prefix is detected, wrap with "openai:".
@@ -362,6 +375,67 @@ class DeepAgentsRunner:
         else:
             result = await asyncio.to_thread(agent.invoke, payload)
         return _extract_text(result)
+
+
+def build_default_orchestration_subagents(
+    *,
+    model: str,
+    tools: list[Any],
+) -> list[dict[str, Any]]:
+    """Return Ash's default Deep Agents subagent profiles.
+
+    These subagents are intentionally read/research oriented. Ash remains the
+    boundary for side-effecting tools, memory, Telegram, and external services.
+    """
+    concise_output = (
+        "Return only the findings needed by the parent agent. Do not include raw "
+        "tool dumps, hidden chain-of-thought, or unrelated context. State important "
+        "uncertainties and sources."
+    )
+    return [
+        {
+            "name": "general-purpose",
+            "description": (
+                "Handle bounded multi-step investigation, comparison, or planning "
+                "tasks while keeping intermediate context isolated."
+            ),
+            "system_prompt": (
+                "You are Pigeon's general-purpose orchestration subagent. Break down "
+                "the task, inspect only relevant context, and return a concise "
+                f"actionable result.\n\n{concise_output}"
+            ),
+            "tools": tools,
+            "model": model,
+        },
+        {
+            "name": "researcher",
+            "description": (
+                "Research current or multi-source questions and return a cited, "
+                "decision-ready summary."
+            ),
+            "system_prompt": (
+                "You are Pigeon's research subagent. Use available search/fetch/read "
+                "tools to verify facts. Prefer primary sources. Keep the final "
+                f"answer under 700 words unless the parent asks otherwise.\n\n{concise_output}"
+            ),
+            "tools": tools,
+            "model": model,
+        },
+        {
+            "name": "planner",
+            "description": (
+                "Turn an ambiguous multi-step user goal into a concrete execution "
+                "plan with assumptions, blockers, and next actions."
+            ),
+            "system_prompt": (
+                "You are Pigeon's planning subagent. Produce a practical plan that "
+                "separates reversible steps from actions requiring user approval. "
+                f"{concise_output}"
+            ),
+            "tools": [],
+            "model": model,
+        },
+    ]
 
 
 @dataclass(slots=True)
@@ -402,6 +476,7 @@ class AshFilesystemBackend:
     """
 
     root: Path = field(default_factory=get_workspace_path)
+    read_only: bool = False
 
     def _resolve(self, path: str | Path) -> Path:
         candidate = self._normalize_virtual_path(path)
@@ -454,6 +529,9 @@ class AshFilesystemBackend:
     async def write_file(
         self, path: str, content: str, *, overwrite: bool = True
     ) -> str:
+        if self.read_only:
+            raise PermissionError("DeepAgents filesystem is read-only")
+
         def _write() -> str:
             resolved = self._resolve(path)
             if not overwrite and resolved.exists():
@@ -700,13 +778,13 @@ class TelegramHITLApprover:
 
 @dataclass(slots=True)
 class DeepAgentsCodeHelper:
-    """Instructions for installing/running Deep Agents Code beside Ash (#10)."""
+    """Instructions for installing/running Deep Agents Code beside Pigeon (#10)."""
 
     workspace: Path = field(default_factory=get_workspace_path)
 
     def instructions(self) -> str:
         return (
-            "Deep Agents Code can run alongside Ash for terminal coding tasks.\n\n"
+            "Deep Agents Code can run alongside Pigeon for terminal coding tasks.\n\n"
             "Install:\n"
             "  1. Open https://docs.langchain.com/deep-agents in a browser.\n"
             "  2. Follow the documented Deep Agents Code installation steps for your platform.\n"
@@ -714,9 +792,9 @@ class DeepAgentsCodeHelper:
             "     remote scripts directly into a shell without explicit confirmation.\n\n"
             "Suggested handoff workspace:\n"
             f"  {self.workspace}\n\n"
-            "Keep Ash as the memory/personality/Telegram orchestrator and use Deep Agents "
+            "Keep Pigeon as the memory/personality/Telegram orchestrator and use Deep Agents "
             "Code for focused repository edits. Store handoff briefs and artifacts under "
-            "the Ash workspace so both tools can see them."
+            "the Pigeon workspace so both tools can see them."
         )
 
 
@@ -724,9 +802,9 @@ def build_workspace_system_prompt(base: str, workspace: Path | None = None) -> s
     workspace = workspace or get_workspace_path()
     return (
         f"{base}\n\n"
-        "## Ash Integration Contract\n"
+        "## Pigeon Integration Contract\n"
         f"- Treat {workspace} as the shared filesystem of record.\n"
-        "- Prefer Ash-provided tools/backends for shell, files, memory, and approvals.\n"
+        "- Prefer Pigeon-provided tools/backends for shell, files, memory, and approvals.\n"
         "- Return a concise final answer plus paths to any artifacts you created."
     )
 

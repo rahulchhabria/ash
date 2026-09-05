@@ -218,7 +218,7 @@ class CapabilityManager:
                         "allowed_chat_types": _effective_allowed_chat_types(definition),
                         "available": allowed,
                         "requires_auth": requires_auth,
-                        "authenticated": bool(linked_accounts),
+                        "authenticated": (not requires_auth) or bool(linked_accounts),
                         "linked_accounts": linked_accounts,
                         "operations": sorted(definition.operations),
                     }

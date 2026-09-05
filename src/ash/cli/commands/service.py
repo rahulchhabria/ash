@@ -62,7 +62,7 @@ def _auto_build_sandbox() -> None:
 def register(app: typer.Typer) -> None:
     """Register service subcommands."""
     service_app = typer.Typer(
-        help="Manage the Ash background service", no_args_is_help=True
+        help="Manage the Pigeon background service", no_args_is_help=True
     )
     app.add_typer(service_app, name="service")
 
@@ -77,7 +77,7 @@ def register(app: typer.Typer) -> None:
             ),
         ] = False,
     ) -> None:
-        """Start the Ash service."""
+        """Start the Pigeon service."""
         _auto_build_sandbox()
 
         if foreground:
@@ -93,18 +93,18 @@ def register(app: typer.Typer) -> None:
 
     @service_app.command("stop")
     def service_stop() -> None:
-        """Stop the Ash service."""
+        """Stop the Pigeon service."""
         _run_service_action("stop")
 
     @service_app.command("restart")
     def service_restart() -> None:
-        """Restart the Ash service."""
+        """Restart the Pigeon service."""
         _auto_build_sandbox()
         _run_service_action("restart")
 
     @service_app.command("status")
     def service_status() -> None:
-        """Show Ash service status."""
+        """Show Pigeon service status."""
         from ash.cli.console import create_table
         from ash.service import ServiceManager, ServiceState, read_runtime_state
 
@@ -114,7 +114,7 @@ def register(app: typer.Typer) -> None:
 
         # Build status display
         table = create_table(
-            "Ash Service Status",
+            "Pigeon Service Status",
             [
                 ("Property", "cyan"),
                 ("Value", ""),
@@ -199,10 +199,10 @@ def register(app: typer.Typer) -> None:
 
     @service_app.command("install")
     def service_install() -> None:
-        """Install Ash as an auto-starting service."""
+        """Install Pigeon as an auto-starting service."""
         _run_service_action("install")
 
     @service_app.command("uninstall")
     def service_uninstall() -> None:
-        """Remove Ash from auto-starting services."""
+        """Remove Pigeon from auto-starting services."""
         _run_service_action("uninstall")

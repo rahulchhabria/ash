@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_GLINER_MODEL = "fastino/gliner2-base-v1"
-DEFAULT_EMAIL_SUBJECT_PREFIX = "[Ash Research]"
+DEFAULT_EMAIL_SUBJECT_PREFIX = "[Pigeon Research]"
 DEFAULT_GLINER_LABELS: dict[str, str] = {
     "person": "Named person or author",
     "organization": "Company, institution, standards body, or vendor",

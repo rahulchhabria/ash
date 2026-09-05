@@ -132,13 +132,6 @@ class SandboxConfig(BaseModel):
     # Access: "none" = not mounted, "ro" = read-only, "rw" = read-write
     workspace_access: Literal["none", "ro", "rw"] = "rw"
 
-    # GitHub CLI auth mounting into sandbox.
-    # Access: "none" = do not mount host gh auth, "ro" = read-only auth.
-    github_auth_access: Literal["none", "ro"] = "ro"
-    github_config_path: Path = Field(
-        default_factory=lambda: Path.home() / ".config" / "gh"
-    )
-
     # Sessions mounting into sandbox (for agent to read chat history)
     # Mounted at /sessions in the container
     sessions_access: Literal["none", "ro"] = "ro"
@@ -264,9 +257,15 @@ class VapiConfig(BaseModel):
     """Configuration for Vapi voicemail webhook ingestion."""
 
     enabled: bool = False
+    dry_run: bool = False
     telegram_chat_id: str | None = None
     telegram_user_id: str | None = None
     webhook_secret: SecretStr | None = None
+    auth_required: bool = True
+    api_key: SecretStr | None = None
+    assistant_id: str | None = None
+    phone_number_id: str | None = None
+    base_url: str = "https://api.vapi.ai"
 
 
 class CloseGameAlertConfig(BaseModel):
@@ -325,6 +324,71 @@ class ReactiveWorkflowConfig(BaseModel):
 
     enabled: bool = False
     rules: list[ReactiveWorkflowRule] = Field(default_factory=list)
+
+
+class ContextFirewallConfig(BaseModel):
+    """Policy for integration-supplied context injection."""
+
+    enabled: bool = True
+    allowed_triggers: list[str] = Field(default_factory=lambda: ["reply", "explicit"])
+    allowed_integrations: list[str] = Field(default_factory=list)
+    blocked_integrations: list[str] = Field(default_factory=list)
+
+
+class CapabilityPermissionsConfig(BaseModel):
+    """Allow/block list for sensitive and external capability IDs."""
+
+    allowed: list[str] = Field(default_factory=list)
+    blocked: list[str] = Field(default_factory=lambda: ["gog.calendar"])
+
+
+class DashboardConfig(BaseModel):
+    """Local operational dashboard config."""
+
+    enabled: bool = True
+
+
+class EventRouterConfig(BaseModel):
+    """Sanitized external event intake config."""
+
+    enabled: bool = True
+    bearer_token: SecretStr | None = None
+    auth_required: bool = True
+    max_body_chars: int = Field(default=8000, ge=100, le=50_000)
+    allowed_sources: list[str] = Field(default_factory=list)
+
+
+class DeepAgentsConfig(BaseModel):
+    """Policy for LangChain Deep Agents orchestration inside Ash."""
+
+    enabled: bool = True
+    model: str = "openai:gpt-5.1"
+    filesystem_mode: Literal["read_only", "read_write"] = "read_only"
+    builtin_subagents: bool = True
+    allowed_tools: list[str] = Field(
+        default_factory=lambda: [
+            "web_search",
+            "web_fetch",
+            "read_file",
+            "ash_triage_guidance",
+        ]
+    )
+    max_task_chars: int = Field(default=12_000, ge=100, le=100_000)
+
+
+class SkillPackagesConfig(BaseModel):
+    """Metadata scanner for local skill packages."""
+
+    enabled: bool = True
+
+
+class MemoryHygieneConfig(BaseModel):
+    """Memory inspection and retrieval hygiene config."""
+
+    enabled: bool = True
+    sensitive_source_prefixes: list[str] = Field(
+        default_factory=lambda: ["email", "gmail", "calendar"]
+    )
 
 
 class CapabilityProviderConfig(BaseModel):
@@ -408,7 +472,7 @@ class BrowserKernelConfig(BaseModel):
     """Kernel provider config for browser integration."""
 
     api_key: SecretStr | None = None
-    base_url: str = "https://api.kernel.sh"
+    base_url: str = "https://api.onkernel.com"
     project_id: str | None = None
 
 
@@ -433,6 +497,9 @@ class CodingConfig(BaseModel):
     enabled: bool = True
     model: str = "codex"
     default_repo_path: str = "/workspace"
+    projects_root: str = "/workspace/projects"
+    auto_route_enabled: bool = True
+    github_token_env: str = "GH_TOKEN"  # noqa: S105 - environment variable name, not a secret
     require_approval_for: list[str] = Field(
         default_factory=lambda: [
             "deploy",
@@ -638,6 +705,17 @@ class AshConfig(BaseModel):
     reactive_workflows: ReactiveWorkflowConfig = Field(
         default_factory=ReactiveWorkflowConfig
     )
+    context_firewall: ContextFirewallConfig = Field(
+        default_factory=ContextFirewallConfig
+    )
+    capability_permissions: CapabilityPermissionsConfig = Field(
+        default_factory=CapabilityPermissionsConfig
+    )
+    dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
+    event_router: EventRouterConfig = Field(default_factory=EventRouterConfig)
+    deepagents: DeepAgentsConfig = Field(default_factory=DeepAgentsConfig)
+    skill_packages: SkillPackagesConfig = Field(default_factory=SkillPackagesConfig)
+    memory_hygiene: MemoryHygieneConfig = Field(default_factory=MemoryHygieneConfig)
     capabilities: CapabilitiesConfig = Field(default_factory=CapabilitiesConfig)
     tool_output_trust: ToolOutputTrustConfig = Field(
         default_factory=ToolOutputTrustConfig

@@ -70,7 +70,7 @@ def test_validate_model_credentials_raises_when_oauth_missing(
         _validate_model_credentials(cfg, "default")
 
     assert messages == [
-        "No OAuth credentials for openai-oauth. Run 'ash auth login' first."
+        "No OAuth credentials for openai-oauth. Run 'pigeon auth login' first."
     ]
 
 
@@ -121,4 +121,4 @@ def test_new_cli_session_state_sets_private_chat_context() -> None:
     assert session.chat_id == "local"
     assert session.user_id == "local-user"
     assert session.context.chat_type == "private"
-    assert session.context.chat_title == "Ash CLI"
+    assert session.context.chat_title == "Pigeon CLI"

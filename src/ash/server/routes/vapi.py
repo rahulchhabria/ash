@@ -14,17 +14,22 @@ logger = logging.getLogger("vapi")
 router = APIRouter()
 
 
+@router.post("/vapi/webhook", include_in_schema=False)
 @router.post("/webhooks/vapi")
 async def vapi_webhook(
     request: Request, background_tasks: BackgroundTasks
 ) -> dict[str, str]:
-    """Receive Vapi server messages and submit voicemails to Ash."""
+    """Receive Vapi server messages and submit voicemails to Pigeon."""
     config = getattr(request.app.state, "config", None)
     vapi_config = getattr(config, "vapi", None)
     if vapi_config is None or not vapi_config.enabled:
         raise HTTPException(status_code=404, detail="Vapi webhook is not enabled")
 
-    _verify_secret(request, vapi_config.webhook_secret)
+    _verify_secret(
+        request,
+        vapi_config.webhook_secret,
+        auth_required=vapi_config.auth_required,
+    )
 
     try:
         payload = await request.json()
@@ -49,7 +54,7 @@ async def vapi_webhook(
 
     server = getattr(request.app.state, "server", None)
     if server is None:
-        raise HTTPException(status_code=503, detail="Ash server is unavailable")
+        raise HTTPException(status_code=503, detail="Pigeon server is unavailable")
     handler = await server.get_telegram_handler()
     if handler is None:
         raise HTTPException(status_code=503, detail="Telegram handler is unavailable")
@@ -59,8 +64,18 @@ async def vapi_webhook(
     return {"status": "accepted"}
 
 
-def _verify_secret(secret_header_source: Request, secret: Any) -> None:
+def _verify_secret(
+    secret_header_source: Request,
+    secret: Any,
+    *,
+    auth_required: bool = True,
+) -> None:
     if secret is None:
+        if auth_required:
+            raise HTTPException(
+                status_code=503,
+                detail="Vapi webhook authentication is required but not configured",
+            )
         return
 
     expected = secret.get_secret_value()

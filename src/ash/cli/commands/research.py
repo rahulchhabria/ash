@@ -64,7 +64,7 @@ def register(app: typer.Typer) -> None:
             str | None,
             typer.Option(
                 "--codex-model",
-                help="Ash model alias for the final review pass (default: codex)",
+                help="Pigeon model alias for the final review pass (default: codex)",
             ),
         ] = "codex",
         email_results: Annotated[
@@ -99,7 +99,7 @@ def register(app: typer.Typer) -> None:
         except FileNotFoundError:
             if codex_review:
                 warning(
-                    "No Ash config found. Continuing without Codex review. "
+                    "No Pigeon config found. Continuing without Codex review. "
                     "Run 'ash config init' if you want model-backed post-processing."
                 )
                 codex_review = False

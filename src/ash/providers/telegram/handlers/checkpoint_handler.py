@@ -7,8 +7,10 @@ This module provides:
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from collections.abc import Callable, Coroutine
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from ash.providers.base import IncomingMessage, OutgoingMessage
@@ -29,6 +31,52 @@ if TYPE_CHECKING:
     from ash.tools.registry import ToolRegistry
 
 logger = logging.getLogger("telegram")
+_APPROVE_TEXT = {
+    "approve",
+    "approved",
+    "yes",
+    "y",
+    "ok",
+    "okay",
+    "proceed",
+    "go ahead",
+    "do it",
+}
+_CANCEL_TEXT = {"cancel", "no", "n", "stop", "nevermind", "never mind"}
+
+
+def _normalize_checkpoint_text(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+
+def _select_checkpoint_option(text: str, options: list[str]) -> str | None:
+    normalized = _normalize_checkpoint_text(text)
+    if not normalized:
+        return None
+
+    normalized_options = [_normalize_checkpoint_text(option) for option in options]
+    if normalized in normalized_options:
+        return options[normalized_options.index(normalized)]
+
+    if len(normalized) == 1 and normalized.isalpha():
+        index = ord(normalized) - ord("a")
+        return options[index] if 0 <= index < len(options) else None
+
+    if normalized.isdigit():
+        index = int(normalized) - 1
+        return options[index] if 0 <= index < len(options) else None
+
+    if normalized in _APPROVE_TEXT:
+        return options[0] if options else None
+
+    if normalized in _CANCEL_TEXT and options:
+        cancelish = {"cancel", "no", "stop"}
+        for option, normalized_option in zip(options, normalized_options, strict=False):
+            if normalized_option in cancelish:
+                return option
+        return options[-1]
+
+    return None
 
 
 class CheckpointHandler:
@@ -47,6 +95,7 @@ class CheckpointHandler:
         get_session_managers_dict: Callable[[], dict[str, SessionManager]],
         get_thread_index: Callable[[str], ThreadIndex],
         handle_message: Callable[[IncomingMessage], Coroutine[Any, Any, None]],
+        mark_active_thread: Callable[[str, str | None], None] | None = None,
         config: AshConfig | None = None,
         agent_registry: AgentRegistry | None = None,
         skill_registry: SkillRegistry | None = None,
@@ -57,6 +106,7 @@ class CheckpointHandler:
         self._get_session_managers_dict = get_session_managers_dict
         self._get_thread_index = get_thread_index
         self._handle_message = handle_message
+        self._mark_active_thread = mark_active_thread
         self._config = config
         self._agent_registry = agent_registry
         self._skill_registry = skill_registry
@@ -103,8 +153,40 @@ class CheckpointHandler:
             "agent_name": agent_name,
             "original_message": original_message,
         }
+        if self._mark_active_thread:
+            self._mark_active_thread(message.chat_id, thread_id)
 
         return truncated_id
+
+    async def resolve_text_response_thread(
+        self, message: IncomingMessage
+    ) -> str | None:
+        """Return the originating thread for an unambiguous checkpoint reply."""
+        if message.metadata.get("thread_id"):
+            return None
+
+        text = (message.text or "").strip()
+        if not text or not self._pending_checkpoints:
+            return None
+
+        for truncated_id, routing in reversed(self._pending_checkpoints.items()):
+            if routing.get("chat_id") != message.chat_id:
+                continue
+            if routing.get("user_id") != message.user_id:
+                continue
+
+            session_manager = self._get_session_manager(
+                routing["chat_id"], routing["user_id"], routing.get("thread_id")
+            )
+            result = await session_manager.get_pending_checkpoint_from_log(truncated_id)
+            if not result:
+                continue
+            _, _, checkpoint = result
+            options = checkpoint.get("options") or ["Proceed", "Cancel"]
+            if _select_checkpoint_option(text, [str(o) for o in options]) is not None:
+                return routing.get("thread_id")
+
+        return None
 
     async def get_checkpoint(
         self,
@@ -174,6 +256,161 @@ class CheckpointHandler:
     def clear_checkpoint(self, truncated_id: str) -> None:
         """Clear checkpoint routing info from memory cache."""
         self._pending_checkpoints.pop(truncated_id, None)
+
+    async def handle_text_response(self, message: IncomingMessage) -> bool:
+        """Resume a pending checkpoint from an unambiguous text reply."""
+        text = (message.text or "").strip()
+        if not text or not self._pending_checkpoints:
+            return False
+
+        current_thread_id = message.metadata.get("thread_id")
+        for truncated_id, routing in reversed(self._pending_checkpoints.items()):
+            if routing.get("chat_id") != message.chat_id:
+                continue
+            if routing.get("user_id") != message.user_id:
+                continue
+            if routing.get("thread_id") != current_thread_id:
+                continue
+
+            session_manager = self._get_session_manager(
+                routing["chat_id"], routing["user_id"], routing.get("thread_id")
+            )
+            result = await session_manager.get_pending_checkpoint_from_log(truncated_id)
+            if not result:
+                continue
+            _, _, checkpoint = result
+            options = checkpoint.get("options") or ["Proceed", "Cancel"]
+            selected_option = _select_checkpoint_option(text, [str(o) for o in options])
+            if selected_option is None:
+                return False
+
+            await self._resume_checkpoint_from_text(
+                message=message,
+                routing=routing,
+                checkpoint=checkpoint,
+                selected_option=selected_option,
+                truncated_id=truncated_id,
+            )
+            return True
+
+        return False
+
+    async def _resume_checkpoint_from_text(
+        self,
+        *,
+        message: IncomingMessage,
+        routing: dict[str, Any],
+        checkpoint: dict[str, Any],
+        selected_option: str,
+        truncated_id: str,
+    ) -> None:
+        from ash.agents.types import CheckpointState
+        from ash.tools.base import ToolContext
+        from ash.tools.builtin.agents import UseAgentTool
+
+        from .checkpoint_callback import ResponseFinalizer
+
+        chat_id = routing.get("chat_id", "")
+        user_id = routing.get("user_id", "")
+        thread_id = routing.get("thread_id")
+        session_key = routing.get("session_key", "")
+        agent_name = routing.get("agent_name")
+        original_message = routing.get("original_message")
+        checkpoint_id = checkpoint.get("checkpoint_id")
+
+        has_agent_context = agent_name and original_message and checkpoint_id
+        has_tool_registry = self._tool_registry and self._tool_registry.has("use_agent")
+        if not has_agent_context or not has_tool_registry:
+            logger.info(
+                "checkpoint_text_response_via_message_flow",
+                extra={"checkpoint.id": truncated_id[:20]},
+            )
+            self.clear_checkpoint(truncated_id)
+            metadata = {
+                **message.metadata,
+                "is_checkpoint_response": True,
+                "checkpoint.id": checkpoint_id,
+            }
+            if thread_id:
+                metadata["thread_id"] = thread_id
+            synthetic_message = replace(
+                message,
+                text=selected_option,
+                metadata=metadata,
+            )
+            await self._handle_message(synthetic_message)
+            return
+
+        assert checkpoint_id is not None
+        assert self._tool_registry is not None
+        use_agent_tool = self._tool_registry.get("use_agent")
+        if not isinstance(use_agent_tool, UseAgentTool):
+            await self._provider.send(
+                OutgoingMessage(
+                    chat_id=chat_id,
+                    text="Error: use_agent tool is not properly configured.",
+                    reply_to_message_id=message.id,
+                )
+            )
+            return
+
+        existing = await use_agent_tool.get_checkpoint(checkpoint_id)
+        if existing is None:
+            await use_agent_tool.store_checkpoint(CheckpointState.from_dict(checkpoint))
+
+        await self._provider.send_typing(chat_id)
+        tracker = ToolTracker(
+            provider=self._provider,
+            chat_id=chat_id,
+            reply_to=message.id,
+            config=self._config,
+            agent_registry=self._agent_registry,
+            skill_registry=self._skill_registry,
+        )
+        progress_tool = ProgressMessageTool(tracker)
+        tool_use_id = f"text_checkpoint_{uuid.uuid4().hex[:12]}"
+        tool_input = {
+            "agent": agent_name,
+            "message": original_message,
+            "resume_checkpoint_id": checkpoint_id,
+            "checkpoint_response": selected_option,
+        }
+        tool_context = ToolContext(
+            session_id=session_key,
+            user_id=user_id,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            provider=self._provider.name,
+            metadata={"current_message_id": message.id},
+            tool_overrides={progress_tool.name: progress_tool},
+        )
+
+        result = await use_agent_tool.execute(tool_input, tool_context)
+        self.clear_checkpoint(truncated_id)
+
+        session_manager = self._get_session_manager(chat_id, user_id, thread_id)
+        thread_index = self._get_thread_index(chat_id) if thread_id else None
+        finalizer = ResponseFinalizer(
+            provider=self._provider,
+            session_manager=session_manager,
+            thread_index=thread_index,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            routing=routing,
+        )
+        await finalizer.finalize(
+            result=result,
+            tracker=tracker,
+            checkpoint_message_id=message.id,
+            checkpoint_id=checkpoint_id,
+            selected_option=selected_option,
+            user_id=user_id,
+            tool_use_id=tool_use_id,
+            tool_input=tool_input,
+            agent_name=agent_name,
+            original_message=original_message,
+            store_checkpoint_fn=self.store_checkpoint,
+        )
 
     async def handle_callback_query(self, callback_query: CallbackQuery) -> None:
         """Handle callback queries from checkpoint inline keyboards.

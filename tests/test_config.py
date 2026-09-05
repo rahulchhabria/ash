@@ -469,6 +469,21 @@ class TestResolveEnvSecrets:
             == "kernel-test-key"
         )
 
+    def test_resolves_vapi_api_key(self, monkeypatch):
+        monkeypatch.setenv("VAPI_API_KEY", "vapi-test-key")
+        config = {"vapi": {"api_key": None}}
+        result = _resolve_env_secrets(config)
+        assert result["vapi"]["api_key"].get_secret_value() == "vapi-test-key"
+
+    def test_resolves_event_router_token(self, monkeypatch):
+        monkeypatch.setenv("ASH_EVENT_ROUTER_TOKEN", "event-test-token")
+        config = {"event_router": {"bearer_token": None}}
+        result = _resolve_env_secrets(config)
+        assert (
+            result["event_router"]["bearer_token"].get_secret_value()
+            == "event-test-token"
+        )
+
     def test_resolves_telegram_token(self, monkeypatch):
         monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
         config = {

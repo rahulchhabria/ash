@@ -84,6 +84,27 @@ def test_vapi_route_submits_to_existing_telegram_handler() -> None:
     assert message.metadata["source"] == "vapi_voicemail"
 
 
+def test_vapi_compatibility_route_submits_to_existing_telegram_handler() -> None:
+    app = FastAPI()
+    app.include_router(vapi.router)
+    handler = SimpleNamespace(handle_message=AsyncMock())
+    app.state.config = _config(secret="test-secret")
+    app.state.server = SimpleNamespace(
+        get_telegram_handler=AsyncMock(return_value=handler)
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/vapi/webhook",
+            json=_payload(),
+            headers={"Authorization": "Bearer test-secret"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "accepted"}
+    handler.handle_message.assert_awaited_once()
+
+
 def test_vapi_route_rejects_invalid_secret() -> None:
     app = FastAPI()
     app.include_router(vapi.router)
@@ -98,6 +119,35 @@ def test_vapi_route_rejects_invalid_secret() -> None:
         )
 
     assert response.status_code == 401
+
+
+def test_vapi_route_fails_closed_without_required_secret() -> None:
+    app = FastAPI()
+    app.include_router(vapi.router)
+    app.state.config = _config()
+    app.state.server = SimpleNamespace(get_telegram_handler=AsyncMock())
+
+    with TestClient(app) as client:
+        response = client.post("/webhooks/vapi", json=_payload())
+
+    assert response.status_code == 503
+
+
+def test_vapi_route_can_explicitly_disable_auth() -> None:
+    app = FastAPI()
+    app.include_router(vapi.router)
+    handler = SimpleNamespace(handle_message=AsyncMock())
+    config = _config()
+    config.vapi.auth_required = False
+    app.state.config = config
+    app.state.server = SimpleNamespace(
+        get_telegram_handler=AsyncMock(return_value=handler)
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/webhooks/vapi", json=_payload())
+
+    assert response.status_code == 200
 
 
 def test_vapi_webhook_secret_loads_from_env(tmp_path, monkeypatch) -> None:

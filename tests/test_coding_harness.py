@@ -1,18 +1,22 @@
 """Tests for the coding harness foundation."""
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from ash.agents.builtin import register_builtin_agents
-from ash.coding import ActiveCodingProjectStore, CodingJobStore
+from ash.coding import CodingJobStore
 from ash.config.models import AshConfig, ModelConfig
 from ash.llm.openai import OpenAIProvider
 from ash.llm.types import Message, Role, ToolDefinition
 from ash.providers.base import IncomingMessage
-from ash.providers.telegram.handlers.message_handler import TelegramMessageHandler
-from ash.tools.base import ToolContext
+from ash.providers.telegram.handlers.message_handler import (
+    TelegramMessageHandler,
+    _unwrap_direct_agent_output,
+)
+from ash.tools.base import ToolResult
 from ash.tools.builtin.coding import HostedOpenAITool, RepoTool
 from ash.tools.registry import ToolRegistry
 
@@ -28,6 +32,9 @@ def test_coding_job_store_round_trips(tmp_path):
         provider="telegram",
     )
     job.status = "testing"
+    job.project_name = "demo"
+    job.changed_files = ["app.py"]
+    job.last_pr_url = "https://github.com/example/repo/pull/1"
     job.last_test_result = "Exit code: 0"
     store.save(job)
 
@@ -37,30 +44,14 @@ def test_coding_job_store_round_trips(tmp_path):
     assert loaded.id == job.id
     assert loaded.task == "fix the tests"
     assert loaded.status == "testing"
+    assert loaded.project_name == "demo"
+    assert loaded.changed_files == ["app.py"]
+    assert loaded.last_pr_url == "https://github.com/example/repo/pull/1"
     assert loaded.last_test_result == "Exit code: 0"
     assert (
         store.latest_for_chat(chat_id="c1", user_id="u1", provider="telegram").id
         == job.id
     )
-
-
-def test_active_coding_project_store_round_trips(tmp_path):
-    store = ActiveCodingProjectStore(root=tmp_path)
-
-    project = store.set(
-        repo_path="/workspace/git/acme/widget",
-        repo="acme/widget",
-        chat_id="c1",
-        user_id="u1",
-        provider="telegram",
-        thread_id="t1",
-    )
-
-    loaded = store.get(chat_id="c1", user_id="u1", provider="telegram", thread_id="t1")
-
-    assert loaded is not None
-    assert loaded.repo_path == project.repo_path
-    assert loaded.repo == "acme/widget"
 
 
 def test_builtin_coding_agent_falls_back_without_codex_alias():
@@ -190,58 +181,151 @@ async def test_telegram_code_command_dispatches_directly(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_telegram_open_sets_active_project(monkeypatch, tmp_path):
-    import ash.coding
-
-    project_store = ActiveCodingProjectStore(root=tmp_path)
-    monkeypatch.setattr(ash.coding, "ActiveCodingProjectStore", lambda: project_store)
-    monkeypatch.setattr(
-        ash.coding, "CodingJobStore", lambda: CodingJobStore(root=tmp_path / "jobs")
-    )
-
+async def test_telegram_do_command_dispatches_conduit_directly():
     handler = TelegramMessageHandler.__new__(TelegramMessageHandler)
-    handler._config = SimpleNamespace(
-        coding=SimpleNamespace(telegram_commands_enabled=True)
-    )
-    handler._provider = SimpleNamespace(name="telegram")
-    handler._send_direct_result = AsyncMock()
+    handler._run_checkpoint_agent_command = AsyncMock()
 
     message = IncomingMessage(
         id="m1",
         chat_id="c1",
         user_id="u1",
-        text="/open acme/widget",
+        text="/do find a restaurant and ask about walk-ins",
     )
 
-    result = await handler._try_handle_coding_command(message)
+    result = await handler._try_handle_conduit_command(message)
 
     assert result is True
-    project = project_store.get(chat_id="c1", user_id="u1", provider="telegram")
-    assert project is not None
-    assert project.repo_path == "/workspace/git/acme/widget"
-    assert project.repo == "acme/widget"
-    handler._send_direct_result.assert_awaited_once()
+    handler._run_checkpoint_agent_command.assert_awaited_once_with(
+        message=message,
+        task="find a restaurant and ask about walk-ins",
+        agent_name="conduit",
+        tool_use_prefix="conduit",
+        unavailable_label="Conduit agent",
+    )
+
+
+def test_direct_agent_output_unwraps_internal_subagent_envelope():
+    wrapped = """<instruction>
+This is the result from the \"conduit\" agent.
+The user has NOT seen this output.
+</instruction>
+<output>
+can’t do that lookup rn
+
+1) paste the phone #
+</output>"""
+
+    assert (
+        _unwrap_direct_agent_output(wrapped)
+        == "can’t do that lookup rn\n\n1) paste the phone #"
+    )
+
+
+def test_telegram_raw_command_snapshot_survives_in_place_preprocessing():
+    raw = IncomingMessage(
+        id="m1",
+        chat_id="c1",
+        user_id="u1",
+        text="/code fix failing tests",
+        metadata={"thread_id": "t1"},
+    )
+    snapshot = replace(raw)
+    raw.text = "--- injected context ---\n/code fix failing tests"
+
+    handler = TelegramMessageHandler.__new__(TelegramMessageHandler)
+    handler._provider = SimpleNamespace(bot_username=None)
+    command_message = handler._message_for_raw_slash_command(
+        raw_message=snapshot,
+        processed_message=raw,
+        commands={"/code"},
+    )
+
+    assert command_message.text == "/code fix failing tests"
+    assert raw.text.startswith("--- injected context ---")
+
+
+def test_telegram_coding_command_uses_raw_text_after_preprocessing():
+    handler = TelegramMessageHandler.__new__(TelegramMessageHandler)
+    handler._provider = SimpleNamespace(bot_username=None)
+
+    raw = IncomingMessage(
+        id="m1",
+        chat_id="c1",
+        user_id="u1",
+        text="/code fix failing tests",
+        metadata={"thread_id": "t1"},
+    )
+    processed = IncomingMessage(
+        id="m1",
+        chat_id="c1",
+        user_id="u1",
+        text="--- injected context ---\n/code fix failing tests",
+        metadata={"thread_id": "t1", "source": "preprocessed"},
+    )
+
+    command_message = handler._message_for_raw_slash_command(
+        raw_message=raw,
+        processed_message=processed,
+        commands={"/code"},
+    )
+
+    assert command_message.text == "/code fix failing tests"
+    assert command_message.metadata == processed.metadata
 
 
 @pytest.mark.asyncio
-async def test_telegram_code_uses_active_project(monkeypatch, tmp_path):
-    import ash.coding
+async def test_telegram_plain_call_request_auto_routes_to_conduit():
+    handler = TelegramMessageHandler.__new__(TelegramMessageHandler)
+    handler._run_checkpoint_agent_command = AsyncMock()
 
-    store = CodingJobStore(root=tmp_path / "jobs")
-    project_store = ActiveCodingProjectStore(root=tmp_path / "projects")
-    project_store.set(
-        repo_path="/workspace/git/acme/widget",
-        repo="acme/widget",
+    message = IncomingMessage(
+        id="m1",
         chat_id="c1",
         user_id="u1",
-        provider="telegram",
+        text="Call the Ace Hardware on 25th and Geary to see if they're still open.",
     )
+
+    result = await handler._try_handle_conduit_intent(message)
+
+    assert result is True
+    handler._run_checkpoint_agent_command.assert_awaited_once_with(
+        message=message,
+        task=message.text,
+        agent_name="conduit",
+        tool_use_prefix="conduit",
+        unavailable_label="Conduit agent",
+    )
+
+
+def test_telegram_plain_call_request_detector_is_narrow():
+    handler = TelegramMessageHandler.__new__(TelegramMessageHandler)
+
+    assert handler._looks_like_phone_call_request("please phone Standard Plumbing")
+    assert handler._looks_like_phone_call_request(
+        "ask Ace Hardware by phone if they are open"
+    )
+    assert not handler._looks_like_phone_call_request(
+        "what is the phone number for Ace Hardware?"
+    )
+    assert not handler._looks_like_phone_call_request(
+        "tell me whether Ace Hardware is open"
+    )
+
+
+@pytest.mark.asyncio
+async def test_telegram_plain_coding_request_auto_routes(monkeypatch, tmp_path):
+    import ash.coding
+
+    store = CodingJobStore(root=tmp_path)
     monkeypatch.setattr(ash.coding, "CodingJobStore", lambda: store)
-    monkeypatch.setattr(ash.coding, "ActiveCodingProjectStore", lambda: project_store)
 
     handler = TelegramMessageHandler.__new__(TelegramMessageHandler)
     handler._config = SimpleNamespace(
-        coding=SimpleNamespace(telegram_commands_enabled=True)
+        coding=SimpleNamespace(
+            enabled=True,
+            auto_route_enabled=True,
+            default_repo_path="/workspace",
+        )
     )
     handler._provider = SimpleNamespace(name="telegram")
     handler._run_coding_agent_command = AsyncMock()
@@ -250,15 +334,137 @@ async def test_telegram_code_uses_active_project(monkeypatch, tmp_path):
         id="m1",
         chat_id="c1",
         user_id="u1",
-        text="/code fix failing tests",
+        text="create a new folder called demo-app and initialize git for the project",
     )
+
+    result = await handler._try_handle_coding_intent(message)
+
+    assert result is True
+    handler._run_coding_agent_command.assert_awaited_once()
+    call = handler._run_coding_agent_command.await_args.kwargs
+    assert call["task"] == message.text
+    assert store.get(call["job_id"]) is not None
+
+
+@pytest.mark.asyncio
+async def test_telegram_diff_command_runs_repo_tool_directly(monkeypatch, tmp_path):
+    import ash.coding
+
+    store = CodingJobStore(root=tmp_path)
+    store.create(
+        task="fix failing tests",
+        repo_path="/workspace/demo",
+        chat_id="c1",
+        user_id="u1",
+        provider="telegram",
+    )
+    monkeypatch.setattr(ash.coding, "CodingJobStore", lambda: store)
+
+    repo_tool = AsyncMock()
+    repo_tool.execute.return_value = ToolResult.success("diff output")
+    handler = TelegramMessageHandler.__new__(TelegramMessageHandler)
+    handler._config = SimpleNamespace(
+        coding=SimpleNamespace(telegram_commands_enabled=True)
+    )
+    handler._provider = SimpleNamespace(name="telegram")
+    handler._tool_registry = MagicMock()
+    handler._tool_registry.has.return_value = True
+    handler._tool_registry.get.return_value = repo_tool
+    handler._session_handler = MagicMock()
+    handler._session_handler.get_session_manager.return_value = MagicMock()
+    handler._send_direct_result = AsyncMock()
+
+    message = IncomingMessage(id="m1", chat_id="c1", user_id="u1", text="/diff")
 
     result = await handler._try_handle_coding_command(message)
 
     assert result is True
-    call = handler._run_coding_agent_command.await_args.kwargs
-    assert call["repo_path"] == "/workspace/git/acme/widget"
-    assert store.get(call["job_id"]).repo_path == "/workspace/git/acme/widget"
+    repo_tool.execute.assert_awaited_once()
+    assert repo_tool.execute.await_args.args[0] == {
+        "action": "diff",
+        "repo_path": "/workspace/demo",
+    }
+    handler._send_direct_result.assert_awaited_once()
+
+
+def test_telegram_coding_env_prefers_configured_github_token(monkeypatch):
+    handler = TelegramMessageHandler.__new__(TelegramMessageHandler)
+    handler._config = SimpleNamespace(
+        coding=SimpleNamespace(github_token_env="ASH_GH_TOKEN")
+    )
+    monkeypatch.setenv("ASH_GH_TOKEN", "token-123")
+
+    assert handler._coding_env() == {
+        "GH_TOKEN": "token-123",
+        "GITHUB_TOKEN": "token-123",
+    }
+
+
+class FakeExecutor:
+    def __init__(self):
+        self.calls = []
+
+    async def execute(self, command, **kwargs):
+        self.calls.append({"command": command, **kwargs})
+        return SimpleNamespace(
+            exit_code=0,
+            stdout="ok",
+            stderr="",
+            timed_out=False,
+            success=True,
+            output="ok",
+        )
+
+
+@pytest.mark.asyncio
+async def test_repo_tool_create_project_uses_safe_workspace_path():
+    executor = FakeExecutor()
+    tool = RepoTool(executor)
+
+    result = await tool.execute(
+        {
+            "action": "create_project",
+            "project_name": "demo-app",
+            "projects_root": "/workspace/projects",
+        },
+        SimpleNamespace(env={}),
+    )
+
+    assert result.is_error is False
+    assert result.metadata["repo_path"] == "/workspace/projects/demo-app"
+    assert "mkdir -p /workspace/projects/demo-app" in executor.calls[0]["command"]
+
+
+@pytest.mark.asyncio
+async def test_repo_tool_requires_approval_for_commit_and_pr_create():
+    tool = RepoTool(FakeExecutor())
+
+    commit = await tool.execute(
+        {"action": "commit", "repo_path": "/workspace", "message": "test"},
+        SimpleNamespace(env={}),
+    )
+    pr = await tool.execute(
+        {"action": "pr_create", "repo_path": "/workspace", "title": "test"},
+        SimpleNamespace(env={}),
+    )
+
+    assert commit.is_error is True
+    assert "explicit user approval" in commit.content
+    assert pr.is_error is True
+    assert "explicit user approval" in pr.content
+
+
+@pytest.mark.asyncio
+async def test_repo_tool_rejects_paths_outside_workspace():
+    tool = RepoTool(FakeExecutor())
+
+    result = await tool.execute(
+        {"action": "status", "repo_path": "/etc"},
+        SimpleNamespace(env={}),
+    )
+
+    assert result.is_error is True
+    assert "inside /workspace" in result.content
 
 
 @pytest.mark.asyncio
@@ -301,47 +507,3 @@ async def test_telegram_cancel_clears_persisted_stack(monkeypatch, tmp_path):
     assert (
         store.latest_for_chat(chat_id="c1", user_id="u1", provider="telegram") is None
     )
-
-
-class _FakeSandboxExecutor:
-    def __init__(self):
-        self.commands = []
-
-    async def execute(self, command, **kwargs):
-        self.commands.append((command, kwargs))
-        return SimpleNamespace(
-            output="ok",
-            success=True,
-            exit_code=0,
-            timed_out=False,
-        )
-
-
-@pytest.mark.asyncio
-async def test_repo_tool_runs_in_requested_repo_path():
-    executor = _FakeSandboxExecutor()
-    tool = RepoTool(executor)  # type: ignore[arg-type]
-
-    result = await tool.execute(
-        {"action": "status", "repo_path": "/workspace/git/acme/widget"},
-        ToolContext(),
-    )
-
-    assert not result.is_error
-    assert executor.commands[0][0].startswith("cd /workspace/git/acme/widget &&")
-    assert "Repo path: /workspace/git/acme/widget" in result.content
-
-
-@pytest.mark.asyncio
-async def test_repo_tool_supports_merge_push_and_pr_create():
-    executor = _FakeSandboxExecutor()
-    tool = RepoTool(executor)  # type: ignore[arg-type]
-
-    await tool.execute({"action": "merge", "branch": "feature/x"}, ToolContext())
-    await tool.execute({"action": "push"}, ToolContext())
-    await tool.execute({"action": "pr_create", "base": "main"}, ToolContext())
-
-    commands = [call[0] for call in executor.commands]
-    assert "git merge --no-ff feature/x" in commands[0]
-    assert "git push -u origin HEAD" in commands[1]
-    assert "gh pr create --base main --fill" in commands[2]

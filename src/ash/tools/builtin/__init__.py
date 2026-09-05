@@ -28,6 +28,7 @@ from ash.tools.builtin.memory import (
     RememberTool,
     SearchMemoriesTool,
 )
+from ash.tools.builtin.vapi import VapiEndCallTool, VapiOutboundCallTool
 from ash.tools.builtin.web_fetch import WebFetchTool
 from ash.tools.builtin.web_search import WebSearchTool
 
@@ -39,6 +40,8 @@ __all__ = [
     "CodingJobTool",
     "DeepAgentsStatusTool",
     "DeepResearchTool",
+    "VapiEndCallTool",
+    "VapiOutboundCallTool",
     "ForgetMemoryTool",
     "HostedOpenAITool",
     "ListMemoriesTool",

@@ -47,7 +47,8 @@ ash-sb capability list
 ```
 
 - If a needed capability is missing, tell the user to enable `[skills.google]` and stop.
-- If a needed capability is not authenticated, run auth (step 2).
+- If a needed capability has `requires_auth: false`, treat it as host-configured and continue to operations (step 3), even if `authenticated` is shown as false by older hosts.
+- If a needed capability has `requires_auth: true` and is not authenticated, run auth (step 2).
 - If already authenticated, continue to operations (step 3).
 
 ### 2. Authenticate (when needed)
@@ -108,7 +109,7 @@ Do not stop at "you need auth" when you can initiate the flow directly.
 
 ### 3. Perform operations
 
-Use only capability operations and explicit JSON input.
+Use only capability operations and explicit JSON input. For Google Calendar, prefer `--account default` unless the user explicitly says work calendar. If the user asks for a specific day, include `"date":"YYYY-MM-DD"` in the `list_events` input. Do not use `browser` for Google Calendar.
 
 Core commands:
 
@@ -119,14 +120,14 @@ ash-sb capability invoke -c gog.email -o get_message --account work --input-json
 ash-sb capability invoke -c gog.email -o get_thread --account work --input-json '{"thread_id":"<thread_id>","limit":20}'
 ash-sb capability invoke -c gog.email -o archive_messages --account work --input-json '{"ids":["<message_id>"],"archive":true}'
 ash-sb capability invoke -c gog.email -o update_labels --account work --input-json '{"ids":["<message_id>"],"add_label_ids":["IMPORTANT"],"remove_label_ids":[]}'
-ash-sb capability invoke -c gog.calendar -o list_events --account work --input-json '{"calendar":"primary","window":"1d"}'
-ash-sb capability invoke -c gog.calendar -o create_event --account work --input-json '{"title":"Team sync","start":"2026-03-04T18:00:00Z"}'
+ash-sb capability invoke -c gog.calendar -o list_events --account default --input-json '{"calendar":"primary","window":"1d"}'
+ash-sb capability invoke -c gog.calendar -o create_event --account default --input-json '{"title":"Team sync","start":"2026-03-04T18:00:00Z"}'
 ```
 
 If the user asks a broad question and does not provide scope, use these defaults:
 
 - Email summaries: `search_messages` with `{"query":"is:unread newer_than:1d","limit":20}`
-- Day-at-a-glance: `list_events` with `{"calendar":"primary","window":"1d"}` plus unread/recent email query
+- Day-at-a-glance: `list_events` with `{"calendar":"primary","window":"1d"}` on account `default` plus unread/recent email query when Gmail is available
 - Message deep read: run `get_message` for each item you summarize
 
 ### Account and calendar defaults
@@ -134,7 +135,7 @@ If the user asks a broad question and does not provide scope, use these defaults
 Interpret account/calendar phrasing with these defaults unless user explicitly says otherwise:
 
 - "work calendar", "my work calendar", or "calendar at work" means account alias `work` and calendar `primary`.
-- "personal calendar", "my calendar", or unspecified calendar means account alias `default` and calendar `primary`.
+- "personal calendar", "my calendar", or unspecified calendar means account alias `default` and calendar `primary`. Calendar-only questions must use `default` unless the user explicitly says work calendar.
 - "add/connect/link my <alias> calendar" means start auth for `gog.calendar` using that alias.
 
 Do not ask taxonomy prompts like "do you mean second account vs shared calendar vs subscribed calendar" before starting auth.

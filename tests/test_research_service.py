@@ -138,7 +138,7 @@ async def test_research_service_persists_artifacts(monkeypatch, tmp_path: Path) 
                     attempted=True,
                     sent=True,
                     recipient="rahul@example.com",
-                    subject="[Ash Research] Compare agent stacks",
+                    subject="[Pigeon Research] Compare agent stacks",
                 )
             ),
         ),
@@ -272,7 +272,7 @@ async def test_local_research_mailer_sends_with_attachments(
     assert command[:3] == (
         "/usr/bin/mailx",
         "--subject",
-        "[Ash Research] Compare agent stacks",
+        "[Pigeon Research] Compare agent stacks",
     )
     assert f"--attach={paths.report_path}" in command
     assert f"--attach={paths.brief_path}" in command

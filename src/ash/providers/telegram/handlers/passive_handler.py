@@ -16,6 +16,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from ash.branding import PRODUCT_NAME
 from ash.graph.edges import (
     get_chat_participant_person_ids,
     get_person_for_user,
@@ -122,15 +123,8 @@ class PassiveHandler:
         logger.info("passive_listening_initialized")
 
     def _get_bot_display_name(self) -> str:
-        """Extract display name from bot username.
-
-        Converts "ash_bot" or "ash_noe_bot" -> "Ash".
-        Falls back to "Assistant" if no username.
-        """
-        if username := self._provider.bot_username:
-            # Take the first part before underscore and title-case it
-            return username.split("_")[0].title()
-        return "Assistant"
+        """Return the chat-facing product identity."""
+        return PRODUCT_NAME
 
     @property
     def is_enabled(self) -> bool:

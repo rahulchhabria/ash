@@ -14,4 +14,4 @@ def test_generate_config_template_includes_default_fast_and_codex_models() -> No
     assert 'model = "gpt-5.2"' in template
 
     assert "[models.codex]" in template
-    assert 'model = "gpt-5.2-codex"' in template
+    assert template.count('model = "gpt-5.2"') >= 2

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "ash"
 version = "0.1.0"
-description = "Personal Assistant Agent"
+description = "Pigeon Personal Assistant Agent"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.12"
@@ -72,6 +72,7 @@ deepagents = [
 ]
 
 [project.scripts]
+pigeon = "ash.cli:app"
 ash = "ash.cli:app"
 evals = "ash.evals_cli:main"
 gogcli = "ash.skills.bundled.gog.scripts.gogcli_bridge:main"

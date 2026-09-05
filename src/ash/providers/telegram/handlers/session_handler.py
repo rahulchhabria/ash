@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from ash.branding import PRODUCT_NAME
 from ash.chats import ChatStateManager, ThreadIndex
 from ash.config.models import ConversationConfig
 from ash.core import SessionState
@@ -116,13 +117,8 @@ class SessionHandler:
         return self._thread_indexes[chat_id]
 
     def _get_bot_display_name(self) -> str | None:
-        """Extract display name from bot username.
-
-        Converts "ash_bot" or "miso_noe_bot" -> "Ash" / "Miso".
-        """
-        if self._bot_username:
-            return self._bot_username.split("_")[0].title()
-        return None
+        """Return the chat-facing product identity."""
+        return PRODUCT_NAME
 
     def _get_chat_state_manager(self, chat_id: str) -> ChatStateManager:
         return ChatStateManager(
@@ -130,6 +126,16 @@ class SessionHandler:
             chat_id=chat_id,
             thread_id=None,
         )
+
+    def mark_active_thread(
+        self, chat_id: str, thread_id: str | None, *, reason: str
+    ) -> None:
+        if not thread_id:
+            return
+        state_manager = self._get_chat_state_manager(chat_id)
+        state = state_manager.load()
+        state.set_active_thread(thread_id, reason=reason)
+        state_manager.save()
 
     def maybe_record_mutation_confirmation_from_user(
         self, message: IncomingMessage

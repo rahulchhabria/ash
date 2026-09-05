@@ -17,8 +17,8 @@ def register(app: typer.Typer) -> None:
 
     @app.command()
     def upgrade() -> None:
-        """Upgrade Ash (build sandbox)."""
-        console.print("[bold]Upgrading Ash...[/bold]\n")
+        """Upgrade Pigeon (build sandbox)."""
+        console.print("[bold]Upgrading Pigeon...[/bold]\n")
 
         _migrate_schedule_into_graph()
         _migrate_todo_scope_ids()

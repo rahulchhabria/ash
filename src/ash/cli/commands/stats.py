@@ -1,4 +1,4 @@
-"""Operational stats command for Ash home directory."""
+"""Operational stats command for the Pigeon home directory."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ DIR_PURPOSES: dict[str, str] = {
 }
 
 FILE_PURPOSES: dict[str, str] = {
-    "config.toml": "Main Ash configuration",
+    "config.toml": "Main Pigeon configuration",
     "auth.json": "OAuth/provider credentials",
 }
 
@@ -105,19 +105,19 @@ def register(app: typer.Typer) -> None:
 
     @app.command("stats")
     def stats() -> None:
-        """Show operational stats for Ash home."""
+        """Show operational stats for Pigeon home."""
         _render_stats()
 
     @app.command("info")
     def info() -> None:
-        """Alias for `ash stats`."""
+        """Alias for `pigeon stats`."""
         _render_stats()
 
 
 def _render_stats() -> None:
     home = get_ash_home()
 
-    console.print(f"[bold]Ash Home[/bold]: [cyan]{home}[/cyan]")
+    console.print(f"[bold]Pigeon Home[/bold]: [cyan]{home}[/cyan]")
     if not home.exists():
         dim("Home directory does not exist yet.")
         return

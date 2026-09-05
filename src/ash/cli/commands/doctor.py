@@ -60,7 +60,7 @@ def run_doctor_checks() -> DoctorResult:
 def _render_doctor_report(result: DoctorResult) -> None:
     home = get_ash_home()
 
-    console.print(f"[bold]Ash Doctor[/bold] [cyan]{home}[/cyan]")
+    console.print(f"[bold]Pigeon Doctor[/bold] [cyan]{home}[/cyan]")
     table = create_table(
         "Doctor Findings",
         [
@@ -95,7 +95,7 @@ def _render_doctor_report(result: DoctorResult) -> None:
 
     console.print("\n[bold]Doctor Commands[/bold]")
     console.print(
-        "- [cyan]ash doctor[/cyan]: system/runtime/data integrity checks (read-only)"
+        "- [cyan]pigeon doctor[/cyan]: system/runtime/data integrity checks (read-only)"
     )
     console.print(
         "- [cyan]ash memory doctor[/cyan]: memory repair flows (preview by default)"
@@ -114,7 +114,7 @@ def _check_home() -> list[DoctorFinding]:
                 level="warning",
                 check="home.exists",
                 detail=f"ASH_HOME does not exist: {home}",
-                repair="Run any ash command (or `ash init`) to bootstrap",
+                repair="Run any pigeon command (or `pigeon init`) to bootstrap",
             )
         ]
 
@@ -266,7 +266,7 @@ def _check_config() -> list[DoctorFinding]:
                 level="ok",
                 check="config.file",
                 detail=f"config file not present: {config_path}",
-                repair="Run `ash init` to create a starter config",
+                repair="Run `pigeon init` to create a starter config",
             )
         ]
 

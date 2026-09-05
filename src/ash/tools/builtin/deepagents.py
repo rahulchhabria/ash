@@ -25,8 +25,13 @@ from ash.tools.base import Tool, ToolContext, ToolResult
 class DeepResearchTool(Tool):
     """Run a long-horizon DeepAgents research/deep-work loop from Ash."""
 
-    def __init__(self, tool_executor: Any | None = None) -> None:
+    def __init__(
+        self,
+        tool_executor: Any | None = None,
+        config: Any | None = None,
+    ) -> None:
         self._tool_executor = tool_executor
+        self._config = config
 
     @property
     def name(self) -> str:
@@ -63,33 +68,39 @@ class DeepResearchTool(Tool):
         task = str(input_data.get("task") or "").strip()
         if not task:
             return ToolResult.error("Missing required parameter: task")
+        deep_config = getattr(self._config, "deepagents", None)
+        if deep_config is not None and not deep_config.enabled:
+            return ToolResult.error("DeepAgents orchestration is disabled in config")
+        if deep_config is not None:
+            task = task[: deep_config.max_task_chars]
 
         model = DeepAgentsRunner._normalize_model(
             str(
                 input_data.get("model")
+                or getattr(deep_config, "model", None)
                 or os.environ.get("ASH_DEEPAGENTS_MODEL")
                 or "openai:gpt-5.1"
             )
         )
         extra = str(input_data.get("system_prompt") or "").strip()
         base_prompt = (
-            "You are Ash's DeepAgents research/deep-work subagent. "
+            "You are Pigeon's DeepAgents research/deep-work subagent. "
             "Work autonomously, keep artifacts organized, and report limitations."
         )
         if extra:
             base_prompt = f"{base_prompt}\n\n## Run-specific instructions\n{extra}"
 
         tools: list[Any] = []
+        allowed_tools = list(
+            getattr(
+                deep_config,
+                "allowed_tools",
+                ["web_search", "web_fetch", "read_file", "ash_triage_guidance"],
+            )
+        )
         if self._tool_executor is not None:
             factory = AshToolCallableFactory(self._tool_executor, context)
-            for tool_name in (
-                "web_search",
-                "web_fetch",
-                "read_file",
-                "write_file",
-                "bash",
-                "ash_triage_guidance",
-            ):
+            for tool_name in allowed_tools:
                 if tool_name in self._tool_executor.available_tools:
                     tools.append(factory.make_async_callable(tool_name))
 
@@ -98,6 +109,8 @@ class DeepResearchTool(Tool):
             tools=tools,
             system_prompt=build_workspace_system_prompt(base_prompt),
             workspace_path=get_workspace_path(),
+            filesystem_mode=getattr(deep_config, "filesystem_mode", "read_only"),
+            builtin_subagents=getattr(deep_config, "builtin_subagents", True),
         )
         try:
             result = await runner.ainvoke(task)

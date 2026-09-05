@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -401,3 +402,64 @@ async def test_capability_rpc_projects_trusted_context_for_provider_calls(
     assert provider.invoke_context.thread_id == "thread-from-token"
     assert provider.invoke_context.source_username == "verified_username"
     assert provider.invoke_context.source_display_name == "Verified Name"
+
+
+@pytest.mark.asyncio
+async def test_capability_auth_poll_invalid_flow_returns_invalid_params_without_crash_log(
+    tmp_path: Path, caplog
+) -> None:
+    service = _service()
+    manager = CapabilityManager(auth_flow_ttl_seconds=300)
+    await manager.register(
+        CapabilityDefinition(
+            id="gog.email",
+            description="Email ops",
+            sensitive=True,
+            operations={
+                "list_messages": CapabilityOperation(
+                    name="list_messages",
+                    description="List inbox",
+                    requires_auth=True,
+                )
+            },
+        )
+    )
+    server = RPCServer(tmp_path / "rpc.sock", context_token_service=service)
+    register_capability_methods(server, manager)
+
+    token = service.issue(effective_user_id="user-1", chat_type="private")
+    begin_payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "capability.auth.begin",
+        "params": {
+            "context_token": token,
+            "capability": "gog.email",
+        },
+    }
+    begin_response = await server._process_request(
+        json.dumps(begin_payload).encode("utf-8")
+    )
+    assert begin_response.error is None
+
+    poll_payload = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "capability.auth.poll",
+        "params": {
+            "context_token": token,
+            "flow_id": begin_response.result["flow_id"],
+        },
+    }
+    with caplog.at_level(logging.ERROR, logger="ash.rpc.server"):
+        poll_response = await server._process_request(
+            json.dumps(poll_payload).encode("utf-8")
+        )
+
+    assert poll_response.error is not None
+    assert poll_response.error.code == -32602
+    assert (
+        "auth_poll is only supported for device_code flows"
+        in poll_response.error.message
+    )
+    assert not any(r.message == "rpc_method_error" for r in caplog.records)

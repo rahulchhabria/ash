@@ -19,7 +19,7 @@ def register(app: typer.Typer) -> None:
         action: Annotated[
             str | None,
             typer.Argument(
-                help="Action: list, search, show, add, remove, clear, gc, compact, rebuild-index, stats, history, doctor, forget"
+                help="Action: list, search, show, add, remove, clear, gc, compact, rebuild-index, stats, history, doctor, forget, hygiene"
             ),
         ] = None,
         target: Annotated[
@@ -187,6 +187,7 @@ async def _run_memory_action(
     """Run memory action asynchronously."""
     from ash.cli.commands.memory._helpers import get_store
     from ash.cli.commands.memory.forget import memory_forget
+    from ash.cli.commands.memory.hygiene import memory_hygiene_report
     from ash.cli.commands.memory.list import memory_list
     from ash.cli.commands.memory.maintenance import (
         memory_compact,
@@ -281,6 +282,14 @@ async def _run_memory_action(
             error("Memory forget requires [embeddings] configuration")
             raise typer.Exit(1)
         await memory_forget(store, entry_id, delete_person, force)
+    elif action == "hygiene":
+        if not config.memory_hygiene.enabled:
+            error("Memory hygiene is disabled in config")
+            raise typer.Exit(1)
+        if not store:
+            error("Memory hygiene requires [embeddings] configuration")
+            raise typer.Exit(1)
+        await memory_hygiene_report(store, config, limit)
     elif action == "compact":
         if not store:
             error("Memory compact requires [embeddings] configuration")
@@ -362,6 +371,6 @@ async def _run_memory_action(
     else:
         error(f"Unknown action: {action}")
         console.print(
-            "Valid actions: list, search, show, add, remove, clear, gc, compact, rebuild-index, stats, history, forget, doctor"
+            "Valid actions: list, search, show, add, remove, clear, gc, compact, rebuild-index, stats, history, forget, hygiene, doctor"
         )
         raise typer.Exit(1)

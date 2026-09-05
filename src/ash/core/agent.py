@@ -1228,6 +1228,8 @@ async def create_agent(
         RememberTool,
         RepoTool,
         SearchMemoriesTool,
+        VapiEndCallTool,
+        VapiOutboundCallTool,
         WebFetchTool,
         WebSearchTool,
     )
@@ -1290,18 +1292,20 @@ async def create_agent(
         )
     )
 
+    if config.sandbox.network_mode != "none":
+        fetch_cache = SearchCache(maxsize=50, ttl=1800)
+        tool_registry.register(
+            WebFetchTool(executor=shared_executor, cache=fetch_cache)
+        )
+
     if config.parallel_search and config.parallel_search.api_key:
         search_cache = SearchCache(maxsize=100, ttl=900)
-        fetch_cache = SearchCache(maxsize=50, ttl=1800)
         tool_registry.register(
             WebSearchTool(
                 api_key=config.parallel_search.api_key.get_secret_value(),
                 executor=shared_executor,
                 cache=search_cache,
             )
-        )
-        tool_registry.register(
-            WebFetchTool(executor=shared_executor, cache=fetch_cache)
         )
 
     # Memory subsystem boundary: delegate store/extractor wiring to memory runtime.
@@ -1340,7 +1344,19 @@ async def create_agent(
         logger.debug("memory_tools_registered")
 
     tool_executor = ToolExecutor(tool_registry)
-    tool_registry.register(DeepResearchTool(tool_executor=tool_executor))
+    tool_registry.register(DeepResearchTool(tool_executor=tool_executor, config=config))
+    telegram_bot_token = (
+        config.telegram.bot_token.get_secret_value()
+        if config.telegram and config.telegram.bot_token
+        else None
+    )
+    tool_registry.register(
+        VapiOutboundCallTool(
+            config.vapi,
+            telegram_bot_token=telegram_bot_token,
+        )
+    )
+    tool_registry.register(VapiEndCallTool(config.vapi))
     logger.info("tools_registered", extra={"count": len(tool_registry)})
 
     agent_registry = AgentRegistry()

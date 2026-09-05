@@ -347,11 +347,15 @@ class SystemPromptBuilder:
 
     _WEB_TOOL_ROUTING_RULES: list[str] = [
         "### Web/Search Routing",
-        "- Start with the cheapest tool that can answer accurately: `web_search` -> `web_fetch`.",
-        "- Use `web_search` to discover sources, URLs, and what exists.",
-        "- For recommendation/ranking/comparison questions about real-world things, run `web_search` first before answering.",
+        "- Start with the cheapest tool that can answer accurately: `openai_web_search` or `web_search` for discovery, then `web_fetch` for known URLs.",
+        "- Use `openai_web_search` for current public facts when it is available on the active provider.",
+        "- Use `web_search` to discover sources, URLs, and what exists when Parallel search is configured.",
+        "- For recommendation/ranking/comparison questions about real-world things, run `openai_web_search` or `web_search` first before answering.",
         "- Use `web_fetch` when you already have a URL and need content reading without interaction.",
+        "- Use `browser` only for interactive, authenticated, or highly dynamic pages that search/fetch cannot handle.",
         "- For capability checks (e.g., 'can we do X?'), attempt the task now with tools instead of answering hypothetically.",
+        "- If `web_search` fails with a quota/billing/provider error such as HTTP 402 or 429, try `openai_web_search` if available before saying you cannot verify.",
+        "- If `browser` or kernel HTTP fails with an access/payment error such as HTTP 403, report that exact error and use search/fetch fallbacks when possible.",
         "- If a step fails, report the exact error and escalate to the next viable tool. Never claim success without verification.",
     ]
 

@@ -16,6 +16,9 @@ from ash.deepagents.runtime import (
 class DeepAgent(Agent):
     """Passthrough agent that runs a LangChain DeepAgents harness."""
 
+    def __init__(self, config: object | None = None) -> None:
+        self._ash_config = config
+
     @property
     def config(self) -> AgentConfig:
         return AgentConfig(
@@ -39,22 +42,28 @@ class DeepAgent(Agent):
         requested_model = (
             model
             or context.input_data.get("model")
+            or getattr(getattr(self._ash_config, "deepagents", None), "model", None)
             or os.environ.get("ASH_DEEPAGENTS_MODEL")
             or "openai:gpt-5.1"
         )
+        deep_config = getattr(self._ash_config, "deepagents", None)
+        if deep_config is not None and not deep_config.enabled:
+            return AgentResult.error("DeepAgents orchestration is disabled in config")
+        if deep_config is not None:
+            message = message[: deep_config.max_task_chars]
         system_prompt = str(context.input_data.get("system_prompt") or "").strip()
         base = (
             system_prompt
-            or "You are Ash's deep mode subagent. Work autonomously on the requested task."
+            or "You are Pigeon's deep mode subagent. Work autonomously on the requested task."
         )
         if context.voice:
-            base = (
-                f"{base}\n\n## Ash voice for final user-facing prose\n{context.voice}"
-            )
+            base = f"{base}\n\n## Pigeon voice for final user-facing prose\n{context.voice}"
         runner = DeepAgentsRunner(
             model=str(requested_model),
             system_prompt=build_workspace_system_prompt(base),
             workspace_path=get_workspace_path(),
+            filesystem_mode=getattr(deep_config, "filesystem_mode", "read_only"),
+            builtin_subagents=getattr(deep_config, "builtin_subagents", True),
         )
         try:
             result = await runner.ainvoke(message)

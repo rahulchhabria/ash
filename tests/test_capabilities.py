@@ -283,6 +283,40 @@ async def test_rejects_duplicate_capability_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_authless_capability_lists_as_authenticated() -> None:
+    manager = CapabilityManager()
+    provider = _RecordingProvider(capability_id="gog.calendar")
+
+    async def _definitions() -> list[CapabilityDefinition]:
+        return [
+            CapabilityDefinition(
+                id="gog.calendar",
+                description="Service-account calendar",
+                sensitive=True,
+                operations={
+                    "list_events": CapabilityOperation(
+                        name="list_events",
+                        description="List events",
+                        requires_auth=False,
+                    ),
+                },
+            )
+        ]
+
+    provider.definitions = _definitions  # type: ignore[method-assign]
+    await manager.register_provider(provider)
+
+    capabilities = await manager.list_capabilities(
+        user_id="user-1",
+        chat_type="private",
+    )
+
+    calendar = next(row for row in capabilities if row["id"] == "gog.calendar")
+    assert calendar["requires_auth"] is False
+    assert calendar["authenticated"] is True
+
+
+@pytest.mark.asyncio
 async def test_sensitive_capability_defaults_private_chat_type(
     manager: CapabilityManager,
 ) -> None:

@@ -290,6 +290,10 @@ class RPCServer:
                 return RPCResponse.error_response(
                     request_id, ErrorCode.INVALID_PARAMS, f"Invalid params: {e}"
                 )
+            except ValueError as e:
+                return RPCResponse.error_response(
+                    request_id, ErrorCode.INVALID_PARAMS, f"Invalid params: {e}"
+                )
             except Exception as e:
                 logger.error(
                     "rpc_method_error", extra={"method": request.method}, exc_info=True

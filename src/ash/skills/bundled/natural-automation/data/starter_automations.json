@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "automations": [
+    {
+      "name": "Important Email Intake",
+      "kind": "event intake",
+      "natural_phrases": ["when an important email arrives", "summarize my forwarded emails", "tell me if an email needs action"],
+      "trigger": "forwarded email webhook",
+      "pigeon_action": "Summarize the newest actionable content, extract deadlines, and suppress noise.",
+      "alert_when": "The email contains a direct ask, deadline, logistics change, billing/account issue, school/family item, or failure notification.",
+      "quiet_when": "The email is marketing, a generic newsletter, a receipt with no action, or a duplicate thread update.",
+      "deepagents_role": "Launch background investigation only when the email requires research or multi-source investigation.",
+      "approval_needed_for": ["sending replies", "creating calendar events", "changing external services"]
+    },
+    {
+      "name": "Webhook Incident Triage",
+      "kind": "event intake",
+      "natural_phrases": ["when an incident webhook arrives", "triage incoming alerts", "tell me if this service alert matters"],
+      "trigger": "event_router webhook",
+      "pigeon_action": "Classify severity, summarize the symptom, and decide whether to launch a deeper investigation.",
+      "alert_when": "Severity is high, repeated failures cross threshold, or the payload names a service the user cares about.",
+      "quiet_when": "Severity is low and no threshold is crossed.",
+      "deepagents_role": "Use background investigation for log/doc/config investigation after the event is classified.",
+      "approval_needed_for": ["restart commands", "configuration changes", "issue creation"]
+    },
+    {
+      "name": "Commute Delay Watch",
+      "kind": "watcher",
+      "natural_phrases": ["watch my commute", "tell me if my commute is bad", "keep an eye on my route"],
+      "trigger": "scheduled commute window polling",
+      "pigeon_action": "Check travel time against baseline and suggest an alternate route when useful.",
+      "alert_when": "Primary route exceeds baseline by the configured threshold.",
+      "quiet_when": "Delay is below threshold or duplicate within dedupe window.",
+      "deepagents_role": "None by default; DeepAgents can review patterns weekly.",
+      "approval_needed_for": ["changing schedule", "changing route config"]
+    },
+    {
+      "name": "Close Game Watch",
+      "kind": "watcher",
+      "natural_phrases": ["watch Lakers games", "tell me if the game is close late", "keep an eye on close games"],
+      "trigger": "schedule-aware game daemon",
+      "pigeon_action": "Sleep between games and alert when a followed team has a close game late.",
+      "alert_when": "Score margin and clock match the configured close-game threshold.",
+      "quiet_when": "No active game or game is not close.",
+      "deepagents_role": "None by default.",
+      "approval_needed_for": ["starting or stopping long-running services"]
+    },
+    {
+      "name": "Weekly Automation Review",
+      "kind": "background investigation",
+      "natural_phrases": ["review my automations every week", "tell me what got noisy", "check if anything broke"],
+      "trigger": "manual Telegram request or weekly schedule",
+      "pigeon_action": "Ask DeepAgents to inspect workspace skills, recent logs, and existing automations, then produce an improvement brief.",
+      "alert_when": "The review finds broken automations, noisy alerts, missing dedupe, or high-value improvements.",
+      "quiet_when": "No meaningful changes or failures are found.",
+      "deepagents_role": "Primary investigator and report writer.",
+      "approval_needed_for": ["editing skills", "changing schedules", "restarting services"]
+    },
+    {
+      "name": "Deep Research Queue",
+      "kind": "background investigation",
+      "natural_phrases": ["dig into this", "research this in the background", "compare these and recommend one"],
+      "trigger": "Telegram phrase: dig into this / research this / investigate this",
+      "pigeon_action": "Run a DeepAgents research job, persist report/sources/transcript, and return a compact summary.",
+      "alert_when": "The job completes, fails, or needs user clarification.",
+      "quiet_when": "Only when the user explicitly asks for quiet/no-notification mode.",
+      "deepagents_role": "Primary researcher.",
+      "approval_needed_for": ["side effects beyond reading, searching, and reporting"]
+    }
+  ]
+}

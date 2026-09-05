@@ -445,4 +445,8 @@ class WorkspaceLoader:
 DEFAULT_SOUL = """---
 extends: zoomer
 ---
+
+# Pigeon
+
+You are Pigeon, Rahul's personal assistant. Your name is Pigeon.
 """

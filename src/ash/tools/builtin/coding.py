@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import re
 import shlex
+from pathlib import PurePosixPath
 from typing import Any
 
 from ash.coding import CodingJobStore
@@ -94,7 +96,9 @@ class ApplyPatchTool(Tool):
 
 
 class RepoTool(Tool):
-    """Self-verifying git/test operations for coding agents."""
+    """Self-verifying git/test/project operations for coding agents."""
+
+    _SAFE_PROJECT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 
     def __init__(self, executor: SandboxExecutor) -> None:
         self._executor = executor
@@ -106,9 +110,10 @@ class RepoTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Inspect and operate on a git repo: status, diff, branch, pull, push, "
-            "merge, commit, test, changed_files, pr_summary, and pr_create. Outputs "
-            "are line-oriented for agent parsing."
+            "Inspect and operate on a repo or project in the mounted workspace. "
+            "Supports status, diff, branch, test, changed_files, pr_summary, "
+            "create_project, init, commit, github_status, and pr_create. "
+            "Pass repo_path for non-/workspace projects."
         )
 
     @property
@@ -122,20 +127,29 @@ class RepoTool(Tool):
                         "status",
                         "diff",
                         "branch",
-                        "pull",
-                        "push",
-                        "merge",
-                        "commit",
                         "test",
                         "changed_files",
                         "pr_summary",
+                        "create_project",
+                        "init",
+                        "commit",
+                        "github_status",
                         "pr_create",
                     ],
                 },
                 "repo_path": {
                     "type": "string",
-                    "description": "Repo path inside the sandbox. Default: /workspace.",
+                    "description": "Path inside the sandbox. Defaults to /workspace.",
                     "default": "/workspace",
+                },
+                "project_name": {
+                    "type": "string",
+                    "description": "Safe folder name for action=create_project.",
+                },
+                "projects_root": {
+                    "type": "string",
+                    "description": "Parent directory for action=create_project.",
+                    "default": "/workspace/projects",
                 },
                 "command": {
                     "type": "string",
@@ -145,95 +159,146 @@ class RepoTool(Tool):
                     "type": "string",
                     "description": "Branch name for action=branch.",
                 },
-                "base": {
-                    "type": "string",
-                    "description": "Base ref for diff/pr_summary/pr_create. Default: HEAD.",
-                    "default": "HEAD",
-                },
                 "message": {
                     "type": "string",
                     "description": "Commit message for action=commit.",
                 },
                 "title": {
                     "type": "string",
-                    "description": "PR title for action=pr_create.",
+                    "description": "Pull request title for action=pr_create.",
                 },
                 "body": {
                     "type": "string",
-                    "description": "PR body for action=pr_create.",
+                    "description": "Pull request body for action=pr_create.",
+                },
+                "base": {
+                    "type": "string",
+                    "description": "Base ref for diff/pr_summary/pr_create. Default: HEAD for diffs, main for PRs.",
+                },
+                "approved": {
+                    "type": "boolean",
+                    "description": "Set true only after explicit user approval for commit or PR creation.",
+                    "default": False,
                 },
             },
             "required": ["action"],
         }
 
+    def _safe_repo_path(self, value: Any) -> str:
+        raw = str(value or "/workspace").strip() or "/workspace"
+        path = PurePosixPath(raw if raw.startswith("/") else f"/workspace/{raw}")
+        normalized = path.as_posix()
+        if normalized == "/":
+            return "/workspace"
+        if normalized == "/workspace" or normalized.startswith("/workspace/"):
+            return normalized
+        raise ValueError("repo_path must be inside /workspace")
+
+    def _safe_project_path(self, input_data: dict[str, Any]) -> str | ToolResult:
+        name = str(input_data.get("project_name") or "").strip()
+        if not name or not self._SAFE_PROJECT_RE.match(name):
+            return ToolResult.error(
+                "project_name must be 1-80 chars of letters, numbers, dots, underscores, or dashes"
+            )
+        root = self._safe_repo_path(
+            input_data.get("projects_root") or "/workspace/projects"
+        )
+        return f"{root.rstrip('/')}/{name}"
+
     async def execute(
         self, input_data: dict[str, Any], context: ToolContext
     ) -> ToolResult:
         action = str(input_data.get("action") or "").strip()
-        repo_path = (
-            str(input_data.get("repo_path") or "/workspace").strip() or "/workspace"
-        )
-        safe_repo_path = shlex.quote(repo_path)
-        if action == "status":
-            command = "git status --short --branch"
+        try:
+            repo_path = self._safe_repo_path(input_data.get("repo_path"))
+        except ValueError as exc:
+            return ToolResult.error(str(exc))
+
+        timeout = 120
+        metadata: dict[str, Any] = {"action": action, "repo_path": repo_path}
+
+        if action == "create_project":
+            project_path = self._safe_project_path(input_data)
+            if isinstance(project_path, ToolResult):
+                return project_path
+            command = f"mkdir -p {shlex.quote(project_path)} && printf '%s\\n' {shlex.quote(project_path)}"
+            repo_path = project_path
+            metadata["repo_path"] = repo_path
+        elif action == "init":
+            command = "git rev-parse --is-inside-work-tree >/dev/null 2>&1 || git init"
+        elif action == "status":
+            command = "git status --short --branch 2>/dev/null || find . -maxdepth 2 -type f | sort | head -200"
         elif action == "changed_files":
-            command = "git diff --name-status HEAD && git ls-files --others --exclude-standard"
+            command = "git diff --name-status HEAD 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null || true"
         elif action == "diff":
             base = shlex.quote(str(input_data.get("base") or "HEAD"))
-            command = f"git diff --stat {base} && printf '\\n--- DIFF ---\\n' && git diff {base}"
+            command = (
+                "if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then "
+                f"git diff --stat {base}; printf '\\n--- DIFF ---\\n'; git diff {base}; "
+                "else printf 'Not a git repository. Run repo(action=\"init\") first.\\n'; fi"
+            )
         elif action == "branch":
             branch = str(input_data.get("branch") or "").strip()
             if not branch:
                 return ToolResult.error("branch is required for action=branch")
             safe = shlex.quote(branch)
             command = f"git switch -c {safe} 2>/dev/null || git switch {safe} && git status --short --branch"
-        elif action == "pull":
-            command = "git pull --ff-only"
-        elif action == "push":
-            command = "git push -u origin HEAD"
-        elif action == "merge":
-            branch = str(input_data.get("branch") or "").strip()
-            if not branch:
-                return ToolResult.error("branch is required for action=merge")
-            safe = shlex.quote(branch)
-            command = f"git merge --no-ff {safe}"
-        elif action == "commit":
-            message = str(input_data.get("message") or "").strip()
-            if not message:
-                return ToolResult.error("message is required for action=commit")
-            command = f"git add -A && git commit -m {shlex.quote(message)}"
         elif action == "test":
             test_command = str(input_data.get("command") or "").strip()
             if not test_command:
                 return ToolResult.error("command is required for action=test")
             command = test_command
+            timeout = 600
+        elif action == "commit":
+            if not bool(input_data.get("approved", False)):
+                return ToolResult.error("commit requires explicit user approval")
+            message = str(input_data.get("message") or "").strip()
+            if not message:
+                return ToolResult.error("message is required for action=commit")
+            safe_message = shlex.quote(message)
+            command = (
+                "git status --short && "
+                "git add -A && "
+                f"git commit -m {safe_message} && "
+                "git status --short --branch"
+            )
+            timeout = 300
+        elif action == "github_status":
+            command = (
+                "gh auth status && printf '\\n--- REMOTES ---\\n' && git remote -v"
+            )
+        elif action == "pr_create":
+            if not bool(input_data.get("approved", False)):
+                return ToolResult.error("pr_create requires explicit user approval")
+            title = str(input_data.get("title") or "").strip()
+            body = str(input_data.get("body") or "").strip()
+            base = str(input_data.get("base") or "main").strip()
+            if not title:
+                return ToolResult.error("title is required for action=pr_create")
+            command = (
+                "git status --short --branch && "
+                "git push -u origin HEAD && "
+                "gh pr create "
+                f"--base {shlex.quote(base)} "
+                f"--title {shlex.quote(title)} "
+                f"--body {shlex.quote(body or title)}"
+            )
+            timeout = 300
         elif action == "pr_summary":
             base = shlex.quote(str(input_data.get("base") or "HEAD"))
             command = (
-                f"printf 'Branch: '; git branch --show-current; "
+                "printf 'Branch: '; git branch --show-current; "
                 f"printf 'Changed files:\\n'; git diff --name-status {base}; "
                 f"printf '\\nDiff stat:\\n'; git diff --stat {base}"
             )
-        elif action == "pr_create":
-            title = str(input_data.get("title") or "").strip()
-            body = str(input_data.get("body") or "").strip()
-            base = shlex.quote(str(input_data.get("base") or "main"))
-            command = f"gh pr create --base {base}"
-            if title:
-                command += f" --title {shlex.quote(title)}"
-            if body:
-                command += f" --body {shlex.quote(body)}"
-            if not title and not body:
-                command += " --fill"
         else:
             return ToolResult.error(
-                "Unknown action. Use status, diff, branch, pull, push, merge, commit, "
-                "test, changed_files, pr_summary, or pr_create."
+                "Unknown action. Use status, diff, branch, test, changed_files, pr_summary, create_project, init, commit, github_status, or pr_create."
             )
 
         result = await self._executor.execute(
-            f"cd {safe_repo_path} && {command}",
-            timeout=300 if action == "test" else 120,
+            f"cd {shlex.quote(repo_path)} && {command}",
+            timeout=timeout,
             reuse_container=True,
             environment=context.env,
         )
@@ -248,9 +313,9 @@ class RepoTool(Tool):
         ]
         return ToolResult(
             content="\n".join(header),
-            is_error=result.timed_out,
+            is_error=result.timed_out or result.exit_code == -1,
             metadata={
-                "action": action,
+                **metadata,
                 "exit_code": result.exit_code,
                 "timed_out": result.timed_out,
                 **output.to_metadata(),
@@ -288,6 +353,11 @@ class CodingJobTool(Tool):
                 "last_diff_summary": {"type": "string"},
                 "last_test_command": {"type": "string"},
                 "last_test_result": {"type": "string"},
+                "branch": {"type": "string"},
+                "project_name": {"type": "string"},
+                "last_pr_url": {"type": "string"},
+                "last_checkpoint": {"type": "string"},
+                "changed_files": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["action"],
         }
@@ -339,10 +409,17 @@ class CodingJobTool(Tool):
                 "last_diff_summary",
                 "last_test_command",
                 "last_test_result",
+                "branch",
+                "project_name",
+                "last_pr_url",
+                "last_checkpoint",
             ):
                 value = input_data.get(field)
                 if value is not None:
                     setattr(job, field, str(value))
+            changed_files = input_data.get("changed_files")
+            if isinstance(changed_files, list):
+                job.changed_files = [str(item) for item in changed_files]
             self._store.save(job)
             return ToolResult.success(
                 _format_job(job), job_id=job.id, status=job.status
@@ -359,8 +436,11 @@ def _format_job(job: Any) -> str:
             f"  Branch: {job.branch or '(not set)'}",
             f"  Task: {job.task}",
             f"  Updated: {job.updated_at}",
+            f"  Project: {job.project_name or '(not set)'}",
+            f"  Changed files: {', '.join(job.changed_files) if job.changed_files else '(none)'}",
             f"  Last diff: {job.last_diff_summary or '(none)'}",
             f"  Last test: {job.last_test_result or '(none)'}",
+            f"  PR: {job.last_pr_url or '(none)'}",
         ]
     )
 

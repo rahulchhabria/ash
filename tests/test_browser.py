@@ -352,7 +352,7 @@ async def test_browser_manager_rejects_cross_provider_session_id(tmp_path) -> No
         params={"url": "https://example.com"},
     )
     assert mismatch.ok is False
-    assert mismatch.error_code == "provider_not_supported"
+    assert mismatch.error_code == "session_not_found"
 
 
 @pytest.mark.asyncio
@@ -419,7 +419,7 @@ async def test_browser_manager_no_cross_provider_fallback_without_session_ref(
         params={"url": "https://example.com"},
     )
     assert mismatch.ok is False
-    assert mismatch.error_code == "provider_not_supported"
+    assert mismatch.error_code == "session_not_found"
 
 
 @pytest.mark.asyncio
@@ -668,14 +668,22 @@ def test_create_browser_manager_uses_configured_provider_even_with_kernel_api_ke
 
 
 @pytest.mark.asyncio
-async def test_browser_manager_kernel_page_actions_fail_fast(tmp_path) -> None:
+async def test_browser_manager_kernel_page_actions_are_supported(tmp_path) -> None:
     store = BrowserStore(tmp_path / "browser")
-    manager = BrowserManager(config=_config(), store=store, providers={})
+    manager = BrowserManager(
+        config=_config(), store=store, providers={"kernel": _FakeKernelProvider()}
+    )
+    started = await manager.execute_action(
+        action="session.start",
+        effective_user_id="u1",
+        provider_name="kernel",
+    )
     result = await manager.execute_action(
         action="page.goto",
         effective_user_id="u1",
         provider_name="kernel",
+        session_id=started.session_id,
         params={"url": "https://example.com"},
     )
-    assert result.ok is False
-    assert result.error_code == "invalid_provider"
+    assert result.ok is True
+    assert result.page_url == "https://example.com"

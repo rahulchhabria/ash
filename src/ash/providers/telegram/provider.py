@@ -20,6 +20,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, FSInputFile, ReactionTypeEmoji
 from aiogram.types import Message as TelegramMessage
 
+from ash.branding import PRODUCT_NAME
 from ash.config.models import PassiveListeningConfig
 from ash.providers.base import (
     ImageAttachment,
@@ -568,13 +569,8 @@ class TelegramProvider(Provider):
                 return
 
             name = message.from_user.first_name if message.from_user else "there"
-            bot_name = (
-                self._bot_username.split("_")[0].title()
-                if self._bot_username
-                else "your personal assistant"
-            )
             await message.answer(
-                f"Hello, {name}! I'm {bot_name}, your personal assistant.\n\n"
+                f"Hello, {name}! I'm {PRODUCT_NAME}, your personal assistant.\n\n"
                 "Send me a message and I'll help you with tasks, answer questions, "
                 "and remember things for you.\n\n"
                 "Type /help to see what I can do."

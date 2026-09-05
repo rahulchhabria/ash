@@ -1,9 +1,14 @@
-"""Kernel remote browser provider adapter."""
+"""Kernel remote browser provider backed by Playwright over CDP."""
 
 from __future__ import annotations
 
 import asyncio
-from urllib.error import HTTPError
+import json
+import logging
+from dataclasses import dataclass
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from ash.browser.providers.base import (
@@ -13,13 +18,18 @@ from ash.browser.providers.base import (
     ProviderStartResult,
 )
 
+logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class _KernelRuntime:
+    playwright: Any
+    browser: Any
+    page: Any
+
 
 class KernelBrowserProvider:
-    """Kernel provider adapter.
-
-    This adapter intentionally starts minimal and supports deterministic errors for
-    actions that need deeper endpoint-specific wiring.
-    """
+    """Drive Kernel cloud browsers through their returned CDP websocket URL."""
 
     name = "kernel"
 
@@ -33,6 +43,8 @@ class KernelBrowserProvider:
         self._api_key = (api_key or "").strip()
         self._base_url = base_url.rstrip("/")
         self._project_id = project_id
+        self._runtimes: dict[str, _KernelRuntime] = {}
+        self._runtime_lock = asyncio.Lock()
 
     def _auth_headers(self) -> dict[str, str]:
         if not self._api_key:
@@ -46,24 +58,77 @@ class KernelBrowserProvider:
             headers["X-Project-Id"] = self._project_id
         return headers
 
-    def _blocking_start_session(self, *, session_id: str) -> None:
-        req = Request(  # noqa: S310
-            f"{self._base_url}/sessions",
-            method="POST",
-            data=(f'{{"client_session_id":"{session_id}"}}').encode(),
+    def _blocking_request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        body = json.dumps(payload).encode() if payload is not None else None
+        request = Request(  # noqa: S310 - base URL is administrator configured.
+            f"{self._base_url}{path}",
+            method=method,
+            data=body,
             headers=self._auth_headers(),
         )
-        with urlopen(req, timeout=10):  # noqa: S310
-            pass
+        try:
+            with urlopen(request, timeout=20) as response:  # noqa: S310
+                raw = response.read()
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:300]
+            raise ValueError(f"kernel_http_{exc.code}:{detail}") from None
+        except (URLError, TimeoutError) as exc:
+            raise ValueError(f"kernel_request_failed:{exc}") from exc
+        if not raw:
+            return {}
+        try:
+            result = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("kernel_invalid_json") from exc
+        if not isinstance(result, dict):
+            raise ValueError("kernel_invalid_response")
+        return result
 
-    def _blocking_close_session(self, *, provider_session_id: str) -> None:
-        req = Request(  # noqa: S310
-            f"{self._base_url}/sessions/{provider_session_id}",
-            method="DELETE",
-            headers=self._auth_headers(),
-        )
-        with urlopen(req, timeout=10):  # noqa: S310
-            pass
+    async def _connect(self, payload: dict[str, Any]) -> tuple[str, _KernelRuntime]:
+        provider_session_id = str(payload.get("session_id") or "").strip()
+        cdp_ws_url = str(payload.get("cdp_ws_url") or "").strip()
+        if not provider_session_id or not cdp_ws_url:
+            raise ValueError("kernel_session_response_missing_connection")
+
+        from playwright.async_api import async_playwright
+
+        playwright = await async_playwright().start()
+        try:
+            browser = await playwright.chromium.connect_over_cdp(cdp_ws_url)
+            context = (
+                browser.contexts[0]
+                if browser.contexts
+                else await browser.new_context()
+            )
+            page = context.pages[0] if context.pages else await context.new_page()
+        except Exception:
+            await playwright.stop()
+            raise
+        return provider_session_id, _KernelRuntime(playwright, browser, page)
+
+    async def _runtime(self, provider_session_id: str | None) -> _KernelRuntime:
+        if not provider_session_id:
+            raise ValueError("session_not_found")
+        existing = self._runtimes.get(provider_session_id)
+        if existing is not None:
+            return existing
+        async with self._runtime_lock:
+            existing = self._runtimes.get(provider_session_id)
+            if existing is not None:
+                return existing
+            payload = await asyncio.to_thread(
+                self._blocking_request,
+                "GET",
+                f"/browsers/{provider_session_id}",
+            )
+            resolved_id, runtime = await self._connect(payload)
+            self._runtimes[resolved_id] = runtime
+            return runtime
 
     async def start_session(
         self,
@@ -72,25 +137,68 @@ class KernelBrowserProvider:
         profile_name: str | None,
         scope_key: str | None = None,
     ) -> ProviderStartResult:
-        _ = (profile_name, scope_key)
+        _ = (session_id, scope_key)
+        payload: dict[str, Any] = {
+            "headless": False,
+            "stealth": True,
+            "timeout_seconds": 900,
+        }
+        if profile_name:
+            payload["profile"] = {"name": profile_name, "save_changes": True}
+        created = await asyncio.to_thread(
+            self._blocking_request,
+            "POST",
+            "/browsers",
+            payload,
+        )
         try:
-            await asyncio.to_thread(self._blocking_start_session, session_id=session_id)
-        except HTTPError as e:
-            raise ValueError(f"kernel_start_http_{e.code}") from None
-        except Exception as e:
-            raise ValueError(f"kernel_start_failed:{e}") from e
-        return ProviderStartResult(provider_session_id=session_id)
+            provider_session_id, runtime = await self._connect(created)
+        except Exception:
+            created_id = str(created.get("session_id") or "").strip()
+            if created_id:
+                try:
+                    await asyncio.to_thread(
+                        self._blocking_request,
+                        "DELETE",
+                        f"/browsers/{created_id}",
+                    )
+                except Exception as cleanup_error:
+                    logger.debug(
+                        "kernel_session_cleanup_failed",
+                        extra={"error.message": str(cleanup_error)},
+                    )
+            raise
+        self._runtimes[provider_session_id] = runtime
+        return ProviderStartResult(
+            provider_session_id=provider_session_id,
+            metadata={
+                "engine": "playwright",
+                "remote": True,
+                "live_view_available": bool(created.get("browser_live_view_url")),
+            },
+        )
 
     async def close_session(self, *, provider_session_id: str | None) -> None:
         if not provider_session_id:
             return
+        runtime = self._runtimes.pop(provider_session_id, None)
+        if runtime is not None:
+            try:
+                await runtime.browser.close()
+            finally:
+                await runtime.playwright.stop()
         try:
             await asyncio.to_thread(
-                self._blocking_close_session,
-                provider_session_id=provider_session_id,
+                self._blocking_request,
+                "DELETE",
+                f"/browsers/{provider_session_id}",
             )
         except Exception:
-            return None
+            return
+
+    async def shutdown(self) -> None:
+        for session_id in list(self._runtimes):
+            await self.close_session(provider_session_id=session_id)
 
     async def goto(
         self,
@@ -99,8 +207,19 @@ class KernelBrowserProvider:
         url: str,
         timeout_seconds: float,
     ) -> ProviderGotoResult:
-        _ = (provider_session_id, timeout_seconds)
-        raise ValueError("kernel_action_not_implemented")
+        if urlparse(url).scheme not in {"http", "https"}:
+            raise ValueError("invalid_url_scheme")
+        runtime = await self._runtime(provider_session_id)
+        await runtime.page.goto(
+            url,
+            wait_until="domcontentloaded",
+            timeout=int(max(1, timeout_seconds) * 1000),
+        )
+        return ProviderGotoResult(
+            url=runtime.page.url,
+            title=await runtime.page.title(),
+            html=await runtime.page.content(),
+        )
 
     async def extract(
         self,
@@ -111,8 +230,17 @@ class KernelBrowserProvider:
         selector: str | None,
         max_chars: int,
     ) -> ProviderExtractResult:
-        _ = (provider_session_id, html, mode, selector, max_chars)
-        raise ValueError("kernel_action_not_implemented")
+        _ = html
+        runtime = await self._runtime(provider_session_id)
+        if mode == "title":
+            return ProviderExtractResult(
+                data={"title": (await runtime.page.title())[:max_chars]}
+            )
+        if mode != "text":
+            raise ValueError("unsupported_extract_mode")
+        locator = runtime.page.locator(selector or "body").first
+        text = await locator.inner_text(timeout=5000)
+        return ProviderExtractResult(data={"text": text[:max_chars]})
 
     async def click(
         self,
@@ -120,8 +248,8 @@ class KernelBrowserProvider:
         provider_session_id: str | None,
         selector: str,
     ) -> None:
-        _ = (provider_session_id, selector)
-        raise ValueError("kernel_action_not_implemented")
+        runtime = await self._runtime(provider_session_id)
+        await runtime.page.locator(selector).first.click()
 
     async def type(
         self,
@@ -131,8 +259,12 @@ class KernelBrowserProvider:
         text: str,
         clear_first: bool,
     ) -> None:
-        _ = (provider_session_id, selector, text, clear_first)
-        raise ValueError("kernel_action_not_implemented")
+        runtime = await self._runtime(provider_session_id)
+        locator = runtime.page.locator(selector).first
+        if clear_first:
+            await locator.fill(text)
+        else:
+            await locator.press_sequentially(text)
 
     async def wait_for(
         self,
@@ -141,13 +273,16 @@ class KernelBrowserProvider:
         selector: str,
         timeout_seconds: float,
     ) -> None:
-        _ = (provider_session_id, selector, timeout_seconds)
-        raise ValueError("kernel_action_not_implemented")
+        runtime = await self._runtime(provider_session_id)
+        await runtime.page.locator(selector).first.wait_for(
+            timeout=int(max(1, timeout_seconds) * 1000)
+        )
 
     async def screenshot(
         self,
         *,
         provider_session_id: str | None,
     ) -> ProviderScreenshotResult:
-        _ = provider_session_id
-        raise ValueError("kernel_action_not_implemented")
+        runtime = await self._runtime(provider_session_id)
+        image = await runtime.page.screenshot(type="png", full_page=True)
+        return ProviderScreenshotResult(image_bytes=image)

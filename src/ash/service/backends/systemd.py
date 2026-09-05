@@ -164,7 +164,7 @@ class SystemdBackend(ServiceBackend):
         ash_home = get_ash_home()
 
         unit_content = f"""[Unit]
-Description=Ash Personal Assistant Agent
+Description=Pigeon Personal Assistant Agent
 After=network.target
 
 [Service]

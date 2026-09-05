@@ -18,6 +18,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+class SearchProviderError(Exception):
+    """Error returned by the upstream search provider."""
+
+    def __init__(self, message: str, code: int = 0) -> None:
+        super().__init__(f"{message} (code: {code})")
+        self.message = message
+        self.code = code
+        self.status_code = code
+
+    def is_quota_or_billing_error(self) -> bool:
+        return self.code in {402, 429}
+
+
 def _extract_domains(response: SearchResponse) -> list[str]:
     domains: list[str] = []
     seen: set[str] = set()
@@ -371,7 +385,9 @@ class WebSearchTool(Tool):
 
             data = json.loads(output)
             if "error" in data:
-                raise Exception(f"{data['error']} (code: {data.get('code', 0)})")
+                raise SearchProviderError(
+                    str(data["error"]), int(data.get("code", 0) or 0)
+                )
 
             return SearchResponse.from_json(output)
 
@@ -394,6 +410,22 @@ class WebSearchTool(Tool):
                 domains=_extract_domains(response),
             )
 
+        except SearchProviderError as e:
+            logger.warning(
+                "search_provider_error",
+                extra={
+                    "search.query": query,
+                    "search.error_code": e.code,
+                    "error.message": e.message,
+                },
+            )
+            if e.is_quota_or_billing_error():
+                return ToolResult.error(
+                    f"Search error: {e}. Upstream search quota/billing is unavailable; "
+                    "try `openai_web_search` if available before giving up. "
+                    "Use `browser` only when the page requires interaction, authentication, or dynamic rendering."
+                )
+            return ToolResult.error(f"Search error: {e}")
         except Exception as e:
             logger.exception(f"Search error for query: {query}")
             return ToolResult.error(f"Search error: {e}")

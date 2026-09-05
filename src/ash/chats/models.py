@@ -44,6 +44,21 @@ class MutationConfirmation(BaseModel):
     summary: str | None = None
 
 
+class ActiveFocus(BaseModel):
+    """A recent external item the chat can naturally refer back to."""
+
+    kind: str
+    source_id: str
+    title: str
+    summary: str | None = None
+    telegram_message_id: str | None = None
+    thread_id: str | None = None
+    entities: list[str] = Field(default_factory=list)
+    metadata: dict[str, str] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    expires_at: datetime
+
+
 class ChatState(BaseModel):
     """State for a chat, stored in state.json."""
 
@@ -53,6 +68,7 @@ class ChatState(BaseModel):
     active_thread_id: str | None = None
     active_thread_updated_at: datetime | None = None
     active_thread_reason: str | None = None
+    active_focus: list[ActiveFocus] = Field(default_factory=list)
     mutation_confirmations: list[MutationConfirmation] = Field(default_factory=list)
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     graph_chat_id: str | None = None  # Reference to graph ChatEntry.id
@@ -122,6 +138,72 @@ class ChatState(BaseModel):
         if ts - self.active_thread_updated_at > timedelta(minutes=max_age):
             return None
         return self.active_thread_id
+
+    def add_active_focus(
+        self,
+        *,
+        kind: str,
+        source_id: str,
+        title: str,
+        summary: str | None = None,
+        telegram_message_id: str | None = None,
+        thread_id: str | None = None,
+        entities: list[str] | None = None,
+        metadata: dict[str, str] | None = None,
+        ttl_minutes: int = 240,
+        max_items: int = 8,
+        now: datetime | None = None,
+    ) -> ActiveFocus:
+        """Record a recent external item as conversational focus."""
+        ts = now or datetime.now(UTC)
+        self.prune_expired_focus(now=ts)
+        focus = ActiveFocus(
+            kind=kind,
+            source_id=source_id,
+            title=title.strip() or source_id,
+            summary=(summary or "").strip() or None,
+            telegram_message_id=(
+                str(telegram_message_id) if telegram_message_id is not None else None
+            ),
+            thread_id=str(thread_id) if thread_id is not None else None,
+            entities=_dedupe_focus_values(entities or []),
+            metadata=metadata or {},
+            created_at=ts,
+            expires_at=ts + timedelta(minutes=max(1, int(ttl_minutes))),
+        )
+        self.active_focus = [
+            item
+            for item in self.active_focus
+            if not (item.kind == focus.kind and item.source_id == focus.source_id)
+        ]
+        self.active_focus.append(focus)
+        limit = max(1, int(max_items))
+        if len(self.active_focus) > limit:
+            self.active_focus = self.active_focus[-limit:]
+        self.updated_at = ts
+        return focus
+
+    def get_recent_focus(
+        self,
+        *,
+        kind: str | None = None,
+        now: datetime | None = None,
+    ) -> list[ActiveFocus]:
+        """Return non-expired focus items, newest first."""
+        ts = now or datetime.now(UTC)
+        self.prune_expired_focus(now=ts)
+        items = self.active_focus
+        if kind is not None:
+            items = [item for item in items if item.kind == kind]
+        return list(reversed(items))
+
+    def prune_expired_focus(self, *, now: datetime | None = None) -> None:
+        """Remove expired conversational focus entries."""
+        ts = now or datetime.now(UTC)
+        before = len(self.active_focus)
+        self.active_focus = [item for item in self.active_focus if item.expires_at > ts]
+        if len(self.active_focus) != before:
+            self.updated_at = ts
 
     def add_mutation_confirmation(
         self,
@@ -234,3 +316,15 @@ class ChatState(BaseModel):
         if len(kept) != len(self.mutation_confirmations):
             self.mutation_confirmations = kept
             self.updated_at = ts
+
+
+def _dedupe_focus_values(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        normalized = " ".join(str(value).strip().lower().split())
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result

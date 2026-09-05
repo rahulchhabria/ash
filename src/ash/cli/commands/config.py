@@ -44,7 +44,7 @@ def register(app: typer.Typer) -> None:
         if action == "show":
             if not expanded_path.exists():
                 error(f"Config file not found: {expanded_path}")
-                console.print("Run 'ash init' to create one")
+                console.print("Run 'pigeon init' to create one")
                 raise typer.Exit(1)
 
             # Display raw TOML with syntax highlighting

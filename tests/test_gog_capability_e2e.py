@@ -426,11 +426,9 @@ async def test_gog_capability_rpc_stack_round_trip_and_policy_enforcement(
     assert list_private.error is None
     assert isinstance(list_private.result, dict)
     private_caps = {row["id"]: row for row in list_private.result["capabilities"]}
-    assert set(private_caps) == {"gog.email", "gog.calendar"}
+    assert set(private_caps) == {"gog.email"}
     assert private_caps["gog.email"]["available"] is True
-    assert private_caps["gog.calendar"]["available"] is True
     assert private_caps["gog.email"]["authenticated"] is False
-    assert private_caps["gog.calendar"]["authenticated"] is False
 
     list_group = await _rpc(
         server,
@@ -442,7 +440,6 @@ async def test_gog_capability_rpc_stack_round_trip_and_policy_enforcement(
     assert isinstance(list_group.result, dict)
     group_caps = {row["id"]: row for row in list_group.result["capabilities"]}
     assert group_caps["gog.email"]["available"] is False
-    assert group_caps["gog.calendar"]["available"] is False
 
     # ---- Auth begin (authorization code flow) for email ----
     begin_email = await _rpc(
@@ -571,56 +568,6 @@ async def test_gog_capability_rpc_stack_round_trip_and_policy_enforcement(
     assert labels_output["status"] == "updated"
     assert labels_output["updated_count"] == 1
 
-    # ---- Auth begin + complete for calendar ----
-    begin_calendar = await _rpc(
-        server,
-        request_id=7,
-        method="capability.auth.begin",
-        params={
-            "context_token": user1_private,
-            "capability": "gog.calendar",
-            "account_hint": "work",
-        },
-    )
-    assert begin_calendar.error is None
-    assert isinstance(begin_calendar.result, dict)
-    assert begin_calendar.result["flow_type"] == "authorization_code"
-    calendar_flow_id = str(begin_calendar.result["flow_id"])
-
-    # Complete calendar auth code flow
-    complete_calendar = await _rpc(
-        server,
-        request_id=8,
-        method="capability.auth.complete",
-        params={
-            "context_token": user1_private,
-            "flow_id": calendar_flow_id,
-            "code": "fake-auth-code-calendar",
-        },
-    )
-    assert complete_calendar.error is None
-    assert isinstance(complete_calendar.result, dict)
-    assert complete_calendar.result["ok"] is True
-
-    # ---- Invoke calendar list_events ----
-    invoke_calendar = await _rpc(
-        server,
-        request_id=10,
-        method="capability.invoke",
-        params={
-            "context_token": user1_private,
-            "capability": "gog.calendar",
-            "operation": "list_events",
-            "input": {"window": "7d"},
-        },
-    )
-    assert invoke_calendar.error is None
-    assert isinstance(invoke_calendar.result, dict)
-    calendar_output = invoke_calendar.result["output"]
-    assert calendar_output["count"] == 1
-    assert calendar_output["events"][0]["title"] == "Fake calendar event"
-    assert calendar_output["events"][0]["location"] == "Conference Room"
-
     # ---- Policy: group chat blocked ----
     group_blocked = await _rpc(
         server,
@@ -659,16 +606,11 @@ async def test_gog_capability_rpc_stack_round_trip_and_policy_enforcement(
 
     state_payload = json.loads(state_text)
     email_account = state_payload["accounts"]["user-1:gog.email:work"]
-    calendar_account = state_payload["accounts"]["user-1:gog.calendar:work"]
     assert email_account["account_email"] == "worker@example.com"
     assert email_account["account_name"] == "Work Account"
     assert email_account["google_sub"] == "google-user-1"
-    assert calendar_account["google_sub"] == "google-user-1"
     vault = FileVault(vault_path)
 
     email_vault_payload = vault.get_json(email_account["vault_ref"])
-    calendar_vault_payload = vault.get_json(calendar_account["vault_ref"])
     assert isinstance(email_vault_payload, dict)
-    assert isinstance(calendar_vault_payload, dict)
     assert email_vault_payload["access_token"] == _FAKE_ACCESS_TOKEN
-    assert calendar_vault_payload["access_token"] == _FAKE_ACCESS_TOKEN

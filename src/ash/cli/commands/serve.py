@@ -1,7 +1,8 @@
-"""Server command for running the Ash service."""
+"""Server command for running the Pigeon service."""
 
 import asyncio
 import logging
+import socket
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
@@ -44,7 +45,7 @@ def register(app: typer.Typer) -> None:
             ),
         ] = 8080,
     ) -> None:
-        """Start the Ash assistant server."""
+        """Start the Pigeon assistant server."""
         try:
             asyncio.run(_run_server(config, host, port))
         except KeyboardInterrupt:
@@ -65,6 +66,13 @@ async def _run_server(
 
     # Configure logging with Rich for colorful server output and file logging
     configure_logging(use_rich=True, log_to_file=True)
+
+    if _address_in_use(host, port):
+        logger.warning(
+            "server_address_already_in_use",
+            extra={"server.address": host, "server.port": port},
+        )
+        return
 
     from ash.config import load_config
     from ash.config.paths import (
@@ -232,6 +240,7 @@ async def _run_server(
                     memory_manager=components.memory_manager,
                     memory_extractor=components.memory_extractor,
                     agent_executor=components.agent_executor,
+                    integration_runtime=integration_runtime,
                 )
 
                 # Start server
@@ -364,3 +373,15 @@ async def _cleanup_server(
 
     remove_pid_file(pid_path)
     remove_runtime_state()
+
+
+def _address_in_use(host: str, port: int) -> bool:
+    """Return whether the configured TCP address is already occupied."""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, port))
+        except OSError:
+            return True
+    return False

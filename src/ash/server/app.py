@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
-from ash.server.routes import health, vapi
+from ash.server.routes import control, health, vapi
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -42,6 +42,7 @@ class AshServer:
         memory_manager: "Store | None" = None,
         memory_extractor: "MemoryExtractor | None" = None,
         agent_executor: "AgentExecutor | None" = None,
+        integration_runtime: object | None = None,
     ):
         self._agent = agent
         self._telegram_provider = telegram_provider
@@ -53,6 +54,7 @@ class AshServer:
         self._memory_manager = memory_manager
         self._memory_extractor = memory_extractor
         self._agent_executor = agent_executor
+        self._integration_runtime = integration_runtime
         self._telegram_handler: TelegramMessageHandler | None = None
 
         self._app = self._create_app()
@@ -103,7 +105,7 @@ class AshServer:
                 await self._telegram_provider.stop()
 
         app = FastAPI(
-            title="Ash",
+            title="Pigeon",
             description="Personal Assistant Agent API",
             version="0.1.0",
             lifespan=lifespan,
@@ -113,9 +115,13 @@ class AshServer:
         app.state.server = self
         app.state.agent = self._agent
         app.state.config = self._config
+        app.state.integration_runtime = self._integration_runtime
+        app.state.skill_registry = self._skill_registry
+        app.state.memory_manager = self._memory_manager
 
         # Include routes
         app.include_router(health.router, tags=["health"])
+        app.include_router(control.router, tags=["control"])
         app.include_router(vapi.router, tags=["webhooks"])
 
         if self._telegram_provider:
@@ -139,6 +145,7 @@ def create_app(
     memory_manager: "Store | None" = None,
     memory_extractor: "MemoryExtractor | None" = None,
     agent_executor: "AgentExecutor | None" = None,
+    integration_runtime: object | None = None,
 ) -> FastAPI:
     """Create the FastAPI application."""
     server = AshServer(
@@ -152,5 +159,6 @@ def create_app(
         memory_manager=memory_manager,
         memory_extractor=memory_extractor,
         agent_executor=agent_executor,
+        integration_runtime=integration_runtime,
     )
     return server.app
