@@ -1,11 +1,11 @@
 """LLM message types and data structures."""
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class Role(str, Enum):
+class Role(StrEnum):
     """Message role."""
 
     USER = "user"
@@ -13,7 +13,7 @@ class Role(str, Enum):
     SYSTEM = "system"
 
 
-class ContentBlockType(str, Enum):
+class ContentBlockType(StrEnum):
     """Content block type."""
 
     TEXT = "text"
@@ -21,7 +21,7 @@ class ContentBlockType(str, Enum):
     TOOL_RESULT = "tool_result"
 
 
-class StreamEventType(str, Enum):
+class StreamEventType(StrEnum):
     """Stream event type."""
 
     TEXT_DELTA = "text_delta"

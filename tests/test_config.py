@@ -47,12 +47,15 @@ class TestSandboxConfig:
         assert config.memory_limit == "512m"
         assert config.cpu_limit == 1.0
         assert config.runtime == "runc"
-        assert config.network_mode == "bridge"
+        assert config.network_mode == "none"
         assert config.dns_servers == []
         assert config.http_proxy is None
         assert config.workspace_access == "rw"
-        assert config.github_auth_access == "ro"
+        assert config.github_auth_access == "none"
         assert config.github_config_path.name == "gh"
+        assert config.sessions_access == "none"
+        assert config.chats_access == "none"
+        assert config.logs_access == "none"
 
     def test_gvisor_runtime(self):
         config = SandboxConfig(runtime="runsc")
@@ -171,6 +174,29 @@ class TestAshConfig:
     def test_missing_required_field(self):
         with pytest.raises(ValidationError):
             AshConfig()
+
+    def test_resolves_non_secret_tool_environment(self, monkeypatch):
+        monkeypatch.setenv("ASH_TEST_REGION", "us-west")
+        config = AshConfig(
+            models={"default": ModelConfig(provider="openai", model="test")},
+            env={"REGION": "$ASH_TEST_REGION", "LOG_LEVEL": "debug"},
+        )
+
+        assert config.get_resolved_env() == {
+            "REGION": "us-west",
+            "LOG_LEVEL": "debug",
+        }
+
+    @pytest.mark.parametrize(
+        "name",
+        ["API_KEY", "GITHUB_TOKEN", "CLIENT_SECRET", "DB_PASSWORD", "AUTH"],
+    )
+    def test_rejects_secret_like_tool_environment(self, name):
+        with pytest.raises(ValidationError, match="cannot expose secret-like"):
+            AshConfig(
+                models={"default": ModelConfig(provider="openai", model="test")},
+                env={name: "secret"},
+            )
 
 
 class TestLoadConfig:

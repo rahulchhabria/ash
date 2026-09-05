@@ -139,7 +139,7 @@ VERIFICATION_TESTS: list[VerificationTest] = [
     ),
     VerificationTest(
         name="tmp_writable",
-        description="/tmp is writable (tmpfs)",  # noqa: S108
+        description="/tmp is writable (tmpfs)",  # noqa: S108  # nosec B108
         category=TestCategory.RESOURCES,
         command="echo 'test' > /tmp/test_file && cat /tmp/test_file && rm /tmp/test_file",
         expect_success=True,
@@ -155,7 +155,7 @@ VERIFICATION_TESTS: list[VerificationTest] = [
     ),
     VerificationTest(
         name="tmp_noexec",
-        description="/tmp has noexec (can't run scripts directly)",  # noqa: S108
+        description="/tmp has noexec (can't run scripts directly)",  # noqa: S108  # nosec B108
         category=TestCategory.RESOURCES,
         command="echo '#!/bin/bash\necho hello' > /tmp/test.sh && chmod +x /tmp/test.sh && /tmp/test.sh 2>&1",
         expect_success=False,

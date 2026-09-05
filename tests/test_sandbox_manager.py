@@ -1,6 +1,8 @@
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 from ash.sandbox.manager import SandboxConfig, SandboxManager
 
 
@@ -40,6 +42,7 @@ async def test_create_container_mounts_run_dir_for_rpc_socket(tmp_path: Path) ->
 
     assert fake_client.containers.last_create_kwargs is not None
     volumes = fake_client.containers.last_create_kwargs["volumes"]
+    assert volumes[str(run_dir)]["mode"] == "ro"
     env = fake_client.containers.last_create_kwargs["environment"]
     assert str(run_dir) in volumes
     assert volumes[str(run_dir)]["bind"] == "/ash/run"
@@ -160,29 +163,14 @@ async def test_create_container_sets_ash_skill_dirs_env(tmp_path: Path) -> None:
     assert "/ash/integrations/todo/skills" in skill_dirs
 
 
-async def test_create_container_mounts_github_auth_readonly(tmp_path: Path) -> None:
+def test_manager_rejects_direct_github_auth_mount(tmp_path: Path) -> None:
     gh_config = tmp_path / "gh"
     gh_config.mkdir()
 
-    manager = SandboxManager(config=SandboxConfig(github_config_path=gh_config))
-    fake_client = _FakeDockerClient()
-    manager._client = cast(Any, fake_client)
-
-    async def _ensure_client():
-        return fake_client
-
-    manager._ensure_client = _ensure_client  # type: ignore[method-assign]
-
-    await manager.create_container()
-
-    assert fake_client.containers.last_create_kwargs is not None
-    volumes = fake_client.containers.last_create_kwargs["volumes"]
-    env = fake_client.containers.last_create_kwargs["environment"]
-    assert volumes[str(gh_config)] == {
-        "bind": "/home/sandbox/.config/gh",
-        "mode": "ro",
-    }
-    assert env["GH_CONFIG_DIR"] == "/home/sandbox/.config/gh"
+    with pytest.raises(ValueError, match="credential mounts are forbidden"):
+        SandboxManager(
+            config=SandboxConfig(github_config_path=gh_config, github_auth_access="ro")
+        )
 
 
 async def test_create_container_skips_github_auth_when_disabled(tmp_path: Path) -> None:
@@ -262,6 +250,7 @@ class _FakeExecAPI:
 class _FakeContainerForExec:
     def __init__(self) -> None:
         self.id = "container-1"
+        self.remove_force: bool | None = None
         self.attrs = {
             "Config": {
                 "Env": [
@@ -271,6 +260,9 @@ class _FakeContainerForExec:
                 ]
             }
         }
+
+    def remove(self, *, force: bool) -> None:
+        self.remove_force = force
 
 
 class _FakeDockerClientForExec:
@@ -317,3 +309,30 @@ async def test_exec_command_preserves_container_rpc_env_when_overriding(
     assert env_map["ASH_RPC_PORT"] == "50000"
     assert env_map["ASH_CONTEXT_TOKEN"] == "token-value"
     assert env_map["EXTRA_VAR"] == "1"
+
+
+async def test_exec_timeout_force_removes_container(monkeypatch) -> None:
+    manager = SandboxManager(config=SandboxConfig())
+    fake_client = _FakeDockerClientForExec()
+    container = _FakeContainerForExec()
+    manager._client = cast(Any, fake_client)
+    manager._containers[container.id] = cast(Any, container)
+
+    async def _ensure_client():
+        return fake_client
+
+    async def _raise_timeout(awaitable, **_kwargs):
+        awaitable.close()
+        raise TimeoutError
+
+    manager._ensure_client = _ensure_client  # type: ignore[method-assign]
+    monkeypatch.setattr("ash.sandbox.manager.asyncio.wait_for", _raise_timeout)
+
+    exit_code, stdout, stderr = await manager.exec_command(
+        container.id, "sleep 100", timeout=1
+    )
+
+    assert (exit_code, stdout) == (-1, "")
+    assert "timed out" in stderr
+    assert container.remove_force is True
+    assert container.id not in manager._containers

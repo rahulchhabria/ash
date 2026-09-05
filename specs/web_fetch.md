@@ -9,12 +9,16 @@ Files: src/ash/tools/builtin/web_fetch.py
 ### MUST
 
 - Execute HTTP requests inside Docker sandbox
-- Require network_mode: bridge (error if none)
+- Use a dedicated one-use sandbox with bridge networking
 - Support HTTP and HTTPS URLs
 - Extract readable text content from HTML pages
 - Remove script, style, and other non-content elements
 - Handle HTTP redirects (up to 5 hops)
 - Report final URL after redirects
+- Reject embedded URL credentials and non-global IP targets
+- Resolve and validate every redirect destination inside the fetching container
+- Pin each connection to its validated DNS result and ignore ambient proxy variables
+- Bound downloaded response bodies before extraction
 - Respect timeout (30s default)
 - Truncate content at max_length parameter
 - Return structured JSON response with metadata
@@ -80,7 +84,7 @@ class WebFetchTool(Tool):
 
 | Condition | Response |
 |-----------|----------|
-| network_mode: none | ToolResult.error("Web fetch requires network_mode: bridge") |
+| Private, local, or unresolvable target | ToolResult.error before content is returned |
 | Invalid URL | ToolResult.error("Invalid URL: must be http or https") |
 | HTTP 404 | ToolResult.error("Page not found (404)") |
 | HTTP 403 | ToolResult.error("Access forbidden (403)") |
@@ -99,5 +103,5 @@ uv run pytest tests/test_web_fetch.py -v
 - Links and headings preserved
 - Content truncated at max_length
 - Cache hit on repeated URLs
-- Proper error on network_mode: none
+- General sandbox remains offline while fetch uses a one-use networked container
 - Redirect chain followed correctly

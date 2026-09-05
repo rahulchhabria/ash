@@ -11,8 +11,8 @@ import pytest
 
 from ash.chats import ChatStateManager
 from ash.config import AshConfig
-from ash.config.paths import get_ash_home
 from ash.config.models import ModelConfig
+from ash.config.paths import get_ash_home
 from ash.integrations.email_forward_summary import (
     CONTEXT_FOOTER,
     CONTEXT_HEADER,

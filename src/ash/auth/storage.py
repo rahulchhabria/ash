@@ -2,6 +2,8 @@
 
 import json
 import logging
+import os
+import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -31,7 +33,12 @@ class AuthStorage:
 
     def __init__(self, path: Path | None = None) -> None:
         self._path = path or (get_ash_home() / "auth.json")
-        self._lock = FileLock(str(self._path) + ".lock")
+        self._ensure_parent()
+        self._lock = FileLock(str(self._path) + ".lock", mode=0o600)
+
+    def _ensure_parent(self) -> None:
+        self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._path.parent.chmod(0o700)
 
     @property
     def path(self) -> Path:
@@ -47,10 +54,26 @@ class AuthStorage:
             return {}
 
     def _write_all(self, data: dict[str, dict[str, str | float]]) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(data, indent=2) + "\n")
-        # Set restrictive permissions (owner only)
-        self._path.chmod(0o600)
+        self._ensure_parent()
+        payload = json.dumps(data, indent=2) + "\n"
+        fd, temp_name = tempfile.mkstemp(
+            dir=self._path.parent,
+            prefix=f".{self._path.name}.",
+            suffix=".tmp",
+        )
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fd = -1
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            Path(temp_name).replace(self._path)
+            self._path.chmod(0o600)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            Path(temp_name).unlink(missing_ok=True)
 
     def load(self, provider_id: str) -> OAuthCredentials | None:
         """Load credentials for a provider.

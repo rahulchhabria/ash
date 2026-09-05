@@ -6,7 +6,7 @@ summarization can help preserve context window while retaining key information.
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ash.tools.truncation import _save_to_temp
 
@@ -51,13 +51,13 @@ class SummarizationResult:
     full_output_path: str | None = None
     error: str | None = None
 
-    def to_metadata(self) -> dict:
+    def to_metadata(self) -> dict[str, Any]:
         """Convert to metadata dict for ToolResult.
 
         Note: full_output_path is intentionally excluded from agent-facing
         metadata since it's a host path the agent cannot access.
         """
-        meta = {
+        meta: dict[str, Any] = {
             "summarized": self.summarized,
             "original_bytes": self.original_bytes,
         }

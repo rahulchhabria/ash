@@ -230,7 +230,7 @@ class TelegramProvider(Provider):
 
     def _is_user_allowed(self, user_id: int, username: str | None) -> bool:
         if not self._allowed_users:
-            return True
+            return False
         return str(user_id) in self._allowed_users or (
             username is not None and f"@{username}" in self._allowed_users
         )
@@ -355,13 +355,13 @@ class TelegramProvider(Provider):
     async def _should_process_message(
         self, message: TelegramMessage
     ) -> ProcessingResult:
-        """Check if a message should be processed, log and record all incoming messages.
+        """Check if a message should be processed and record authorized messages.
 
         This method:
         1. Evaluates whether the message should trigger a bot response
         2. Determines processing mode (active vs passive)
-        3. Logs ALL incoming messages with metadata about the processing decision
-        4. Records ALL incoming messages to per-chat JSONL files for observability
+        3. Logs all incoming messages with metadata about the processing decision
+        4. Records authorized messages to per-chat JSONL files for observability
 
         Returns:
             ("active", user_id, username) for mentioned/replied messages
@@ -381,11 +381,13 @@ class TelegramProvider(Provider):
             is_group = message.chat.type in ("group", "supergroup")
             if is_group:
                 # Group message decision tree:
-                # 1. Check if group is in the allowed list
+                # 1. Check both the sender and group allowlists
                 # 2. If mention mode: check if bot was @mentioned or replied to
                 # 3. If not mentioned but passive listening enabled: route to passive
                 # 4. Otherwise: skip the message
-                if not self._is_group_allowed(message.chat.id):
+                if not self._is_user_allowed(message.from_user.id, username):
+                    skip_reason = "user_not_allowed"
+                elif not self._is_group_allowed(message.chat.id):
                     skip_reason = "group_not_allowed"
                 elif self._group_mode == "mention":
                     is_mentioned = self._is_mentioned(message)
@@ -409,7 +411,7 @@ class TelegramProvider(Provider):
                     processing_mode = "active"
             else:
                 # Direct message (DM): just check user allowlist
-                if not self._is_user_allowed(user_id, username):  # type: ignore[arg-type]
+                if not self._is_user_allowed(message.from_user.id, username):
                     skip_reason = "user_not_allowed"
                 else:
                     processing_mode = "active"
@@ -444,10 +446,16 @@ class TelegramProvider(Provider):
                 },
             )
 
-        # Record ALL incoming user messages to chat-level history.jsonl
+        # Authorization failures must not reach shared history. Authorized messages
+        # that do not trigger a response are still useful to passive chat context.
         # Format: specs/sessions.md#historyjsonl
         text = message.text or message.caption or ""
-        if text:
+        authorization_failed = skip_reason in {
+            "no_user",
+            "user_not_allowed",
+            "group_not_allowed",
+        }
+        if text and not authorization_failed:
             history_metadata: dict[str, Any] = {
                 "external_id": str(message.message_id),
                 "was_processed": processing_mode is not None,
@@ -472,7 +480,9 @@ class TelegramProvider(Provider):
 
         if skip_reason or processing_mode is None:
             return None
-        return processing_mode, user_id, username  # type: ignore[return-value]
+        if user_id is None:
+            return None
+        return processing_mode, user_id, username
 
     def _to_incoming_message(
         self,

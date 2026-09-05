@@ -6,6 +6,7 @@ any entry type that implements to_dict/from_dict (MemoryEntry, PersonEntry).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import tempfile
@@ -112,11 +113,11 @@ class TypedJSONL[T: Serializable]:
                     await f.write(line + "\n")
 
             # Atomic rename
-            Path(temp_path).replace(self.path)
+            await asyncio.to_thread(Path(temp_path).replace, self.path)
         except Exception:
             # Clean up temp file on error
             try:
-                Path(temp_path).unlink()
+                await asyncio.to_thread(Path(temp_path).unlink)
             except OSError:
                 pass
             raise

@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, build_opener
 
 from ash.config.paths import get_vault_path
 from ash.security.vault import FileVault, VaultError
@@ -109,6 +111,15 @@ class BridgeError(ValueError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+
+def _open_without_redirects(request: Any) -> Any:
+    return build_opener(_NoRedirectHandler()).open(request, timeout=30)
 
 
 def _b64url_encode(data: bytes) -> str:
@@ -296,17 +307,30 @@ def _read_state() -> dict[str, Any]:
 
 def _write_state(state: dict[str, Any]) -> None:
     path = _state_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile(
-        mode="w",
-        delete=False,
-        dir=str(path.parent),
-        encoding="utf-8",
-    ) as handle:
-        json.dump(state, handle, ensure_ascii=True, sort_keys=True)
-        handle.write("\n")
-        temp_path = Path(handle.name)
-    temp_path.replace(path)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
+    temp_path: Path | None = None
+    try:
+        with NamedTemporaryFile(
+            mode="w",
+            delete=False,
+            dir=str(path.parent),
+            encoding="utf-8",
+        ) as handle:
+            json.dump(state, handle, ensure_ascii=True, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+            temp_path = Path(handle.name)
+        temp_path.chmod(0o600)
+        temp_path.replace(path)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
 
 
 def _account_key(user_id: str, capability_id: str, account_ref: str) -> str:
@@ -358,6 +382,29 @@ def _require_namespaced_capability(capability_id: Any) -> str:
     return capability
 
 
+def _validated_google_url(url: str) -> str:
+    parsed = urlsplit(url)
+    hostname = (parsed.hostname or "").lower()
+    is_loopback = hostname in {"127.0.0.1", "localhost", "::1"}
+    is_google_api = (
+        hostname == "accounts.google.com"
+        or hostname == "googleapis.com"
+        or hostname.endswith(".googleapis.com")
+    )
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or (not is_loopback and (parsed.scheme != "https" or not is_google_api))
+    ):
+        raise BridgeError(
+            "capability_invalid_input",
+            "Google endpoint must use Google HTTPS or loopback",
+        )
+    return url
+
+
 def _google_oauth_base_url() -> str:
     value = _optional_text(os.environ.get(ENV_GOOGLE_OAUTH_BASE_URL))
     return value or DEFAULT_GOOGLE_OAUTH_BASE_URL
@@ -378,7 +425,7 @@ def _scopes_support_device_code(scope_string: str) -> bool:
 def _google_authorization_url() -> str:
     value = _optional_text(os.environ.get(ENV_GOOGLE_AUTH_BASE_URL))
     base = value or DEFAULT_GOOGLE_AUTH_BASE_URL
-    return f"{base}/o/oauth2/v2/auth"
+    return _validated_google_url(f"{base}/o/oauth2/v2/auth")
 
 
 def _google_userinfo_url() -> str:
@@ -416,7 +463,6 @@ def _google_gmail_api_base_url() -> str:
     return value or DEFAULT_GOOGLE_GMAIL_API_BASE_URL
 
 
-
 def _google_api_request(
     method: str,
     url: str,
@@ -428,7 +474,7 @@ def _google_api_request(
     """Authenticated HTTP request to a Google API endpoint."""
     from urllib.error import HTTPError, URLError
     from urllib.parse import urlencode
-    from urllib.request import Request, urlopen
+    from urllib.request import Request
 
     if params:
         url = f"{url}?{urlencode(params, doseq=True)}"
@@ -437,12 +483,12 @@ def _google_api_request(
     if json_body is not None:
         data = json.dumps(json_body).encode("utf-8")
 
-    request = Request(url, data=data, method=method)  # noqa: S310
+    request = Request(_validated_google_url(url), data=data, method=method)  # noqa: S310
     request.add_header("Authorization", f"Bearer {access_token}")
     if data is not None:
         request.add_header("Content-Type", "application/json")
     try:
-        with urlopen(request, timeout=30) as resp:  # noqa: S310
+        with _open_without_redirects(request) as resp:
             raw_body = resp.read().decode("utf-8").strip()
             if not raw_body:
                 return {}
@@ -662,13 +708,13 @@ def _http_post_form(url: str, params: dict[str, str]) -> dict[str, Any]:
     """POST form-encoded data and return parsed JSON response."""
     from urllib.error import HTTPError, URLError
     from urllib.parse import urlencode
-    from urllib.request import Request, urlopen
+    from urllib.request import Request
 
     body = urlencode(params).encode("utf-8")
-    request = Request(url, data=body, method="POST")  # noqa: S310
+    request = Request(_validated_google_url(url), data=body, method="POST")  # noqa: S310
     request.add_header("Content-Type", "application/x-www-form-urlencoded")
     try:
-        with urlopen(request, timeout=30) as resp:  # noqa: S310
+        with _open_without_redirects(request) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except HTTPError as e:
         try:
@@ -2026,7 +2072,6 @@ def _invoke_update_labels(
             "account_ref": account_ref,
         }
     }
-
 
 
 def _dispatch(method: str, params: dict[str, Any]) -> dict[str, Any]:

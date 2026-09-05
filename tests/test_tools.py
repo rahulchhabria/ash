@@ -7,7 +7,7 @@ import pytest
 
 from ash.sandbox.executor import ExecutionResult
 from ash.tools.base import ToolContext
-from ash.tools.builtin.web_search import WebSearchTool
+from ash.tools.builtin.web_search import SEARCH_SCRIPT, WebSearchTool
 from ash.tools.executor import ToolExecutor
 from ash.tools.registry import ToolRegistry
 
@@ -179,6 +179,10 @@ class TestToolExecutor:
 class TestWebSearchTool:
     """Tests for WebSearchTool with mocked sandbox execution."""
 
+    def test_embedded_search_rejects_api_key_redirects(self):
+        compile(SEARCH_SCRIPT, "<web-search>", "exec")
+        assert "build_opener(_NoRedirectHandler())" in SEARCH_SCRIPT
+
     @pytest.fixture
     def mock_sandbox_config(self):
         """Create a mock sandbox config with network enabled."""
@@ -202,13 +206,13 @@ class TestWebSearchTool:
             mock.return_value = executor_instance
             yield executor_instance
 
-    def test_requires_network_mode_bridge(self):
-        """Test that web search requires network_mode: bridge."""
-        config = MagicMock()
-        config.network_mode = "none"
-
-        with pytest.raises(ValueError, match="requires network_mode: bridge"):
-            WebSearchTool(api_key="test-key", sandbox_config=config)
+    def test_uses_dedicated_bridge_network(self, mock_sandbox_config):
+        """Web search networking is independent from the general sandbox."""
+        mock_sandbox_config.network_mode = "none"
+        with patch("ash.tools.builtin.web_search.SandboxExecutor") as executor_cls:
+            WebSearchTool(api_key="test-key", sandbox_config=mock_sandbox_config)
+        manager_config = executor_cls.call_args.kwargs["config"]
+        assert manager_config.network_mode == "bridge"
 
     def test_init_with_bridge_network(self, mock_sandbox_config, mock_executor):
         """Test initialization with valid config."""

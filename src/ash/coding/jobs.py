@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from builtins import list as builtin_list
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -128,7 +129,7 @@ class CodingJobStore:
             return None
         return CodingJob.from_dict(json.loads(path.read_text()))
 
-    def list(self, *, limit: int = 10) -> list[CodingJob]:
+    def list(self, *, limit: int = 10) -> builtin_list[CodingJob]:
         jobs: list[CodingJob] = []
         for path in sorted(self.root.glob("code-*.json"), reverse=True):
             try:

@@ -56,6 +56,9 @@ group_mode = "mention"  # respond when mentioned
 
 <Aside type="tip">
   Keep `allowed_users` and `allowed_groups` narrow in shared chats.
+  An empty `allowed_users` list authorizes nobody. Group messages require both an
+  allowed group and an allowed sender; rejected messages are not written to shared
+  chat history.
 </Aside>
 
 ## Troubleshooting

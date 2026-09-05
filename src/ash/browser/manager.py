@@ -11,13 +11,18 @@ import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ash.browser.providers.base import BrowserProvider, ProviderGotoResult
 from ash.browser.providers.kernel import KernelBrowserProvider
 from ash.browser.providers.sandbox import SandboxBrowserProvider
 from ash.browser.store import BrowserStore
-from ash.browser.types import BrowserActionResult, BrowserProfile, BrowserSession
+from ash.browser.types import (
+    BrowserActionResult,
+    BrowserProfile,
+    BrowserProviderName,
+    BrowserSession,
+)
 from ash.config import AshConfig
 from ash.config.paths import get_browser_path
 
@@ -168,9 +173,12 @@ class BrowserManager:
 
         await self._apply_retention_policies(effective_user_id=effective_user_id)
 
-        provider_key = (provider_name or self._config.browser.provider).strip().lower()
+        provider_key = cast(
+            BrowserProviderName,
+            (provider_name or self._config.browser.provider).strip().lower(),
+        )
         provider = self._providers.get(provider_key)
-        if provider is None:
+        if provider_key not in ("sandbox", "kernel") or provider is None:
             return BrowserActionResult(
                 ok=False,
                 action=action,
@@ -340,7 +348,7 @@ class BrowserManager:
         self,
         *,
         provider: BrowserProvider,
-        provider_key: str,
+        provider_key: BrowserProviderName,
         effective_user_id: str,
         session_name: str | None,
         profile_name: str | None,
@@ -361,7 +369,7 @@ class BrowserManager:
             id=session_id,
             name=resolved_name,
             effective_user_id=effective_user_id,
-            provider=provider_key,  # type: ignore[arg-type]
+            provider=provider_key,
             profile_name=profile_name,
             provider_session_id=started.provider_session_id,
             metadata=dict(started.metadata),
@@ -380,7 +388,7 @@ class BrowserManager:
                 profile = BrowserProfile(
                     name=profile_name,
                     effective_user_id=effective_user_id,
-                    provider=provider_key,  # type: ignore[arg-type]
+                    provider=provider_key,
                     created_at=now,
                     updated_at=now,
                 )

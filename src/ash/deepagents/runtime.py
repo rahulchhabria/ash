@@ -14,7 +14,7 @@ import inspect
 import json
 import os
 import shlex
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Coroutine, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -449,7 +449,7 @@ class AshSandboxShellBackend:
         result = await self.executor.execute(
             command,
             timeout=command_timeout,
-            reuse_container=True,
+            reuse_container=False,
             environment=self.context.env,
         )
         return {
@@ -666,7 +666,9 @@ class AshToolCallableFactory:
     executor: ToolExecutor
     context: ToolContext = field(default_factory=_default_tool_context)
 
-    def make_async_callable(self, tool_name: str) -> Callable[..., Awaitable[str]]:
+    def make_async_callable(
+        self, tool_name: str
+    ) -> Callable[..., Coroutine[Any, Any, str]]:
         async def _async_tool(**kwargs: Any) -> str:
             result = await self.executor.execute(tool_name, kwargs, self.context)
             if result.is_error:

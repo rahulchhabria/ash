@@ -2,26 +2,34 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import hmac
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from ash.events import event_to_dict, read_events, record_event
+from ash.events import event_to_dict, read_events, record_event, validate_event_metadata
 from ash.skills.packages import scan_skill_packages
 
 router = APIRouter()
 
 
 class EventPayload(BaseModel):
-    source: str = "external"
-    kind: str = "event"
-    title: str
-    body: str = ""
+    source: str = Field(default="external", min_length=1, max_length=100)
+    kind: str = Field(default="event", min_length=1, max_length=100)
+    title: str = Field(min_length=1, max_length=300)
+    body: str = Field(default="", max_length=50_000)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("metadata")
+    @classmethod
+    def _validate_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return validate_event_metadata(value)
 
 
 def _config(request: Request):
@@ -29,6 +37,25 @@ def _config(request: Request):
     if config is None:
         raise HTTPException(status_code=503, detail="config unavailable")
     return config
+
+
+def _authorization_matches(expected_token: str, authorization: str | None) -> bool:
+    if not authorization:
+        return False
+    candidate = ""
+    if authorization.startswith("Bearer "):
+        candidate = authorization.removeprefix("Bearer ")
+    elif authorization.startswith("Basic "):
+        try:
+            decoded = base64.b64decode(
+                authorization.removeprefix("Basic "), validate=True
+            ).decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError):
+            return False
+        _, separator, candidate = decoded.partition(":")
+        if not separator:
+            return False
+    return hmac.compare_digest(candidate, expected_token)
 
 
 def _require_event_auth(request: Request, authorization: str | None) -> None:
@@ -41,16 +68,22 @@ def _require_event_auth(request: Request, authorization: str | None) -> None:
             status_code=503,
             detail="event router authentication is required but not configured",
         )
-    expected = f"Bearer {token.get_secret_value()}"
-    if authorization != expected:
-        raise HTTPException(status_code=401, detail="invalid bearer token")
+    if not _authorization_matches(token.get_secret_value(), authorization):
+        raise HTTPException(
+            status_code=401,
+            detail="invalid authorization",
+            headers={"WWW-Authenticate": 'Basic realm="Ash Control", Bearer'},
+        )
 
 
 @router.get("/dashboard", response_class=HTMLResponse)
-async def dashboard(request: Request) -> str:
+async def dashboard(
+    request: Request, authorization: str | None = Header(default=None)
+) -> str:
     config = _config(request)
     if not config.dashboard.enabled:
         raise HTTPException(status_code=404, detail="dashboard disabled")
+    _require_event_auth(request, authorization)
     return """<!doctype html>
 <html lang="en">
 <head>
@@ -88,8 +121,13 @@ async def dashboard(request: Request) -> str:
 
 
 @router.get("/dashboard/status")
-async def dashboard_status(request: Request) -> dict[str, Any]:
+async def dashboard_status(
+    request: Request, authorization: str | None = Header(default=None)
+) -> dict[str, Any]:
     config = _config(request)
+    if not config.dashboard.enabled:
+        raise HTTPException(status_code=404, detail="dashboard disabled")
+    _require_event_auth(request, authorization)
     runtime = getattr(request.app.state, "integration_runtime", None)
     health = asdict(runtime.health_snapshot()) if runtime else None
     return {
@@ -109,15 +147,28 @@ async def dashboard_status(request: Request) -> dict[str, Any]:
 
 
 @router.get("/dashboard/skills")
-async def dashboard_skills(request: Request) -> list[dict[str, Any]]:
+async def dashboard_skills(
+    request: Request, authorization: str | None = Header(default=None)
+) -> list[dict[str, Any]]:
     config = _config(request)
+    if not config.dashboard.enabled:
+        raise HTTPException(status_code=404, detail="dashboard disabled")
+    _require_event_auth(request, authorization)
     if not config.skill_packages.enabled:
         return []
     return scan_skill_packages(Path(config.workspace) / "skills")
 
 
 @router.get("/events")
-async def events(limit: int = 50) -> list[dict[str, Any]]:
+async def events(
+    request: Request,
+    limit: int = 50,
+    authorization: str | None = Header(default=None),
+) -> list[dict[str, Any]]:
+    config = _config(request)
+    if not config.event_router.enabled:
+        raise HTTPException(status_code=404, detail="event router disabled")
+    _require_event_auth(request, authorization)
     return read_events(limit=max(1, min(limit, 200)))
 
 

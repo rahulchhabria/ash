@@ -183,6 +183,7 @@ def build_sandbox_manager_config(
     config: "SandboxConfig | None",
     workspace_path: Path | None,
     default_network_mode: Literal["none", "bridge"] = "none",
+    network_mode_override: Literal["none", "bridge"] | None = None,
 ) -> "SandboxManagerConfig":
     import ash.integrations
     import ash.skills
@@ -219,7 +220,6 @@ def build_sandbox_manager_config(
         return SandboxManagerConfig(
             workspace_path=workspace_path,
             network_mode=default_network_mode,
-            github_config_path=Path.home() / ".config" / "gh",
             sessions_path=sessions_path,
             chats_path=chats_path,
             logs_path=logs_path,
@@ -238,7 +238,7 @@ def build_sandbox_manager_config(
         memory_limit=config.memory_limit,
         cpu_limit=config.cpu_limit,
         runtime=config.runtime,
-        network_mode=config.network_mode,
+        network_mode=network_mode_override or config.network_mode,
         dns_servers=list(config.dns_servers) if config.dns_servers else [],
         http_proxy=config.http_proxy,
         workspace_path=workspace_path,
@@ -248,7 +248,9 @@ def build_sandbox_manager_config(
         sessions_path=sessions_path,
         sessions_access=config.sessions_access,
         chats_path=chats_path,
+        chats_access=config.chats_access,
         logs_path=logs_path,
+        logs_access=config.logs_access,
         rpc_socket_path=rpc_socket_path,
         uv_cache_path=uv_cache_path,
         source_path=source_path,

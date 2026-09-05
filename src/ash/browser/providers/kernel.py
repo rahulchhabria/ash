@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from ash.browser.providers.base import (
     ProviderExtractResult,
@@ -19,6 +19,11 @@ from ash.browser.providers.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, *_args: object, **_kwargs: object) -> None:
+        return None
 
 
 @dataclass(slots=True)
@@ -41,7 +46,18 @@ class KernelBrowserProvider:
         project_id: str | None,
     ) -> None:
         self._api_key = (api_key or "").strip()
-        self._base_url = base_url.rstrip("/")
+        normalized_base_url = base_url.rstrip("/")
+        parsed_base_url = urlparse(normalized_base_url)
+        is_loopback = parsed_base_url.hostname in {"127.0.0.1", "localhost", "::1"}
+        if (
+            not parsed_base_url.hostname
+            or parsed_base_url.username is not None
+            or parsed_base_url.password is not None
+            or parsed_base_url.scheme not in {"http", "https"}
+            or (parsed_base_url.scheme == "http" and not is_loopback)
+        ):
+            raise ValueError("kernel_base_url_must_be_https_or_loopback")
+        self._base_url = normalized_base_url
         self._project_id = project_id
         self._runtimes: dict[str, _KernelRuntime] = {}
         self._runtime_lock = asyncio.Lock()
@@ -72,7 +88,8 @@ class KernelBrowserProvider:
             headers=self._auth_headers(),
         )
         try:
-            with urlopen(request, timeout=20) as response:  # noqa: S310
+            opener = build_opener(_NoRedirectHandler())
+            with opener.open(request, timeout=20) as response:
                 raw = response.read()
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:300]
@@ -101,9 +118,7 @@ class KernelBrowserProvider:
         try:
             browser = await playwright.chromium.connect_over_cdp(cdp_ws_url)
             context = (
-                browser.contexts[0]
-                if browser.contexts
-                else await browser.new_context()
+                browser.contexts[0] if browser.contexts else await browser.new_context()
             )
             page = context.pages[0] if context.pages else await context.new_page()
         except Exception:

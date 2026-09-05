@@ -98,12 +98,14 @@ def _fetch_json(url: str) -> dict[str, Any]:
         url, headers={"User-Agent": "ash-close-game-alert/2.0"}
     )
     try:
-        with urlopen(request, timeout=20) as response:  # noqa: S310
+        with urlopen(request, timeout=20) as response:  # noqa: S310  # nosec B310
             payload = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         raise RuntimeError(f"HTTP {exc.code} from NBA endpoint: {url}") from exc
     except URLError as exc:
-        raise RuntimeError(f"Network error reaching NBA endpoint: {exc.reason}") from exc
+        raise RuntimeError(
+            f"Network error reaching NBA endpoint: {exc.reason}"
+        ) from exc
     if not isinstance(payload, dict):
         raise RuntimeError(f"Unexpected payload shape from {url}")
     return payload
@@ -112,14 +114,10 @@ def _fetch_json(url: str) -> dict[str, Any]:
 def _telegram_credentials() -> tuple[str, str]:
     config = _load_config()
     token = str(
-        os.getenv("TELEGRAM_BOT_TOKEN")
-        or config.get("telegram_bot_token")
-        or ""
+        os.getenv("TELEGRAM_BOT_TOKEN") or config.get("telegram_bot_token") or ""
     ).strip()
     chat_id = str(
-        os.getenv("TELEGRAM_CHAT_ID")
-        or config.get("telegram_chat_id")
-        or ""
+        os.getenv("TELEGRAM_CHAT_ID") or config.get("telegram_chat_id") or ""
     ).strip()
     return token, chat_id
 
@@ -127,9 +125,7 @@ def _telegram_credentials() -> tuple[str, str]:
 def _youtube_tv_url() -> str:
     config = _load_config()
     return str(
-        os.getenv("YOUTUBE_TV_URL")
-        or config.get("youtube_tv_url")
-        or ""
+        os.getenv("YOUTUBE_TV_URL") or config.get("youtube_tv_url") or ""
     ).strip()
 
 
@@ -150,7 +146,9 @@ def _preferred_broadcaster(
             if media != "tv":
                 continue
             display = str(
-                item.get("broadcasterDisplay") or item.get("broadcasterAbbreviation") or ""
+                item.get("broadcasterDisplay")
+                or item.get("broadcasterAbbreviation")
+                or ""
             ).strip()
             if display:
                 return display
@@ -194,6 +192,7 @@ def _record_alert_in_chat_history(
     """
     try:
         import uuid
+
         history_path = _ash_chat_history_path(chat_id)
         history_path.parent.mkdir(parents=True, exist_ok=True)
         entry = {
@@ -227,7 +226,7 @@ async def _send_telegram(token: str, chat_id: str, text: str) -> None:
     )
 
     def _post() -> str | None:
-        with urlopen(request, timeout=20) as response:  # noqa: S310
+        with urlopen(request, timeout=20) as response:  # noqa: S310  # nosec B310
             body = response.read().decode("utf-8", errors="replace")
         try:
             data = json.loads(body)
@@ -289,7 +288,9 @@ def _live_game_map(day: date | None = None) -> dict[str, dict[str, Any]]:
         payload = _fetch_json(NBA_LIVE_URL)
     except RuntimeError as exc:
         target = day or datetime.now(UTC).date()
-        print(f"WARN: NBA live scoreboard unavailable ({exc}); using ESPN CDN fallback.")
+        print(
+            f"WARN: NBA live scoreboard unavailable ({exc}); using ESPN CDN fallback."
+        )
         return {
             str(game.get("gameId")): game
             for game in _espn_games(target)
@@ -442,7 +443,9 @@ def _remaining_games_for_team(
         view = _team_game_from_game(game, team)
         if view is None:
             continue
-        if view.game_status >= 3 and view.game_datetime_utc < now_utc + timedelta(minutes=5):
+        if view.game_status >= 3 and view.game_datetime_utc < now_utc + timedelta(
+            minutes=5
+        ):
             continue
         if view.game_datetime_utc < now_utc - timedelta(hours=6):
             continue
@@ -816,7 +819,9 @@ async def _monitor_game(
 
         if enriched.game_status < 2 and lead_seconds > 0:
             sleep_for = max(min(lead_seconds, poll_seconds), 30)
-            print(f"INFO: Game not live yet ({detail.strip() or 'pregame'}). Sleeping {sleep_for}s.")
+            print(
+                f"INFO: Game not live yet ({detail.strip() or 'pregame'}). Sleeping {sleep_for}s."
+            )
             await asyncio.sleep(sleep_for)
             continue
 
@@ -857,7 +862,9 @@ def cmd_watch_game(args: argparse.Namespace) -> int:
 
     target_game: TeamGame | None = None
     if args.game_id:
-        for game in _remaining_games_for_team(all_games, args.team, now_utc=now_utc - timedelta(days=2)):
+        for game in _remaining_games_for_team(
+            all_games, args.team, now_utc=now_utc - timedelta(days=2)
+        ):
             if game.game_id == args.game_id:
                 target_game = game
                 break
@@ -907,9 +914,16 @@ async def _daemon_loop(args: argparse.Namespace) -> int:
         next_game = remaining[0]
         lead_seconds = int((next_game.game_datetime_utc - now_utc).total_seconds())
         if lead_seconds > args.quiet_prestart_seconds:
-            sleep_for = max(min(lead_seconds - args.quiet_prestart_seconds, args.idle_poll_seconds), 60)
-            local_dt = next_game.game_datetime_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
-            print(f"INFO: Next game {next_game.team_abbrev} vs {next_game.opponent_abbrev} at {local_dt}. Sleeping {sleep_for}s.")
+            sleep_for = max(
+                min(lead_seconds - args.quiet_prestart_seconds, args.idle_poll_seconds),
+                60,
+            )
+            local_dt = next_game.game_datetime_utc.astimezone(tz).strftime(
+                "%Y-%m-%d %H:%M %Z"
+            )
+            print(
+                f"INFO: Next game {next_game.team_abbrev} vs {next_game.opponent_abbrev} at {local_dt}. Sleeping {sleep_for}s."
+            )
             await asyncio.sleep(sleep_for)
             continue
 
@@ -1046,7 +1060,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--minutes-left", type=int, default=5, help="Minutes remaining threshold in Q4"
     )
     watch.add_argument(
-        "--poll-seconds", type=int, default=120, help="Scoreboard poll interval during game"
+        "--poll-seconds",
+        type=int,
+        default=120,
+        help="Scoreboard poll interval during game",
     )
     watch.add_argument(
         "--quiet-prestart-seconds",
@@ -1054,7 +1071,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=900,
         help="Start checking this many seconds before listed tipoff",
     )
-    watch.add_argument("--dry-run", action="store_true", help="Print alerts without Telegram")
+    watch.add_argument(
+        "--dry-run", action="store_true", help="Print alerts without Telegram"
+    )
     watch.set_defaults(func=cmd_watch_game)
 
     daemon = sub.add_parser(
@@ -1076,7 +1095,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--minutes-left", type=int, default=5, help="Minutes remaining threshold in Q4"
     )
     daemon.add_argument(
-        "--poll-seconds", type=int, default=120, help="Scoreboard poll interval during games"
+        "--poll-seconds",
+        type=int,
+        default=120,
+        help="Scoreboard poll interval during games",
     )
     daemon.add_argument(
         "--idle-poll-seconds",
@@ -1090,7 +1112,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=900,
         help="Start checking this many seconds before listed tipoff",
     )
-    daemon.add_argument("--dry-run", action="store_true", help="Print alerts without Telegram")
+    daemon.add_argument(
+        "--dry-run", action="store_true", help="Print alerts without Telegram"
+    )
     daemon.set_defaults(func=cmd_daemon)
 
     return parser

@@ -243,15 +243,13 @@ class VapiOutboundCallTool(Tool):
                         continue
                     if not isinstance(call, dict) or call.get("status") != "ended":
                         continue
-                    analysis = (
-                        call.get("analysis")
-                        if isinstance(call.get("analysis"), dict)
-                        else {}
+                    raw_analysis = call.get("analysis")
+                    analysis: dict[str, Any] = (
+                        raw_analysis if isinstance(raw_analysis, dict) else {}
                     )
-                    structured = (
-                        analysis.get("structuredData")
-                        if isinstance(analysis.get("structuredData"), dict)
-                        else {}
+                    raw_structured = analysis.get("structuredData")
+                    structured: dict[str, Any] = (
+                        raw_structured if isinstance(raw_structured, dict) else {}
                     )
                     analysis_ready = bool(
                         str(
@@ -452,12 +450,13 @@ def _render_call_summary(
     business_name: str,
     objective: str,
 ) -> str:
-    analysis = call.get("analysis") if isinstance(call.get("analysis"), dict) else {}
-    artifact = call.get("artifact") if isinstance(call.get("artifact"), dict) else {}
-    structured = (
-        analysis.get("structuredData")
-        if isinstance(analysis.get("structuredData"), dict)
-        else {}
+    raw_analysis = call.get("analysis")
+    analysis: dict[str, Any] = raw_analysis if isinstance(raw_analysis, dict) else {}
+    raw_artifact = call.get("artifact")
+    artifact: dict[str, Any] = raw_artifact if isinstance(raw_artifact, dict) else {}
+    raw_structured = analysis.get("structuredData")
+    structured: dict[str, Any] = (
+        raw_structured if isinstance(raw_structured, dict) else {}
     )
     summary = str(analysis.get("summary") or structured.get("summary") or "").strip()
     actions = structured.get("actionItems") or structured.get("action_items") or []

@@ -19,8 +19,12 @@ from zoneinfo import ZoneInfo
 
 from ash.skills.scoreboards import fetch_espn_scoreboard
 
-WNBA_SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard"
-WNBA_CDN_SCHEDULE_URL = "https://cdn.wnba.com/static/json/staticData/scheduleLeagueV2.json"
+WNBA_SCOREBOARD_URL = (
+    "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard"
+)
+WNBA_CDN_SCHEDULE_URL = (
+    "https://cdn.wnba.com/static/json/staticData/scheduleLeagueV2.json"
+)
 DEFAULT_TIMEZONE = "America/Los_Angeles"
 STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "state.json"
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "data" / "config.json"
@@ -115,13 +119,15 @@ def _fetch_json(url: str, *, params: dict[str, str] | None = None) -> dict[str, 
         },
     )
     try:
-        with urlopen(request, timeout=FETCH_TIMEOUT_SECONDS) as response:  # noqa: S310
+        with urlopen(request, timeout=FETCH_TIMEOUT_SECONDS) as response:  # noqa: S310  # nosec B310
             content_type = response.headers.get("content-type", "")
             raw = response.read().decode("utf-8", errors="replace")
     except HTTPError as exc:
         raise RuntimeError(f"HTTP {exc.code} from WNBA endpoint: {full_url}") from exc
     except URLError as exc:
-        raise RuntimeError(f"Network error reaching WNBA endpoint: {exc.reason}") from exc
+        raise RuntimeError(
+            f"Network error reaching WNBA endpoint: {exc.reason}"
+        ) from exc
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -136,14 +142,20 @@ def _fetch_json(url: str, *, params: dict[str, str] | None = None) -> dict[str, 
 
 def _telegram_credentials() -> tuple[str, str]:
     config = _load_config()
-    token = str(os.getenv("TELEGRAM_BOT_TOKEN") or config.get("telegram_bot_token") or "").strip()
-    chat_id = str(os.getenv("TELEGRAM_CHAT_ID") or config.get("telegram_chat_id") or "").strip()
+    token = str(
+        os.getenv("TELEGRAM_BOT_TOKEN") or config.get("telegram_bot_token") or ""
+    ).strip()
+    chat_id = str(
+        os.getenv("TELEGRAM_CHAT_ID") or config.get("telegram_chat_id") or ""
+    ).strip()
     return token, chat_id
 
 
 def _youtube_tv_url() -> str:
     config = _load_config()
-    return str(os.getenv("YOUTUBE_TV_URL") or config.get("youtube_tv_url") or "").strip()
+    return str(
+        os.getenv("YOUTUBE_TV_URL") or config.get("youtube_tv_url") or ""
+    ).strip()
 
 
 SKILL_NAME = "valkyries-close-game-alert"
@@ -170,6 +182,7 @@ def _record_alert_in_chat_history(
     """
     try:
         import uuid
+
         history_path = _ash_chat_history_path(chat_id)
         history_path.parent.mkdir(parents=True, exist_ok=True)
         entry = {
@@ -203,7 +216,7 @@ async def _send_telegram(token: str, chat_id: str, text: str) -> None:
     )
 
     def _post() -> str | None:
-        with urlopen(request, timeout=20) as response:  # noqa: S310
+        with urlopen(request, timeout=20) as response:  # noqa: S310  # nosec B310
             body = response.read().decode("utf-8", errors="replace")
         try:
             data = json.loads(body)
@@ -308,8 +321,12 @@ def _season_calendar_dates() -> list[date]:
 def _team_game_from_cache_entry(
     entry: dict[str, Any], team_query: str, tz: ZoneInfo
 ) -> TeamGame | None:
-    team_display = str(entry.get("team_display") or entry.get("team") or team_query).strip()
-    opponent_display = str(entry.get("opponent_display") or entry.get("opponent") or "").strip()
+    team_display = str(
+        entry.get("team_display") or entry.get("team") or team_query
+    ).strip()
+    opponent_display = str(
+        entry.get("opponent_display") or entry.get("opponent") or ""
+    ).strip()
     if not opponent_display:
         return None
     aliases = {
@@ -381,7 +398,9 @@ def _cache_covers_date(team: str, target_date: date, tz: ZoneInfo) -> bool:
     state = _load_state()
     games = _cached_games_for_team(
         team,
-        now_utc=datetime.combine(target_date, datetime.min.time(), tzinfo=tz).astimezone(UTC)
+        now_utc=datetime.combine(
+            target_date, datetime.min.time(), tzinfo=tz
+        ).astimezone(UTC)
         - timedelta(days=1),
         tz=tz,
         limit=128,
@@ -392,7 +411,9 @@ def _cache_covers_date(team: str, target_date: date, tz: ZoneInfo) -> bool:
     cache_start = min(dates)
     cached_at_raw = str(state.get("schedule_cached_at_utc") or "")
     if cached_at_raw:
-        cache_start = min(cache_start, _parse_datetime_utc(cached_at_raw).astimezone(tz).date())
+        cache_start = min(
+            cache_start, _parse_datetime_utc(cached_at_raw).astimezone(tz).date()
+        )
     return cache_start <= target_date <= max(dates)
 
 
@@ -444,20 +465,31 @@ def _preferred_broadcaster(event: dict[str, Any], competition: dict[str, Any]) -
                 names = item.get("names")
                 if isinstance(names, list) and names:
                     return str(names[0]).strip()
-                display = str(item.get("displayName") or item.get("shortName") or "").strip()
+                display = str(
+                    item.get("displayName") or item.get("shortName") or ""
+                ).strip()
                 if display:
                     return display
             elif isinstance(item, str) and item.strip():
                 return item.strip()
-    broadcast = str(competition.get("broadcast") or event.get("broadcast") or "").strip()
+    broadcast = str(
+        competition.get("broadcast") or event.get("broadcast") or ""
+    ).strip()
     return broadcast
 
 
-def _parse_status(competition: dict[str, Any], event: dict[str, Any]) -> tuple[int, str, int, str]:
+def _parse_status(
+    competition: dict[str, Any], event: dict[str, Any]
+) -> tuple[int, str, int, str]:
     status = competition.get("status") or event.get("status") or {}
     status_type = status.get("type") or {}
     game_status = _to_int(status_type.get("id"))
-    detail = str(status_type.get("detail") or status_type.get("shortDetail") or status_type.get("description") or "Status unavailable").strip()
+    detail = str(
+        status_type.get("detail")
+        or status_type.get("shortDetail")
+        or status_type.get("description")
+        or "Status unavailable"
+    ).strip()
     period = _to_int(status.get("period"))
     clock = str(status.get("displayClock") or "").strip()
     if not clock or clock == "0:00":
@@ -522,7 +554,9 @@ def _team_view_from_event(event: dict[str, Any], team_query: str) -> TeamView | 
     )
 
 
-def _team_game_from_event(event: dict[str, Any], team_query: str, tz: ZoneInfo) -> TeamGame | None:
+def _team_game_from_event(
+    event: dict[str, Any], team_query: str, tz: ZoneInfo
+) -> TeamGame | None:
     view = _team_view_from_event(event, team_query)
     if view is None:
         return None
@@ -541,11 +575,15 @@ def _team_game_from_event(event: dict[str, Any], team_query: str, tz: ZoneInfo) 
     )
 
 
-def _games_for_team_on_date(team: str, target_date: date, tz: ZoneInfo) -> list[TeamView]:
+def _games_for_team_on_date(
+    team: str, target_date: date, tz: ZoneInfo
+) -> list[TeamView]:
     now_utc = datetime.now(UTC)
     cached = [
         _team_view_from_cached_game(game)
-        for game in _cached_games_for_team(team, now_utc=now_utc - timedelta(days=1), tz=tz, limit=64)
+        for game in _cached_games_for_team(
+            team, now_utc=now_utc - timedelta(days=1), tz=tz, limit=64
+        )
         if game.local_date == target_date
     ]
     is_today = target_date == now_utc.astimezone(tz).date()
@@ -605,13 +643,17 @@ def _remaining_games_for_team(
             game = _team_game_from_event(event, team, tz)
             if game is None:
                 continue
-            if game.game_status >= 3 and game.game_datetime_utc < now_utc + timedelta(minutes=5):
+            if game.game_status >= 3 and game.game_datetime_utc < now_utc + timedelta(
+                minutes=5
+            ):
                 continue
             if game.game_datetime_utc < now_utc - timedelta(hours=6):
                 continue
             matches.append(game)
             if len(matches) >= limit:
-                sorted_matches = sorted(matches, key=lambda item: item.game_datetime_utc)
+                sorted_matches = sorted(
+                    matches, key=lambda item: item.game_datetime_utc
+                )
                 _upsert_cached_games(team, sorted_matches)
                 return sorted_matches
     sorted_matches = sorted(matches, key=lambda item: item.game_datetime_utc)
@@ -635,14 +677,16 @@ def cmd_refresh_schedule(args: argparse.Namespace) -> int:
     if args.team:
         teams = [args.team]
     if not teams:
-        print("No team specified and no followed teams in state. Use set-teams or --team.")
+        print(
+            "No team specified and no followed teams in state. Use set-teams or --team."
+        )
         return 1
 
     tz = ZoneInfo(args.tz)
     start = _resolve_target_date(args.start_date, tz)
     end = start + timedelta(days=max(args.days - 1, 0))
 
-    schedule_cache: dict[str, list[dict[str, str]]] = {}
+    schedule_cache: dict[str, list[dict[str, Any]]] = {}
     for team in teams:
         schedule_cache[team] = []
         for day in _season_calendar_dates():
@@ -699,11 +743,15 @@ def cmd_today(args: argparse.Namespace) -> int:
     target_date = _resolve_target_date(args.date, tz)
     games = _games_for_team_on_date(args.team, target_date, tz)
     if not games:
-        print(f"NO: {args.team} is not playing on {target_date.isoformat()} ({args.tz}).")
+        print(
+            f"NO: {args.team} is not playing on {target_date.isoformat()} ({args.tz})."
+        )
         return 0
 
     game = _select_live_or_first(games)
-    print(f"YES: {game.team_display} is playing on {target_date.isoformat()} ({args.tz}).")
+    print(
+        f"YES: {game.team_display} is playing on {target_date.isoformat()} ({args.tz})."
+    )
     print(f"MATCHUP: {game.team_abbrev} vs {game.opponent_abbrev}")
     print(f"STATUS: {game.game_status_text}")
     return 0
@@ -714,7 +762,9 @@ def cmd_game_status(args: argparse.Namespace) -> int:
     target_date = _resolve_target_date(args.date, tz)
     games = _games_for_team_on_date(args.team, target_date, tz)
     if not games:
-        print(f"No game found for {args.team} on {target_date.isoformat()} ({args.tz}).")
+        print(
+            f"No game found for {args.team} on {target_date.isoformat()} ({args.tz})."
+        )
         return 1
 
     view = _select_live_or_first(games)
@@ -764,7 +814,9 @@ def cmd_alert_scan(args: argparse.Namespace) -> int:
         else [str(team) for team in (state.get("teams") or []) if str(team).strip()]
     )
     if not teams:
-        print("No team specified and no followed teams in state. Use set-teams or --team.")
+        print(
+            "No team specified and no followed teams in state. Use set-teams or --team."
+        )
         return 1
 
     tz = ZoneInfo(args.tz)
@@ -784,7 +836,10 @@ def cmd_alert_scan(args: argparse.Namespace) -> int:
             threshold=args.threshold,
             minutes_left=args.minutes_left,
         )
-        game_id = view.game_id or f"{target_date.isoformat()}:{view.team_abbrev}:{view.opponent_abbrev}"
+        game_id = (
+            view.game_id
+            or f"{target_date.isoformat()}:{view.team_abbrev}:{view.opponent_abbrev}"
+        )
         prior = alerts.get(game_id, {})
         outcome = "close" if should_alert else "not_close"
         if prior.get("outcome") == outcome:
@@ -840,7 +895,11 @@ def cmd_upcoming(args: argparse.Namespace) -> int:
 
 def _format_close_alert(view: TeamView) -> str:
     team_name = view.team_display.split()[-1] if view.team_display else view.team_abbrev
-    opponent_name = view.opponent_display.split()[-1] if view.opponent_display else view.opponent_abbrev
+    opponent_name = (
+        view.opponent_display.split()[-1]
+        if view.opponent_display
+        else view.opponent_abbrev
+    )
     lines = [
         "Close Game Alert\n"
         f"{team_name} vs {opponent_name}\n"
@@ -896,7 +955,9 @@ async def _monitor_game(
             continue
 
         try:
-            games = _games_for_team_on_date(team, _resolve_target_date(game_date_arg, tz), tz)
+            games = _games_for_team_on_date(
+                team, _resolve_target_date(game_date_arg, tz), tz
+            )
             fetch_failures = 0
         except RuntimeError as exc:
             fetch_failures += 1
@@ -926,7 +987,9 @@ async def _monitor_game(
 
         if view.game_status < 2 and lead_seconds > 0:
             sleep_for = max(min(lead_seconds, poll_seconds), 30)
-            print(f"INFO: Game not live yet ({view.game_status_text or 'pregame'}). Sleeping {sleep_for}s.")
+            print(
+                f"INFO: Game not live yet ({view.game_status_text or 'pregame'}). Sleeping {sleep_for}s."
+            )
             await asyncio.sleep(sleep_for)
             continue
 
@@ -963,7 +1026,9 @@ def cmd_watch_game(args: argparse.Namespace) -> int:
     now_utc = datetime.now(UTC)
 
     target_game: TeamGame | None = None
-    remaining = _remaining_games_for_team(args.team, now_utc=now_utc - timedelta(days=2), tz=tz, limit=64)
+    remaining = _remaining_games_for_team(
+        args.team, now_utc=now_utc - timedelta(days=2), tz=tz, limit=64
+    )
     if args.game_id:
         for game in remaining:
             if game.game_id == args.game_id:
@@ -977,7 +1042,11 @@ def cmd_watch_game(args: argparse.Namespace) -> int:
                     target_game = game
                     break
         else:
-            future = [game for game in remaining if game.game_datetime_utc >= now_utc - timedelta(hours=6)]
+            future = [
+                game
+                for game in remaining
+                if game.game_datetime_utc >= now_utc - timedelta(hours=6)
+            ]
             if future:
                 target_game = future[0]
 
@@ -1008,13 +1077,17 @@ async def _daemon_loop(args: argparse.Namespace) -> int:
     while True:
         now_utc = datetime.now(UTC)
         try:
-            remaining = _remaining_games_for_team(team, now_utc=now_utc, tz=tz, limit=16)
+            remaining = _remaining_games_for_team(
+                team, now_utc=now_utc, tz=tz, limit=16
+            )
             fetch_failures = 0
         except RuntimeError as exc:
             fetch_failures += 1
             sleep_for = max(args.idle_poll_seconds, 300)
             if fetch_failures == 1 or fetch_failures % 6 == 0:
-                print(f"WARN: Error fetching WNBA data: {exc}. Sleeping {sleep_for}s before retry.")
+                print(
+                    f"WARN: Error fetching WNBA data: {exc}. Sleeping {sleep_for}s before retry."
+                )
             await asyncio.sleep(sleep_for)
             continue
         if not remaining:
@@ -1030,7 +1103,9 @@ async def _daemon_loop(args: argparse.Namespace) -> int:
                 min(lead_seconds - args.quiet_prestart_seconds, args.idle_poll_seconds),
                 60,
             )
-            local_dt = next_game.game_datetime_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
+            local_dt = next_game.game_datetime_utc.astimezone(tz).strftime(
+                "%Y-%m-%d %H:%M %Z"
+            )
             print(
                 f"INFO: Next game {next_game.team_abbrev} vs {next_game.opponent_abbrev} "
                 f"at {local_dt}. Sleeping {sleep_for}s."
@@ -1061,10 +1136,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     set_teams = sub.add_parser("set-teams", help="Set followed team list")
-    set_teams.add_argument("--team", action="append", required=True, help="Team to follow")
+    set_teams.add_argument(
+        "--team", action="append", required=True, help="Team to follow"
+    )
     set_teams.set_defaults(func=cmd_set_teams)
 
-    refresh = sub.add_parser("refresh-schedule", help="Cache upcoming schedule for teams")
+    refresh = sub.add_parser(
+        "refresh-schedule", help="Cache upcoming schedule for teams"
+    )
     refresh.add_argument("--team", help="Team to cache (default: all followed teams)")
     refresh.add_argument(
         "--days",
@@ -1072,7 +1151,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=14,
         help="Number of days to cache starting from start-date",
     )
-    refresh.add_argument("--start-date", help="Start date as YYYYMMDD (default: today in timezone)")
+    refresh.add_argument(
+        "--start-date", help="Start date as YYYYMMDD (default: today in timezone)"
+    )
     refresh.add_argument(
         "--tz",
         default=DEFAULT_TIMEZONE,
@@ -1084,7 +1165,9 @@ def build_parser() -> argparse.ArgumentParser:
     list_teams.set_defaults(func=cmd_list_teams)
 
     today = sub.add_parser("today", help="Check if team is playing today")
-    today.add_argument("--team", required=True, help="Team name, city, nickname, or abbreviation")
+    today.add_argument(
+        "--team", required=True, help="Team name, city, nickname, or abbreviation"
+    )
     today.add_argument("--date", help="Date as YYYYMMDD (default: today in timezone)")
     today.add_argument(
         "--tz",
@@ -1093,8 +1176,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     today.set_defaults(func=cmd_today)
 
-    status = sub.add_parser("game-status", help="Show team score and winning or losing state")
-    status.add_argument("--team", required=True, help="Team name, city, nickname, or abbreviation")
+    status = sub.add_parser(
+        "game-status", help="Show team score and winning or losing state"
+    )
+    status.add_argument(
+        "--team", required=True, help="Team name, city, nickname, or abbreviation"
+    )
     status.add_argument("--date", help="Date as YYYYMMDD (default: today in timezone)")
     status.add_argument(
         "--tz",
@@ -1111,8 +1198,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_TIMEZONE,
         help="IANA timezone (default: America/Los_Angeles)",
     )
-    scan.add_argument("--threshold", type=int, default=6, help="Max score delta for close game")
-    scan.add_argument("--minutes-left", type=int, default=5, help="Minutes remaining threshold in Q4")
+    scan.add_argument(
+        "--threshold", type=int, default=6, help="Max score delta for close game"
+    )
+    scan.add_argument(
+        "--minutes-left", type=int, default=5, help="Minutes remaining threshold in Q4"
+    )
     scan.add_argument(
         "--notify-non-close",
         action="store_true",
@@ -1121,8 +1212,12 @@ def build_parser() -> argparse.ArgumentParser:
     scan.set_defaults(func=cmd_alert_scan)
 
     upcoming = sub.add_parser("upcoming", help="List remaining scheduled games")
-    upcoming.add_argument("--team", required=True, help="Team name, city, nickname, or abbreviation")
-    upcoming.add_argument("--limit", type=int, default=12, help="Number of upcoming games to show")
+    upcoming.add_argument(
+        "--team", required=True, help="Team name, city, nickname, or abbreviation"
+    )
+    upcoming.add_argument(
+        "--limit", type=int, default=12, help="Number of upcoming games to show"
+    )
     upcoming.add_argument(
         "--refresh",
         action="store_true",
@@ -1139,7 +1234,9 @@ def build_parser() -> argparse.ArgumentParser:
         "watch-game",
         help="Wait for tipoff and poll only during a specific upcoming game",
     )
-    watch.add_argument("--team", required=True, help="Team name, city, nickname, or abbreviation")
+    watch.add_argument(
+        "--team", required=True, help="Team name, city, nickname, or abbreviation"
+    )
     watch.add_argument("--game-id", help="Specific game id to watch")
     watch.add_argument("--date", help="Local game date as YYYYMMDD")
     watch.add_argument(
@@ -1147,31 +1244,53 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_TIMEZONE,
         help="IANA timezone (default: America/Los_Angeles)",
     )
-    watch.add_argument("--threshold", type=int, default=6, help="Max score delta for close game")
-    watch.add_argument("--minutes-left", type=int, default=5, help="Minutes remaining threshold in Q4")
-    watch.add_argument("--poll-seconds", type=int, default=120, help="Scoreboard poll interval during game")
+    watch.add_argument(
+        "--threshold", type=int, default=6, help="Max score delta for close game"
+    )
+    watch.add_argument(
+        "--minutes-left", type=int, default=5, help="Minutes remaining threshold in Q4"
+    )
+    watch.add_argument(
+        "--poll-seconds",
+        type=int,
+        default=120,
+        help="Scoreboard poll interval during game",
+    )
     watch.add_argument(
         "--quiet-prestart-seconds",
         type=int,
         default=900,
         help="Start checking this many seconds before listed tipoff",
     )
-    watch.add_argument("--dry-run", action="store_true", help="Print alerts without Telegram")
+    watch.add_argument(
+        "--dry-run", action="store_true", help="Print alerts without Telegram"
+    )
     watch.set_defaults(func=cmd_watch_game)
 
     daemon = sub.add_parser(
         "daemon",
         help="Long-running watcher that sleeps until tipoff, then polls during games only",
     )
-    daemon.add_argument("--team", required=True, help="Team name, city, nickname, or abbreviation")
+    daemon.add_argument(
+        "--team", required=True, help="Team name, city, nickname, or abbreviation"
+    )
     daemon.add_argument(
         "--tz",
         default=DEFAULT_TIMEZONE,
         help="IANA timezone (default: America/Los_Angeles)",
     )
-    daemon.add_argument("--threshold", type=int, default=6, help="Max score delta for close game")
-    daemon.add_argument("--minutes-left", type=int, default=5, help="Minutes remaining threshold in Q4")
-    daemon.add_argument("--poll-seconds", type=int, default=120, help="Scoreboard poll interval during games")
+    daemon.add_argument(
+        "--threshold", type=int, default=6, help="Max score delta for close game"
+    )
+    daemon.add_argument(
+        "--minutes-left", type=int, default=5, help="Minutes remaining threshold in Q4"
+    )
+    daemon.add_argument(
+        "--poll-seconds",
+        type=int,
+        default=120,
+        help="Scoreboard poll interval during games",
+    )
     daemon.add_argument(
         "--idle-poll-seconds",
         type=int,
@@ -1184,7 +1303,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=900,
         help="Start checking this many seconds before listed tipoff",
     )
-    daemon.add_argument("--dry-run", action="store_true", help="Print alerts without Telegram")
+    daemon.add_argument(
+        "--dry-run", action="store_true", help="Print alerts without Telegram"
+    )
     daemon.set_defaults(func=cmd_daemon)
 
     return parser

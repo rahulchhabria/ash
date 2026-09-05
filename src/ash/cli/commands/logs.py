@@ -198,6 +198,8 @@ def query_logs(
     level_value: int | None = None,
     component: str | None = None,
     limit: int = 50,
+    user_id: str | None = None,
+    chat_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Query log files and return matching entries.
 
@@ -209,6 +211,8 @@ def query_logs(
         level_value: Minimum log level (as int).
         component: Component name filter.
         limit: Maximum entries to return.
+        user_id: Optional user identity visibility filter.
+        chat_id: Optional chat visibility filter.
 
     Returns:
         List of matching log entries in chronological order (oldest first).
@@ -238,6 +242,8 @@ def query_logs(
             search_pattern=search_pattern,
             level_value=level_value,
             component=component,
+            user_id=user_id,
+            chat_id=chat_id,
         )
         # _read_log_file returns file order (oldest -> newest). Reverse so we keep
         # newest matches first while scanning newest files first.
@@ -277,6 +283,8 @@ def _read_log_file(
     search_pattern: str | None = None,
     level_value: int | None = None,
     component: str | None = None,
+    user_id: str | None = None,
+    chat_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Read and filter entries from a single log file."""
     entries = []
@@ -314,6 +322,17 @@ def _read_log_file(
                 # Filter by component
                 if component and entry.get("component") != component:
                     continue
+
+                # RPC callers may only see entries from their verified identity
+                # or the chat attached to their signed context token.
+                if user_id or chat_id:
+                    entry_user_id = str(entry.get("user_id") or "")
+                    entry_chat_id = str(entry.get("chat_id") or "")
+                    if not (
+                        (user_id and entry_user_id == user_id)
+                        or (chat_id and entry_chat_id == chat_id)
+                    ):
+                        continue
 
                 # Filter by search pattern
                 if search_pattern and not _entry_matches_search(entry, search_pattern):

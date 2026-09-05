@@ -29,21 +29,21 @@ def register(app: typer.Typer) -> None:
             ),
         ] = None,
         host: Annotated[
-            str,
+            str | None,
             typer.Option(
                 "--host",
                 "-h",
                 help="Host to bind to",
             ),
-        ] = "127.0.0.1",
+        ] = None,
         port: Annotated[
-            int,
+            int | None,
             typer.Option(
                 "--port",
                 "-p",
                 help="Port to bind to",
             ),
-        ] = 8080,
+        ] = None,
     ) -> None:
         """Start the Pigeon assistant server."""
         try:
@@ -53,10 +53,20 @@ def register(app: typer.Typer) -> None:
             print("\nServer stopped")
 
 
+def _resolve_server_address(
+    config: "AshConfig", host: str | None, port: int | None
+) -> tuple[str, int]:
+    """Resolve CLI overrides over configured server defaults."""
+    return (
+        host if host is not None else config.server.host,
+        port if port is not None else config.server.port,
+    )
+
+
 async def _run_server(
     config_path: Path | None = None,
-    host: str = "127.0.0.1",
-    port: int = 8080,
+    host: str | None = None,
+    port: int | None = None,
 ) -> None:
     """Run the server asynchronously."""
     # Runtime harness boundary.
@@ -66,13 +76,6 @@ async def _run_server(
 
     # Configure logging with Rich for colorful server output and file logging
     configure_logging(use_rich=True, log_to_file=True)
-
-    if _address_in_use(host, port):
-        logger.warning(
-            "server_address_already_in_use",
-            extra={"server.address": host, "server.port": port},
-        )
-        return
 
     from ash.config import load_config
     from ash.config.paths import (
@@ -91,13 +94,21 @@ async def _run_server(
     from ash.server import ServerRunner, create_app
     from ash.service.pid import write_pid_file
 
-    # Write PID file for service management
-    pid_path = get_pid_path()
-    write_pid_file(pid_path)
-
     # Load configuration
     logger.info("config_loading")
     ash_config = load_config(config_path)
+    host, port = _resolve_server_address(ash_config, host, port)
+
+    if _address_in_use(host, port):
+        logger.warning(
+            "server_address_already_in_use",
+            extra={"server.address": host, "server.port": port},
+        )
+        return
+
+    # Write PID file for service management
+    pid_path = get_pid_path()
+    write_pid_file(pid_path)
 
     logger.info("workspace_loading")
     logger.info("agent_setup")

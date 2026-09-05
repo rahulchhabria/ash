@@ -22,6 +22,11 @@ from ash.config.paths import (
     get_workspace_path,
 )
 
+_SECRET_ENV_NAME_PATTERN = re.compile(
+    r"(?i)(?:^|_)(?:api[_-]?key|token|secret|password|passwd|auth)(?:$|_)"
+)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -95,11 +100,12 @@ class TelegramConfig(BaseModel):
     """Configuration for Telegram provider."""
 
     bot_token: SecretStr | None = None
+    # Empty means no users are authorized. Configure numeric IDs or @usernames.
     allowed_users: list[str] = []
     # Group chat settings
     allowed_groups: list[
         str
-    ] = []  # Group IDs (empty = all groups; authorized groups imply user auth)
+    ] = []  # Group IDs (empty = all groups; allowed_users is always enforced)
     group_mode: Literal["mention", "always"] = "mention"  # How to respond in groups
     # Passive listening (observe group messages without @mention)
     passive: PassiveListeningConfig = Field(default_factory=PassiveListeningConfig)
@@ -122,7 +128,7 @@ class SandboxConfig(BaseModel):
     runtime: Literal["runc", "runsc"] = "runc"
 
     # Network: "none" = isolated, "bridge" = has network access
-    network_mode: Literal["none", "bridge"] = "bridge"
+    network_mode: Literal["none", "bridge"] = "none"
     # Optional DNS servers for filtering (e.g., Pi-hole, NextDNS)
     dns_servers: list[str] = []
     # Optional HTTP proxy for monitoring/filtering traffic
@@ -132,13 +138,23 @@ class SandboxConfig(BaseModel):
     # Access: "none" = not mounted, "ro" = read-only, "rw" = read-write
     workspace_access: Literal["none", "ro", "rw"] = "rw"
 
+    # Direct credential mounts are retained only for configuration compatibility.
+    # The sandbox manager rejects them; integrations must use host mediation.
+    github_config_path: Path = Field(
+        default_factory=lambda: Path.home() / ".config" / "gh"
+    )
+    github_auth_access: Literal["none", "ro"] = "none"
+
     # Sessions mounting into sandbox (for agent to read chat history)
     # Mounted at /sessions in the container
-    sessions_access: Literal["none", "ro"] = "ro"
+    sessions_access: Literal["none", "ro"] = "none"
 
     # Chats mounting into sandbox (for agent to read chat state/participants)
     # Mounted at /chats in the container
-    chats_access: Literal["none", "ro"] = "ro"
+    chats_access: Literal["none", "ro"] = "none"
+
+    # Logs can contain data from every provider and user.
+    logs_access: Literal["none", "ro"] = "none"
 
     # Build-time packages (requires `ash sandbox build` to take effect)
     apt_packages: list[str] = []
@@ -730,6 +746,20 @@ class AshConfig(BaseModel):
     # Environment variables from [env] section
     # Loaded into session environment for skills and bash commands
     env: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("env")
+    @classmethod
+    def _reject_secret_env_names(cls, value: dict[str, str]) -> dict[str, str]:
+        blocked = sorted(
+            name for name in value if _SECRET_ENV_NAME_PATTERN.search(name)
+        )
+        if blocked:
+            names = ", ".join(blocked)
+            raise ValueError(
+                f"[env] cannot expose secret-like variables to tools: {names}"
+            )
+        return value
+
     # Agent-specific configuration: [agents.<name>] sections
     # Allows overriding model, max_iterations per agent
     agents: dict[str, AgentOverrideConfig] = Field(default_factory=dict)

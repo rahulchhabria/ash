@@ -140,6 +140,24 @@ class TestRPCForgetPerson:
         with pytest.raises(ValueError, match="person_id is required"):
             await handler({})
 
+    async def test_forget_person_requires_verified_user(self, rpc_server):
+        handler = rpc_server.methods["memory.forget_person"]
+
+        with pytest.raises(ValueError, match="verified user_id is required"):
+            await handler({"person_id": "person-1"})
+
+    async def test_forget_person_rejects_shared_person_deletion(self, rpc_server):
+        handler = rpc_server.methods["memory.forget_person"]
+
+        with pytest.raises(ValueError, match="unavailable over RPC"):
+            await handler(
+                {
+                    "person_id": "person-1",
+                    "user_id": "alice",
+                    "delete_person_record": True,
+                }
+            )
+
     async def test_forget_person_archives_memories(self, rpc_server, memory_manager):
         """Test that memory.forget_person archives subject memories."""
         person = await memory_manager.create_person(
@@ -152,19 +170,26 @@ class TestRPCForgetPerson:
             subject_person_ids=[person.id],
         )
         await memory_manager.add_memory(
+            content="Bob has another user's private fact",
+            owner_user_id="mallory",
+            subject_person_ids=[person.id],
+        )
+        await memory_manager.add_memory(
             content="Alice likes cooking",
             owner_user_id="alice",
         )
 
         handler = rpc_server.methods["memory.forget_person"]
-        result = await handler({"person_id": person.id})
+        result = await handler({"person_id": person.id, "user_id": "alice"})
 
         assert result["archived_count"] == 1
 
         # Verify only Bob's memory was removed
         remaining = await memory_manager.list_memories()
-        assert len(remaining) == 1
-        assert remaining[0].content == "Alice likes cooking"
+        assert {memory.content for memory in remaining} == {
+            "Alice likes cooking",
+            "Bob has another user's private fact",
+        }
 
 
 class TestRPCScoping:

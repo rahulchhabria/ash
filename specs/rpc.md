@@ -184,8 +184,10 @@ Host runtime binds TCP listener on a container-reachable interface and projects 
 transport hints into per-runtime sandbox env via integration hooks:
 - default host alias: `host.docker.internal`
 - override alias: `ASH_RPC_DOCKER_HOST_ALIAS` (host runtime env)
-- default bind host: `0.0.0.0`
-- override bind host: `ASH_RPC_TCP_BIND_HOST` (host runtime env)
+- TCP fallback is disabled by default
+- opt in by setting `ASH_RPC_TCP_BIND_HOST` (for example, `0.0.0.0` when a
+  container-reachable listener is required)
+- listeners enforce bounded concurrent connections and per-frame read/write timeouts
 
 `active_rpc_server` MUST NOT mutate process-global `ASH_RPC_HOST/ASH_RPC_PORT`.
 Transport hints are runtime-scoped and injected into sandbox command env only.
@@ -197,6 +199,8 @@ Authentication context token environment: `ASH_CONTEXT_TOKEN`
 | Scenario | Behavior |
 |----------|----------|
 | Server start | Create socket, set 0o600 permissions |
+| Slow or idle client | Close connection after the configured read timeout |
+| Connection cap reached | Reject the excess connection |
 | Server stop | Close connections, remove socket file |
 | Client connect | Connect to socket, send length-prefixed request |
 | Unix socket connect fails | Retry and fall back to TCP when `ASH_RPC_HOST`/`ASH_RPC_PORT` are configured |

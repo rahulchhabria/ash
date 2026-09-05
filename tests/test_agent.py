@@ -324,6 +324,30 @@ class TestAgent:
         _, context = tool.execute_calls[0]
         assert context.env["HOOKED_USER"] == "user"
 
+    async def test_configured_env_is_added_to_tool_context(self, workspace):
+        tool_use_response = Message(
+            role=Role.ASSISTANT,
+            content=[ToolUse(id="tool-1", name="test_tool", input={})],
+        )
+        registry = make_tool_registry("test_tool")
+        agent = Agent(
+            llm=MockLLMProvider(
+                responses=[
+                    tool_use_response,
+                    Message(role=Role.ASSISTANT, content="done"),
+                ]
+            ),
+            tool_executor=ToolExecutor(registry),
+            prompt_builder=make_prompt_builder(workspace, registry),
+            config=AgentConfig(env={"LOG_LEVEL": "debug"}),
+        )
+
+        await agent.process_message("run tool", make_session())
+
+        tool = cast(MockTool, registry.get("test_tool"))
+        _, context = tool.execute_calls[0]
+        assert context.env["LOG_LEVEL"] == "debug"
+
     async def test_incoming_message_preprocessor_hook_applies(self, workspace):
         registry = ToolRegistry()
         agent = Agent(

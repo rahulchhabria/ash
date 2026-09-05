@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 from ash.cli.app import app
 from ash.cli.commands.doctor import run_doctor_checks
+from ash.cli.commands.serve import _resolve_server_address
 from ash.config.paths import ENV_VAR, get_ash_home
 
 
@@ -332,6 +333,15 @@ class TestServeCommand:
         assert "--config" in result.stdout or "-c" in result.stdout
         assert "--host" in result.stdout or "-h" in result.stdout
         assert "--port" in result.stdout or "-p" in result.stdout
+
+    def test_serve_address_uses_config_unless_cli_overrides(self, minimal_config):
+        minimal_config.server.host = "127.0.0.2"
+        minimal_config.server.port = 9123
+
+        assert _resolve_server_address(minimal_config, None, None) == (
+            "127.0.0.2",
+            9123,
+        )
 
 
 class TestChatCommand:

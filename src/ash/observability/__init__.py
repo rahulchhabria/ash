@@ -107,7 +107,7 @@ def _should_drop_sentry_payload(payload: dict[str, Any]) -> bool:
     ) or _is_playwright_screenshot_future_timeout(payload)
 
 
-def _before_send(event: dict[str, Any], _hint: dict[str, Any]) -> dict[str, Any] | None:
+def _before_send(event: Any, _hint: Any) -> Any:
     if _should_drop_sentry_payload(event):
         return None
     return _scrub_sentry_value(event)
@@ -119,9 +119,7 @@ def _before_breadcrumb(
     return _scrub_sentry_value(breadcrumb)
 
 
-def _before_send_log(
-    log: dict[str, Any], _hint: dict[str, Any]
-) -> dict[str, Any] | None:
+def _before_send_log(log: Any, _hint: Any) -> Any:
     if _should_drop_sentry_payload(log):
         return None
     return _scrub_sentry_value(log)
@@ -155,7 +153,7 @@ def init_sentry(config: "SentryConfig", server_mode: bool = False) -> bool:
         logger.debug("Sentry DSN not configured, skipping initialization")
         return False
 
-    integrations = [
+    integrations: list[Any] = [
         AsyncioIntegration(),
         LoggingIntegration(
             level=logging.INFO,  # Capture INFO+ as breadcrumbs

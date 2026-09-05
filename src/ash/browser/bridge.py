@@ -10,7 +10,8 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from ash.context_token import (
     ContextTokenError,
@@ -24,6 +25,11 @@ BridgeExecutor = Callable[[str, int, dict[str, str]], ExecutionResult]
 _BRIDGE_TOKEN_SUBJECT = "browser-bridge"  # noqa: S105
 _BRIDGE_TOKEN_PROVIDER = "browser-bridge"  # noqa: S105
 _DEFAULT_BRIDGE_TOKEN_TTL_SECONDS = 600
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, *_args: object, **_kwargs: object) -> None:
+        return None
 
 
 @dataclass(slots=True)
@@ -230,6 +236,15 @@ def request_bridge_exec(
     timeout_seconds: int,
     environment: dict[str, str] | None = None,
 ) -> ExecutionResult:
+    parsed_base_url = urlsplit(base_url)
+    if (
+        parsed_base_url.scheme != "http"
+        or parsed_base_url.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or parsed_base_url.username is not None
+        or parsed_base_url.password is not None
+        or parsed_base_url.port is None
+    ):
+        raise ValueError("bridge_base_url_must_be_loopback")
     payload = json.dumps(
         {
             "command": command,
@@ -248,7 +263,8 @@ def request_bridge_exec(
         },
     )
     try:
-        with urlopen(request, timeout=max(5, timeout_seconds + 10)) as response:  # noqa: S310
+        opener = build_opener(_NoRedirectHandler())
+        with opener.open(request, timeout=max(5, timeout_seconds + 10)) as response:
             body = response.read().decode("utf-8", errors="replace")
     except HTTPError as e:
         if e.code == int(HTTPStatus.UNAUTHORIZED):

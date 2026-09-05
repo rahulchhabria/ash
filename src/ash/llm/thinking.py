@@ -13,11 +13,11 @@ Budget levels:
 """
 
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class ThinkingLevel(str, Enum):
+class ThinkingLevel(StrEnum):
     """Thinking budget levels."""
 
     OFF = "off"

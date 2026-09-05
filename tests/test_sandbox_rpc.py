@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from ash_rpc_protocol import (
     MAX_MESSAGE_SIZE,
     RPCRequest,

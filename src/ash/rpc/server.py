@@ -99,16 +99,20 @@ class RPCServer:
         socket_path: Path,
         *,
         context_token_service: ContextTokenService | None = None,
-        tcp_host: str | None = "127.0.0.1",
-        tcp_port: int | None = 0,
+        tcp_host: str | None = None,
+        tcp_port: int | None = None,
+        read_timeout: float = 10.0,
+        max_connections: int = 64,
     ):
         """Initialize RPC server.
 
         Args:
             socket_path: Path to the Unix domain socket.
             context_token_service: Optional token verifier override.
-            tcp_host: Optional loopback TCP host for sandbox fallback transport.
+            tcp_host: Optional TCP host for an explicitly enabled fallback transport.
             tcp_port: Optional loopback TCP port (0 = ephemeral).
+            read_timeout: Maximum seconds to wait for each frame and response write.
+            max_connections: Maximum number of concurrent client connections.
         """
         self._socket_path = socket_path
         self._server: asyncio.Server | None = None
@@ -118,6 +122,9 @@ class RPCServer:
         self._resolved_tcp_port: int | None = None
         self._methods: dict[str, RPCHandler] = {}
         self._running = False
+        self._read_timeout = max(0.1, float(read_timeout))
+        self._max_connections = max(1, int(max_connections))
+        self._active_connections = 0
         self._context_token_service = (
             context_token_service or get_default_context_token_service()
         )
@@ -134,7 +141,8 @@ class RPCServer:
     async def start(self) -> None:
         """Start the RPC server."""
         # Ensure parent directory exists
-        self._socket_path.parent.mkdir(parents=True, exist_ok=True)
+        self._socket_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._socket_path.parent.chmod(0o700)
 
         # Remove stale socket
         self._socket_path.unlink(missing_ok=True)
@@ -196,10 +204,25 @@ class RPCServer:
         writer: asyncio.StreamWriter,
     ) -> None:
         """Handle a client connection."""
+        if self._active_connections >= self._max_connections:
+            logger.warning(
+                "rpc_connection_limit_reached",
+                extra={"rpc.active_connections": self._active_connections},
+            )
+            writer.close()
+            try:
+                await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+            except (TimeoutError, OSError):
+                pass
+            return
+
+        self._active_connections += 1
         try:
             while self._running:
                 # Read request
-                data = await read_message(reader)
+                data = await asyncio.wait_for(
+                    read_message(reader), timeout=self._read_timeout
+                )
                 if data is None:
                     break
 
@@ -208,8 +231,10 @@ class RPCServer:
 
                 # Send response
                 writer.write(response.to_bytes())
-                await writer.drain()
+                await asyncio.wait_for(writer.drain(), timeout=self._read_timeout)
 
+        except TimeoutError:
+            logger.warning("rpc_connection_timed_out")
         except ValueError as exc:
             logger.warning(
                 "rpc_connection_invalid_frame",
@@ -218,8 +243,12 @@ class RPCServer:
         except Exception:
             logger.error("rpc_connection_error", exc_info=True)
         finally:
+            self._active_connections -= 1
             writer.close()
-            await writer.wait_closed()
+            try:
+                await asyncio.wait_for(writer.wait_closed(), timeout=1.0)
+            except (TimeoutError, OSError):
+                pass
 
     async def _process_request(self, data: bytes) -> RPCResponse:
         """Process a single RPC request."""
@@ -294,18 +323,18 @@ class RPCServer:
                 return RPCResponse.error_response(
                     request_id, ErrorCode.INVALID_PARAMS, f"Invalid params: {e}"
                 )
-            except Exception as e:
+            except Exception:
                 logger.error(
                     "rpc_method_error", extra={"method": request.method}, exc_info=True
                 )
                 return RPCResponse.error_response(
-                    request_id, ErrorCode.INTERNAL_ERROR, str(e)
+                    request_id, ErrorCode.INTERNAL_ERROR, "Internal server error"
                 )
 
-        except Exception as e:
+        except Exception:
             logger.error("rpc_processing_error", exc_info=True)
             return RPCResponse.error_response(
-                request_id, ErrorCode.INTERNAL_ERROR, str(e)
+                request_id, ErrorCode.INTERNAL_ERROR, "Internal server error"
             )
 
     def _verify_context_token(self, params: dict[str, Any]) -> VerifiedContext:

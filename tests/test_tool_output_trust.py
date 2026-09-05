@@ -71,7 +71,7 @@ def test_sanitize_block_mode_blocks_high_risk_output() -> None:
     assert "blocked" in sanitized.model_content.lower()
 
 
-def test_sanitize_warn_mode_keeps_benign_output() -> None:
+def test_sanitize_warn_mode_envelopes_benign_output() -> None:
     policy = ToolOutputTrustPolicy.defaults()
     result = ToolResult.success("/workspace/src\n/workspace/tests")
 
@@ -81,8 +81,9 @@ def test_sanitize_warn_mode_keeps_benign_output() -> None:
         policy=policy,
     )
 
-    assert sanitized.risk_signal.action_taken == "pass_through"
-    assert sanitized.model_content == result.content
+    assert sanitized.risk_signal.action_taken == "sanitized"
+    assert "Untrusted tool output" in sanitized.model_content
+    assert result.content in sanitized.model_content
     assert sanitized.is_error is False
 
 
