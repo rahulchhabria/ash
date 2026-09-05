@@ -937,9 +937,11 @@ class TestSystemPromptBuilder:
         assert "Tool Call Style" in prompt
         assert "Sandbox" in prompt
         assert "Web/Search Routing" in prompt
-        assert "`openai_web_search` or `web_search`" in prompt
-        assert "HTTP 402 or 429" in prompt
-        assert "Use `browser` only for interactive" in prompt
+        assert "`web_search` (Parallel) first" in prompt
+        assert "including DNS, timeout, quota, billing, HTTP 402/429" in prompt
+        assert (
+            "Do not open a browser merely because one search backend failed" in prompt
+        )
         assert "kernel HTTP fails with an access/payment error" in prompt
         assert "test assistant" in prompt.lower()
 

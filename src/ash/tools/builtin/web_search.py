@@ -428,10 +428,18 @@ class WebSearchTool(Tool):
                     "try `openai_web_search` if available before giving up. "
                     "Use `browser` only when the page requires interaction, authentication, or dynamic rendering."
                 )
-            return ToolResult.error(f"Search error: {e}")
+            return ToolResult.error(
+                f"Search error: {e}. Parallel search is unavailable; "
+                "try `openai_web_search` if available before giving up. "
+                "Do not use `browser` merely because this search backend failed."
+            )
         except Exception as e:
             logger.exception(f"Search error for query: {query}")
-            return ToolResult.error(f"Search error: {e}")
+            return ToolResult.error(
+                f"Search error: {e}. Parallel search is unavailable; "
+                "try `openai_web_search` if available before giving up. "
+                "Do not use `browser` merely because this search backend failed."
+            )
 
     async def cleanup(self) -> None:
         """Clean up sandbox resources."""

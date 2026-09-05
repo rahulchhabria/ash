@@ -364,6 +364,32 @@ class TestWebSearchTool:
         assert any(r.message == "search_provider_error" for r in caplog.records)
         assert all(r.exc_info is None for r in caplog.records)
 
+    async def test_provider_dns_error_suggests_hosted_search(
+        self, mock_sandbox_config, mock_executor
+    ):
+        """A Parallel network failure should route to hosted search, not browser."""
+        import json
+
+        mock_executor.execute.return_value = ExecutionResult(
+            exit_code=1,
+            stdout=json.dumps(
+                {"error": "temporary failure in name resolution", "code": 0}
+            ),
+            stderr="",
+            timed_out=False,
+        )
+
+        tool = WebSearchTool(
+            api_key="test-key",
+            sandbox_config=mock_sandbox_config,
+        )
+        result = await tool.execute({"query": "test"}, ToolContext())
+
+        assert result.is_error
+        assert "temporary failure in name resolution" in result.content
+        assert "try `openai_web_search`" in result.content
+        assert "Do not use `browser` merely" in result.content
+
     async def test_no_results(self, mock_sandbox_config, mock_executor):
         """Test handling of no results."""
         import json

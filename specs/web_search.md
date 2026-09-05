@@ -22,6 +22,8 @@ Files: src/ash/tools/builtin/web_search.py, src/ash/tools/builtin/search_types.p
 - Handle HTTP errors gracefully
 - Handle timeout (30s default)
 - Respect sandbox proxy settings when configured
+- Direct agents to hosted `openai_web_search` when Parallel is unavailable for any
+  reason, including DNS, timeout, quota, billing, and provider failures
 
 ### SHOULD
 
@@ -119,6 +121,10 @@ The general sandbox may remain at `network_mode = "none"`.
 | HTTP 429 after retries | ToolResult.error("Rate limit exceeded after 3 attempts") |
 | Timeout after retries | ToolResult.error("Search request timed out after 3 attempts") |
 | No results | ToolResult.success with result_count: 0 |
+
+Search-provider errors preserve the actual failure and include a hosted-search
+fallback hint. A browser is not the immediate fallback for ordinary public
+lookups; agents should try `openai_web_search` first.
 
 ## Verification
 
