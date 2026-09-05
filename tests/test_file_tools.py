@@ -223,6 +223,13 @@ class TestReadFileTool:
         assert not result.is_error
         assert "nested content" in result.content
 
+    @pytest.mark.parametrize("path", ["../secret.txt", "/ash/chats/history.jsonl"])
+    async def test_read_rejects_paths_outside_workspace(self, read_tool, context, path):
+        """Read paths must stay within the declared workspace."""
+        result = await read_tool.execute({"file_path": path}, context)
+        assert result.is_error
+        assert "workspace" in result.content
+
 
 class TestWriteFileTool:
     """Tests for WriteFileTool."""
@@ -345,3 +352,12 @@ class TestWriteFileTool:
 
         assert not result.is_error
         assert test_file.read_text() == "new content"
+
+    @pytest.mark.parametrize("path", ["../secret.txt", "/ash/run/rpc.sock"])
+    async def test_write_rejects_paths_outside_workspace(
+        self, write_tool, context, path
+    ):
+        """Write paths must stay within the declared workspace."""
+        result = await write_tool.execute({"file_path": path, "content": "x"}, context)
+        assert result.is_error
+        assert "workspace" in result.content

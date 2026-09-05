@@ -1,9 +1,11 @@
 """Tests for path management."""
 
+import stat
 from pathlib import Path
 
 from ash.config.paths import (
     ENV_VAR,
+    ensure_ash_home,
     get_all_paths,
     get_ash_home,
     get_config_path,
@@ -37,6 +39,18 @@ class TestGetAshHome:
 
         home = get_ash_home()
         assert home == Path.home() / "my-ash"
+
+    def test_ensure_ash_home_uses_owner_only_permissions(self, monkeypatch, tmp_path):
+        custom_path = tmp_path / "custom-ash"
+        custom_path.mkdir(mode=0o755)
+        custom_path.chmod(0o755)
+        monkeypatch.setenv(ENV_VAR, str(custom_path))
+        get_ash_home.cache_clear()
+
+        home = ensure_ash_home()
+
+        assert home == custom_path
+        assert stat.S_IMODE(home.stat().st_mode) == 0o700
 
 
 class TestDerivedPaths:

@@ -1437,6 +1437,7 @@ async def create_agent(
             compaction_reserve_tokens=config.memory.compaction_reserve_tokens,
             compaction_keep_recent_tokens=config.memory.compaction_keep_recent_tokens,
             compaction_summary_max_tokens=config.memory.compaction_summary_max_tokens,
+            env=config.get_resolved_env(),
             tool_output_trust_policy=ToolOutputTrustPolicy(
                 mode=config.tool_output_trust.mode,
                 max_chars=config.tool_output_trust.max_chars,

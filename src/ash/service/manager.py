@@ -184,7 +184,7 @@ class ServiceManager:
         Yields:
             Log lines.
         """
-        if not path.exists():
+        if not await asyncio.to_thread(path.exists):
             yield f"Log file not found: {path}"
             return
 

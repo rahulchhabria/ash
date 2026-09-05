@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import stat
 import subprocess
 import sys
 import threading
@@ -21,6 +22,26 @@ from ash.capabilities.providers import (
 )
 from ash.context_token import ContextTokenService
 from ash.security.vault import FileVault
+from ash.skills.bundled.gog.scripts.gogcli_bridge import (
+    BridgeError,
+    _google_api_request,
+    _validated_google_url,
+)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file:///tmp/token",
+        "http://googleapis.com/token",
+        "https://user:pass@oauth2.googleapis.com/token",
+        "https://example.com/token",
+    ],
+)
+def test_google_bridge_rejects_unsafe_api_urls(url: str) -> None:
+    with pytest.raises(BridgeError, match="Google endpoint"):
+        _validated_google_url(url)
+
 
 _BRIDGE_MODULE = "ash.skills.bundled.gog.scripts.gogcli_bridge"
 
@@ -35,6 +56,7 @@ _FAKE_REFRESH_TOKEN = "1//fake-refresh-token"  # noqa: S105
 
 _device_code_counter = 0
 _poll_counts: dict[str, int] = {}
+_redirect_paths: list[str] = []
 
 
 def _b64url_text(value: str) -> str:
@@ -87,6 +109,13 @@ class _FakeGoogleOAuthHandler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
 
         if not self._check_auth():
+            return
+
+        _redirect_paths.append(path)
+        if path == "/redirect":
+            self.send_response(302)
+            self.send_header("Location", "/capture")
+            self.end_headers()
             return
 
         if path.startswith("/gmail/v1/users/me/threads/"):
@@ -303,6 +332,7 @@ def fake_google_oauth():
     global _device_code_counter  # noqa: PLW0603
     _device_code_counter = 0
     _poll_counts.clear()
+    _redirect_paths.clear()
     server = HTTPServer(("127.0.0.1", 0), _FakeGoogleOAuthHandler)
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -452,6 +482,8 @@ def test_bridge_auth_code_flow_and_user_scoped_invoke(
     stored_flow = state_after_begin["auth_flows"][flow_state["flow_id"]]
     assert stored_flow["flow_type"] == "authorization_code"
     assert stored_flow["state_param"]
+    assert stat.S_IMODE(state_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(state_path.parent.stat().st_mode) == 0o700
     # Flows should remain valid long enough for real-world consent latency.
     assert int(stored_flow["expires_at"]) - int(time.time()) >= 25 * 60
 
@@ -2007,3 +2039,13 @@ def test_bridge_invoke_calendar_create_event_defaults_all_day_end_to_next_day(
     output = invoke["result"]["output"]
     assert output["start"] == "2026-03-02"
     assert output["end"] == "2026-03-03"
+
+
+def test_google_api_does_not_follow_authenticated_redirects(
+    fake_google_oauth: str,
+) -> None:
+    with pytest.raises(BridgeError, match="HTTP 302"):
+        _google_api_request(
+            "GET", f"{fake_google_oauth}/redirect", access_token=_FAKE_ACCESS_TOKEN
+        )
+    assert _redirect_paths == ["/redirect"]

@@ -56,6 +56,12 @@ import json, os, sys, urllib.request, time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _ = req, fp, code, msg, headers, newurl
+        return None
+
+
 # Parse arguments: query count freshness country search_type
 query = sys.argv[1]
 count = int(sys.argv[2]) if len(sys.argv) > 2 else 5
@@ -121,7 +127,8 @@ try:
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    opener = urllib.request.build_opener(_NoRedirectHandler())
+    with opener.open(req, timeout=30) as resp:
         if resp.status != 200:
             print(json.dumps({"error": f"HTTP {resp.status}", "code": resp.status}))
             sys.exit(1)
@@ -240,16 +247,12 @@ class WebSearchTool(Tool):
         if executor:
             self._executor = executor
         else:
-            # Check network mode
-            network_mode = sandbox_config.network_mode if sandbox_config else "bridge"
-            if network_mode == "none":
-                raise ValueError(
-                    "Web search requires network_mode: bridge in sandbox configuration"
-                )
-
             # Build sandbox config with API key in environment
             manager_config = build_sandbox_manager_config(
-                sandbox_config, workspace_path, default_network_mode="bridge"
+                sandbox_config,
+                workspace_path,
+                default_network_mode="bridge",
+                network_mode_override="bridge",
             )
             self._executor = SandboxExecutor(
                 config=manager_config,
@@ -372,7 +375,7 @@ class WebSearchTool(Tool):
             result = await self._executor.execute(
                 command,
                 timeout=30,
-                reuse_container=True,
+                reuse_container=False,
                 environment={"PARALLEL_API_KEY": self._api_key},
             )
 

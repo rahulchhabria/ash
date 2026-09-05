@@ -94,7 +94,7 @@ class BashTool(Tool):
         result = await self._executor.execute(
             command,
             timeout=timeout,
-            reuse_container=True,
+            reuse_container=False,
             environment=context.env,
         )
 

@@ -1,6 +1,7 @@
 """Tests for WebFetchTool with mocked sandbox execution."""
 
 import json
+import socket
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -8,7 +9,13 @@ import pytest
 from ash.sandbox.executor import ExecutionResult
 from ash.tools.base import ToolContext
 from ash.tools.builtin.search_cache import SearchCache
-from ash.tools.builtin.web_fetch import WebFetchTool
+from ash.tools.builtin.web_fetch import FETCH_SCRIPT, WebFetchTool, _is_private_host
+
+
+@pytest.fixture(autouse=True)
+def _treat_test_hosts_as_public():
+    with patch("ash.tools.builtin.web_fetch._is_private_host", return_value=False):
+        yield
 
 
 class TestWebFetchTool:
@@ -52,13 +59,13 @@ class TestWebFetchTool:
             }
         )
 
-    def test_requires_network_mode_bridge(self):
-        """Test that web fetch requires network_mode: bridge."""
-        config = MagicMock()
-        config.network_mode = "none"
-
-        with pytest.raises(ValueError, match="requires network_mode: bridge"):
-            WebFetchTool(sandbox_config=config)
+    def test_uses_dedicated_bridge_network(self, mock_sandbox_config):
+        """Web fetch networking is independent from the general sandbox."""
+        mock_sandbox_config.network_mode = "none"
+        with patch("ash.tools.builtin.web_fetch.SandboxExecutor") as executor_cls:
+            WebFetchTool(sandbox_config=mock_sandbox_config)
+        manager_config = executor_cls.call_args.kwargs["config"]
+        assert manager_config.network_mode == "bridge"
 
     def test_init_with_bridge_network(self, mock_sandbox_config, mock_executor):
         """Test initialization with valid config."""
@@ -86,6 +93,33 @@ class TestWebFetchTool:
         # File scheme should be rejected
         result = await tool.execute({"url": "file:///etc/passwd"}, ToolContext())
         assert result.is_error
+
+    async def test_embedded_credentials_are_rejected(
+        self, mock_sandbox_config, mock_executor
+    ):
+        tool = WebFetchTool(sandbox_config=mock_sandbox_config)
+        result = await tool.execute(
+            {"url": "https://user:password@example.com"}, ToolContext()
+        )
+        assert result.is_error
+        assert "credentials" in result.content
+        mock_executor.execute.assert_not_awaited()
+
+    def test_dns_resolution_failure_is_blocked(self):
+        with patch(
+            "ash.tools.builtin.web_fetch.socket.getaddrinfo",
+            side_effect=socket.gaierror,
+        ):
+            assert _is_private_host("unresolved.invalid") is True
+
+    def test_embedded_script_validates_redirect_destinations(self):
+        compile(FETCH_SCRIPT, "<web-fetch>", "exec")
+        assert "_NoRedirectHandler()" in FETCH_SCRIPT
+        assert "validate_target(final_url)" in FETCH_SCRIPT
+        assert "open_pinned(opener, req, parsed, addr_infos)" in FETCH_SCRIPT
+        assert "ProxyHandler({})" in FETCH_SCRIPT
+        assert "host.docker.internal" in FETCH_SCRIPT
+        assert "resp.read(max_download_bytes + 1)" in FETCH_SCRIPT
 
     async def test_successful_fetch(
         self, mock_sandbox_config, mock_executor, sample_fetch_response

@@ -1,8 +1,8 @@
 """JSON-RPC 2.0 protocol for Ash sandbox communication."""
 
 from ash_rpc_protocol.protocol import (
-    ErrorCode,
     MAX_MESSAGE_SIZE,
+    ErrorCode,
     RPCError,
     RPCRequest,
     RPCResponse,

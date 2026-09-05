@@ -10,7 +10,7 @@ Files: src/ash/tools/builtin/web_search.py, src/ash/tools/builtin/search_types.p
 ### MUST
 
 - Execute search requests inside Docker sandbox
-- Require network_mode: bridge (error if none)
+- Use a dedicated one-use sandbox with bridge networking
 - Pass API key via environment variable (not command line)
 - URL-encode query parameters properly
 - Return structured SearchResponse with citation metadata
@@ -94,13 +94,11 @@ class WebSearchTool(Tool):
 ```toml
 [parallel_search]
 api_key = "..."  # or PARALLEL_API_KEY env var
-
-[sandbox]
-network_mode = "bridge"  # Required for web_search
 ```
 
-## Behaviors
+The general sandbox may remain at `network_mode = "none"`.
 
+## Behaviors
 | Input | Output | Notes |
 |-------|--------|-------|
 | `{"query": "python async"}` | SearchResponse JSON | Structured results |
@@ -115,7 +113,7 @@ network_mode = "bridge"  # Required for web_search
 
 | Condition | Response |
 |-----------|----------|
-| network_mode: none | ToolResult.error("Web search requires network_mode: bridge") |
+| Dedicated sandbox network failure | ToolResult.error with executor details |
 | Missing API key | ToolResult.error("Parallel Search API key not configured") |
 | HTTP 401 | ToolResult.error("Invalid API key") |
 | HTTP 429 after retries | ToolResult.error("Rate limit exceeded after 3 attempts") |
@@ -132,7 +130,7 @@ uv run pytest tests/test_search_cache.py -v
 - Search executes in sandbox container
 - API key not visible in command line (check ps/logs)
 - Proxy settings respected when configured
-- Proper error on network_mode: none
+- General sandbox remains offline while search uses a one-use networked container
 - Results formatted correctly with citation support
 - Cache hit on repeated queries
 - Retry on transient errors

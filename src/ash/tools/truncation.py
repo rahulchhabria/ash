@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 # Truncation thresholds
 MAX_OUTPUT_BYTES = 50 * 1024  # 50KB
@@ -30,13 +30,13 @@ class TruncationResult:
     output_bytes: int = 0
     full_output_path: str | None = None
 
-    def to_metadata(self) -> dict:
+    def to_metadata(self) -> dict[str, Any]:
         """Convert to metadata dict for ToolResult.
 
         Note: full_output_path is intentionally excluded from agent-facing
         metadata since it's a host path the agent cannot access.
         """
-        meta = {
+        meta: dict[str, Any] = {
             "truncated": self.truncated,
             "total_lines": self.total_lines,
             "total_bytes": self.total_bytes,

@@ -46,6 +46,14 @@ def register_log_methods(server: "RPCServer", logs_path: Path) -> None:
         search_pattern = params.get("search")
         component = params.get("component")
         limit = params.get("limit", 50)
+        try:
+            limit = max(1, min(int(limit), 200))
+        except (TypeError, ValueError) as error:
+            raise ValueError("limit must be an integer") from error
+        user_id = params.get("user_id")
+        if not user_id:
+            raise ValueError("verified user_id is required")
+        chat_id = params.get("chat_id")
 
         # Query logs
         return query_logs(
@@ -56,6 +64,8 @@ def register_log_methods(server: "RPCServer", logs_path: Path) -> None:
             level_value=level_value,
             component=component,
             limit=limit,
+            user_id=user_id,
+            chat_id=chat_id,
         )
 
     server.register("logs.query", logs_query)

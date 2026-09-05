@@ -829,19 +829,37 @@ def register_memory_methods(
 
         Params:
             person_id: Person ID to forget (required)
-            delete_person_record: Also delete the person record (default False)
+            delete_person_record: Unsupported over RPC because people are shared
         """
         person_id = params.get("person_id")
         if not person_id:
             raise ValueError("person_id is required")
 
-        delete_person_record = params.get("delete_person_record", False)
+        if params.get("delete_person_record", False):
+            raise ValueError(
+                "delete_person_record is unavailable over RPC because people "
+                "records can be shared across users"
+            )
 
-        archived_count = await memory_manager.forget_person(
-            person_id=person_id,
-            delete_person_record=delete_person_record,
+        user_id = params.get("user_id")
+        if not user_id:
+            raise ValueError("verified user_id is required")
+        chat_id = params.get("chat_id")
+
+        from ash.graph.edges import get_memories_about_person
+
+        subject_memory_ids = get_memories_about_person(memory_manager._graph, person_id)
+        scoped_memories = await memory_manager.list_memories(
+            limit=None,
+            owner_user_id=user_id,
+            chat_id=chat_id,
         )
-        return {"archived_count": archived_count}
+        to_archive = {
+            memory.id for memory in scoped_memories if memory.id in subject_memory_ids
+        }
+
+        archived = await memory_manager.archive_memories(to_archive, reason="forgotten")
+        return {"archived_count": len(archived)}
 
     # Register handlers
     server.register("memory.search", memory_search)

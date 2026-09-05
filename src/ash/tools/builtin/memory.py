@@ -48,7 +48,7 @@ class RememberTool(Tool):
     sensitivity inference, then rejects secrets before persisting.
     """
 
-    def __init__(self, store: "Store", extractor: "MemoryExtractor | None") -> None:
+    def __init__(self, store: Store, extractor: MemoryExtractor | None) -> None:
         self._store = store
         self._extractor = extractor
 
@@ -87,7 +87,9 @@ class RememberTool(Tool):
             "required": ["content"],
         }
 
-    async def execute(self, input_data: dict[str, Any], context: ToolContext) -> ToolResult:
+    async def execute(
+        self, input_data: dict[str, Any], context: ToolContext
+    ) -> ToolResult:
         from ash.memory.secrets import contains_secret  # lazy — avoids circular import
         from ash.store.types import DisclosureClass, MemoryType  # lazy
 
@@ -118,7 +120,9 @@ class RememberTool(Tool):
                     )
                 # Reject explicit secret/private-to-conversation classifications
                 if fact.disclosure == DisclosureClass.REJECT_SECRET:
-                    label = _REJECT_LABELS.get("reject_secret", "not suitable for storage")
+                    label = _REJECT_LABELS.get(
+                        "reject_secret", "not suitable for storage"
+                    )
                     return ToolResult.error(f"Memory not stored: {label}.")
 
                 memory_type = fact.memory_type
@@ -157,7 +161,7 @@ class RememberTool(Tool):
 class ListMemoriesTool(Tool):
     """List active memories for the current user."""
 
-    def __init__(self, store: "Store") -> None:
+    def __init__(self, store: Store) -> None:
         self._store = store
 
     @property
@@ -186,7 +190,9 @@ class ListMemoriesTool(Tool):
             },
         }
 
-    async def execute(self, input_data: dict[str, Any], context: ToolContext) -> ToolResult:
+    async def execute(
+        self, input_data: dict[str, Any], context: ToolContext
+    ) -> ToolResult:
         raw_limit = input_data.get("limit", _DEFAULT_LIST_LIMIT)
         limit = max(1, min(_MAX_LIMIT, int(raw_limit)))
 
@@ -207,8 +213,14 @@ class ListMemoriesTool(Tool):
             short_id = m.id[:8]
             kind = m.memory_type.value if m.memory_type else "?"
             date = (m.created_at or datetime.now(UTC)).strftime("%Y-%m-%d")
-            expiry = f" [expires {m.expires_at.strftime('%Y-%m-%d')}]" if m.expires_at else ""
-            lines.append(f"- [{kind}]{expiry} {m.content}  (id: {short_id}, added: {date})")
+            expiry = (
+                f" [expires {m.expires_at.strftime('%Y-%m-%d')}]"
+                if m.expires_at
+                else ""
+            )
+            lines.append(
+                f"- [{kind}]{expiry} {m.content}  (id: {short_id}, added: {date})"
+            )
 
         return ToolResult.success("\n".join(lines))
 
@@ -216,7 +228,7 @@ class ListMemoriesTool(Tool):
 class SearchMemoriesTool(Tool):
     """Vector-search memories for the current user."""
 
-    def __init__(self, store: "Store") -> None:
+    def __init__(self, store: Store) -> None:
         self._store = store
 
     @property
@@ -251,7 +263,9 @@ class SearchMemoriesTool(Tool):
             "required": ["query"],
         }
 
-    async def execute(self, input_data: dict[str, Any], context: ToolContext) -> ToolResult:
+    async def execute(
+        self, input_data: dict[str, Any], context: ToolContext
+    ) -> ToolResult:
         query = (input_data.get("query") or "").strip()
         if not query:
             return ToolResult.error("Search query is required.")
@@ -267,7 +281,9 @@ class SearchMemoriesTool(Tool):
             )
         except Exception:
             logger.exception("search_memories_tool_failed")
-            return ToolResult.error("Failed to search memories due to an internal error.")
+            return ToolResult.error(
+                "Failed to search memories due to an internal error."
+            )
 
         if not results:
             return ToolResult.success(f"No memories found matching '{query}'.")
@@ -277,9 +293,13 @@ class SearchMemoriesTool(Tool):
             short_id = r.id[:8]
             meta = r.metadata or {}
             kind = meta.get("memory_type", "?")
-            subject = f" (about {meta['subject_name']})" if meta.get("subject_name") else ""
+            subject = (
+                f" (about {meta['subject_name']})" if meta.get("subject_name") else ""
+            )
             score = f"{r.similarity:.2f}"
-            lines.append(f"- [{kind}]{subject} {r.content}  (id: {short_id}, score: {score})")
+            lines.append(
+                f"- [{kind}]{subject} {r.content}  (id: {short_id}, score: {score})"
+            )
 
         return ToolResult.success("\n".join(lines))
 
@@ -287,7 +307,7 @@ class SearchMemoriesTool(Tool):
 class ForgetMemoryTool(Tool):
     """Archive (forget) one memory by id or short id prefix."""
 
-    def __init__(self, store: "Store") -> None:
+    def __init__(self, store: Store) -> None:
         self._store = store
 
     @property
@@ -316,7 +336,9 @@ class ForgetMemoryTool(Tool):
             "required": ["id"],
         }
 
-    async def execute(self, input_data: dict[str, Any], context: ToolContext) -> ToolResult:
+    async def execute(
+        self, input_data: dict[str, Any], context: ToolContext
+    ) -> ToolResult:
         memory_id = (input_data.get("id") or "").strip()
         if not memory_id:
             return ToolResult.error("Memory id is required.")

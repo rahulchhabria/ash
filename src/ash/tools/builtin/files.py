@@ -1,6 +1,7 @@
 """File read and write tools - thin wrappers around shell commands."""
 
 import shlex
+from pathlib import PurePosixPath
 from typing import Any
 
 from ash.sandbox import SandboxExecutor
@@ -12,6 +13,23 @@ MAX_FILE_SIZE_BYTES = 5 * 1024 * 1024  # 5MB
 MAX_OUTPUT_CHARS = 30_000
 MAX_LINE_LENGTH = 2_000
 DEFAULT_LINE_LIMIT = 2_000
+
+
+def _workspace_relative_path(value: str) -> str:
+    if "\0" in value:
+        raise ValueError("Path contains a null byte")
+    path = PurePosixPath(value)
+    if path.is_absolute():
+        try:
+            path = path.relative_to("/workspace")
+        except ValueError as error:
+            raise ValueError("Path must be inside /workspace") from error
+    if any(part == ".." for part in path.parts):
+        raise ValueError("Path traversal outside /workspace is not allowed")
+    normalized = str(path)
+    if normalized in {"", "."}:
+        raise ValueError("Path must name a file inside /workspace")
+    return normalized
 
 
 class ReadFileTool(Tool):
@@ -78,6 +96,10 @@ class ReadFileTool(Tool):
         file_path = input_data.get("file_path")
         if not file_path:
             return ToolResult.error("Missing required parameter: file_path")
+        try:
+            file_path = _workspace_relative_path(str(file_path))
+        except ValueError as error:
+            return ToolResult.error(str(error))
 
         try:
             offset = max(1, int(input_data.get("offset", 1)))
@@ -230,6 +252,10 @@ class WriteFileTool(Tool):
 
         if not file_path:
             return ToolResult.error("Missing required parameter: file_path")
+        try:
+            file_path = _workspace_relative_path(str(file_path))
+        except ValueError as error:
+            return ToolResult.error(str(error))
 
         if content is None:
             return ToolResult.error("Missing required parameter: content")

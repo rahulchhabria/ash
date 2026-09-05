@@ -1244,7 +1244,9 @@ async def create_capability_manager(
 
 def _restore_persisted_gog_accounts(manager: CapabilityManager) -> None:
     """Hydrate persisted gog account links so auth survives service restarts."""
-    if not any(capability_id.startswith("gog.") for capability_id in manager._definitions):
+    if not any(
+        capability_id.startswith("gog.") for capability_id in manager._definitions
+    ):
         return
 
     state_path = get_ash_home() / "gogcli" / "state.json"
@@ -1260,7 +1262,10 @@ def _restore_persisted_gog_accounts(manager: CapabilityManager) -> None:
             user_id, capability_id, account_ref = raw_key.split(":", 2)
         except ValueError:
             continue
-        if not capability_id.startswith("gog.") or capability_id not in manager._definitions:
+        if (
+            not capability_id.startswith("gog.")
+            or capability_id not in manager._definitions
+        ):
             continue
 
         manager._accounts[(user_id, capability_id, account_ref)] = CapabilityAccount(

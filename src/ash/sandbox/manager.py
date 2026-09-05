@@ -74,19 +74,21 @@ class SandboxConfig:
     workspace_path: Path | None = None  # Host path to mount
     workspace_access: WorkspaceAccess = "rw"  # none, ro, or rw
 
-    # GitHub CLI auth mounting
+    # Direct GitHub credential mounts are forbidden by the manager.
     github_config_path: Path | None = None  # Host gh config directory
-    github_auth_access: Literal["none", "ro"] = "ro"
+    github_auth_access: Literal["none", "ro"] = "none"
 
     # Sessions mounting (for agent to read chat history)
     sessions_path: Path | None = None  # Host path to sessions directory
-    sessions_access: Literal["none", "ro"] = "ro"  # none or ro (never rw)
+    sessions_access: Literal["none", "ro"] = "none"  # none or ro (never rw)
 
     # Chats mounting (for agent to read chat state/participants)
     chats_path: Path | None = None  # Host path to chats directory
+    chats_access: Literal["none", "ro"] = "none"
 
     # Logs mounting (for agent to inspect server logs)
     logs_path: Path | None = None  # Host path to logs directory
+    logs_access: Literal["none", "ro"] = "none"
 
     # RPC runtime mounting (for sandbox to communicate with host over Unix socket)
     rpc_socket_path: Path | None = (
@@ -116,6 +118,11 @@ class SandboxManager:
         self._config = config or SandboxConfig()
         self._client: docker.DockerClient | None = None
         self._containers: dict[str, Container] = {}
+        if self._config.github_auth_access == "ro":
+            raise ValueError(
+                "Direct GitHub credential mounts are forbidden; "
+                "use a host-mediated integration"
+            )
 
     @property
     def client(self) -> docker.DockerClient:
@@ -142,7 +149,7 @@ class SandboxManager:
             logger.debug(f"Image {self._config.image} found")
             return True
         except ImageNotFound:
-            if dockerfile_path and dockerfile_path.exists():
+            if dockerfile_path and await asyncio.to_thread(dockerfile_path.exists):
                 logger.info(
                     "sandbox_image_building",
                     extra={"sandbox.image": self._config.image},
@@ -204,17 +211,6 @@ class SandboxManager:
                 "mode": "ro" if self._config.workspace_access == "ro" else "rw",
             }
 
-        if (
-            self._config.github_config_path
-            and self._config.github_auth_access != "none"
-            and self._config.github_config_path.exists()
-        ):
-            volumes[str(self._config.github_config_path)] = {
-                "bind": "/home/sandbox/.config/gh",
-                "mode": "ro",
-            }
-            env["GH_CONFIG_DIR"] = "/home/sandbox/.config/gh"
-
         prefix = self._config.mount_prefix
 
         if (
@@ -227,13 +223,21 @@ class SandboxManager:
                 "mode": "ro",
             }
 
-        if self._config.chats_path and self._config.chats_path.exists():
+        if (
+            self._config.chats_path
+            and self._config.chats_access != "none"
+            and self._config.chats_path.exists()
+        ):
             volumes[str(self._config.chats_path)] = {
                 "bind": f"{prefix}/chats",
                 "mode": "ro",
             }
 
-        if self._config.logs_path and self._config.logs_path.exists():
+        if (
+            self._config.logs_path
+            and self._config.logs_access != "none"
+            and self._config.logs_path.exists()
+        ):
             volumes[str(self._config.logs_path)] = {
                 "bind": f"{prefix}/logs",
                 "mode": "ro",
@@ -248,7 +252,7 @@ class SandboxManager:
             if run_dir.exists():
                 volumes[str(run_dir)] = {
                     "bind": f"{prefix}/run",
-                    "mode": "rw",
+                    "mode": "ro",
                 }
                 env["ASH_RPC_SOCKET"] = f"{prefix}/run/{socket_name}"
 
@@ -321,9 +325,9 @@ class SandboxManager:
             "cap_drop": ["ALL"],
             "pids_limit": 100,
             "tmpfs": {
-                "/tmp": "size=64m,noexec,nosuid,nodev,uid=1000,gid=1000",  # noqa: S108
+                "/tmp": "size=64m,noexec,nosuid,nodev,uid=1000,gid=1000",  # noqa: S108  # nosec B108
                 "/home/sandbox": "size=64m,noexec,nosuid,nodev,uid=1000,gid=1000",
-                "/var/tmp": "size=32m,noexec,nosuid,nodev,uid=1000,gid=1000",  # noqa: S108
+                "/var/tmp": "size=32m,noexec,nosuid,nodev,uid=1000,gid=1000",  # noqa: S108  # nosec B108
                 "/run": "size=16m,noexec,nosuid,nodev,uid=1000,gid=1000",
             },
             "labels": {
@@ -392,10 +396,17 @@ class SandboxManager:
 
     async def remove_container(self, container_id: str, force: bool = True) -> None:
         await self._ensure_client()
-        container = self._get_container(container_id)
-        await asyncio.to_thread(container.remove, force=force)
-        self._containers.pop(container_id, None)
-        logger.debug(f"Removed container {container_id[:12]}")
+        removed = False
+        try:
+            container = self._get_container(container_id)
+            await asyncio.to_thread(container.remove, force=force)
+            removed = True
+        except (KeyError, NotFound):
+            pass
+        finally:
+            self._containers.pop(container_id, None)
+        if removed:
+            logger.debug(f"Removed container {container_id[:12]}")
 
     async def exec_command(
         self,
@@ -469,6 +480,16 @@ class SandboxManager:
             logger.warning(
                 "sandbox_command_timeout", extra={"operation.timeout": timeout}
             )
+            try:
+                await self.remove_container(container_id, force=True)
+            except Exception as error:
+                logger.exception(
+                    "sandbox_timeout_container_termination_failed",
+                    extra={"container.id": container_id[:12]},
+                )
+                raise RuntimeError(
+                    "Timed-out sandbox container could not be terminated"
+                ) from error
             return -1, "", f"Command timed out after {timeout} seconds"
 
         inspect_result = await asyncio.to_thread(

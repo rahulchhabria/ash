@@ -39,7 +39,7 @@ def fetch_espn_scoreboard(
         },
     )
     try:
-        with urlopen(request, timeout=timeout) as response:  # noqa: S310
+        with urlopen(request, timeout=timeout) as response:  # noqa: S310  # nosec B310
             payload = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         raise ScoreboardUnavailable(

@@ -7,7 +7,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from ash.config.paths import get_ash_home
 from ash.llm.types import ContentBlock, Message, ToolUse
@@ -153,12 +153,14 @@ class SessionManager:
         stored_content: str | list[dict[str, Any]]
         if isinstance(content, str):
             stored_content = content
-        elif content and isinstance(content[0], dict):
-            # Already serialized dicts (from subagent logging)
-            stored_content = content  # type: ignore[assignment]
         else:
-            # ContentBlock objects need serialization
-            stored_content = [content_block_to_dict(b) for b in content]  # type: ignore[arg-type]
+            serialized: list[dict[str, Any]] = []
+            for block in content:
+                if isinstance(block, dict):
+                    serialized.append(cast(dict[str, Any], block))
+                else:
+                    serialized.append(content_block_to_dict(block))
+            stored_content = serialized
 
         entry = MessageEntry.create(
             role="assistant",
@@ -175,11 +177,7 @@ class SessionManager:
         self._current_message_id = entry.id
 
         # Auto-extract tool uses from ContentBlock content
-        if (
-            not isinstance(content, str)
-            and content
-            and not isinstance(content[0], dict)
-        ):
+        if not isinstance(content, str):
             for block in content:
                 if isinstance(block, ToolUse):
                     tool_entry = ToolUseEntry.create(

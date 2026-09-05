@@ -66,12 +66,14 @@ timeout = 60
 memory_limit = "512m"
 cpu_limit = 1.0
 runtime = "runc"
-network_mode = "bridge"
+network_mode = "none"
 dns_servers = []
 http_proxy = ""
 workspace_access = "rw"
-sessions_access = "ro"
-chats_access = "ro"
+github_auth_access = "none"
+sessions_access = "none"
+chats_access = "none"
+logs_access = "none"
 source_access = "none"
 mount_prefix = "/ash"
 apt_packages = []
@@ -86,12 +88,14 @@ setup_command = ""
 | `memory_limit` | string | `512m` |
 | `cpu_limit` | float | `1.0` |
 | `runtime` | `runc` \| `runsc` | `runc` |
-| `network_mode` | `none` \| `bridge` | `bridge` |
+| `network_mode` | `none` \| `bridge` | `none` |
 | `dns_servers` | list[string] | `[]` |
 | `http_proxy` | string \| null | `null` |
 | `workspace_access` | `none` \| `ro` \| `rw` | `rw` |
-| `sessions_access` | `none` \| `ro` | `ro` |
-| `chats_access` | `none` \| `ro` | `ro` |
+| `github_auth_access` | `none` \| `ro` | `none` |
+| `sessions_access` | `none` \| `ro` | `none` |
+| `chats_access` | `none` \| `ro` | `none` |
+| `logs_access` | `none` \| `ro` | `none` |
 | `source_access` | `none` \| `ro` | `none` |
 | `mount_prefix` | string | `/ash` |
 | `apt_packages` | list[string] | `[]` |

@@ -3,6 +3,8 @@
 import json
 import stat
 
+import pytest
+
 from ash.auth.storage import AuthStorage, OAuthCredentials
 
 
@@ -59,6 +61,32 @@ class TestAuthStorage:
         file_stat = storage.path.stat()
         mode = stat.S_IMODE(file_stat.st_mode)
         assert mode == 0o600
+
+    def test_parent_and_lock_permissions(self, tmp_path):
+        storage = self._make_storage(tmp_path)
+        creds = OAuthCredentials(access="a", refresh="r", expires=0.0, account_id="x")
+        storage.save("test", creds)
+
+        assert stat.S_IMODE(storage.path.parent.stat().st_mode) == 0o700
+        lock_path = storage.path.with_name("auth.json.lock")
+        with storage._lock:
+            assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
+
+    def test_failed_atomic_replace_preserves_existing_file(self, tmp_path, monkeypatch):
+        storage = self._make_storage(tmp_path)
+        old = OAuthCredentials(access="old", refresh="r", expires=0.0, account_id="x")
+        new = OAuthCredentials(access="new", refresh="r", expires=0.0, account_id="x")
+        storage.save("test", old)
+        original = storage.path.read_bytes()
+
+        def fail_replace(_source, _target):
+            raise OSError("simulated replace failure")
+
+        monkeypatch.setattr("ash.auth.storage.os.replace", fail_replace)
+        with pytest.raises(OSError, match="simulated replace failure"):
+            storage.save("test", new)
+
+        assert storage.path.read_bytes() == original
 
     def test_multiple_providers(self, tmp_path):
         storage = self._make_storage(tmp_path)

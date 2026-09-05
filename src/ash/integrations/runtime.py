@@ -298,7 +298,7 @@ class IntegrationRuntime:
 
             return _hook
 
-        hooks = [_runtime_env_hook]
+        hooks: list[SandboxEnvAugmenter] = [_runtime_env_hook]
         hooks.extend(self._build_hooks(_factory))
         return hooks
 

@@ -58,10 +58,10 @@ class TestTelegramProvider:
         assert provider._is_user_allowed(0, "otheruser") is False
 
     def test_is_user_allowed_empty_list(self):
-        """Test all users allowed when list is empty."""
+        """Test an empty allowlist fails closed."""
         with patch("ash.providers.telegram.provider.Bot"):
             provider = TelegramProvider(bot_token="test", allowed_users=[])
-            assert provider._is_user_allowed(12345, "anyone") is True
+            assert provider._is_user_allowed(12345, "anyone") is False
 
     async def test_send_image_uses_send_photo(self, provider):
         image_path = "artifacts/screen.png"

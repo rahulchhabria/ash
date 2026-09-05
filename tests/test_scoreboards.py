@@ -99,6 +99,7 @@ def test_espn_event_to_nba_game_preserves_live_state() -> None:
     assert game["gameClock"] == "3:21"
     assert game["homeTeam"]["teamTricode"] == "LAL"
     assert game["awayTeam"]["score"] == "86"
-    assert game["broadcasters"]["nationalTvBroadcasters"][0][
-        "broadcasterDisplay"
-    ] == "NBA TV"
+    assert (
+        game["broadcasters"]["nationalTvBroadcasters"][0]["broadcasterDisplay"]
+        == "NBA TV"
+    )

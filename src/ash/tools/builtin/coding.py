@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import secrets
 import shlex
 from pathlib import PurePosixPath
 from typing import Any
@@ -65,8 +66,10 @@ class ApplyPatchTool(Tool):
             return ToolResult.error("Patch too large; limit is 1 MB")
         strip = int(input_data.get("strip", 0) or 0)
         check = bool(input_data.get("check", False))
-        patch_path = f"/home/sandbox/ash-patches/ash-patch-{abs(hash(patch))}.diff"
-        write = await self._executor.write_file(patch_path, patch)
+        patch_path = f"/workspace/.ash-tmp/ash-patch-{secrets.token_hex(12)}.diff"
+        write = await self._executor.write_file(
+            patch_path, patch, reuse_container=False
+        )
         if not write.success:
             return ToolResult.error(f"Failed to stage patch: {write.stderr}")
         flags = f"-p{strip} --batch --forward"
@@ -75,8 +78,14 @@ class ApplyPatchTool(Tool):
         result = await self._executor.execute(
             f"cd /workspace && patch {flags} < {shlex.quote(patch_path)}",
             timeout=120,
-            reuse_container=True,
+            reuse_container=False,
             environment=context.env,
+        )
+        cleanup_path = shlex.quote(patch_path)
+        await self._executor.execute(
+            f"rm -f -- {cleanup_path}; rmdir /workspace/.ash-tmp 2>/dev/null || true",
+            timeout=10,
+            reuse_container=False,
         )
         output = truncate_tail(result.output, prefix="apply_patch")
         if result.success:
@@ -299,7 +308,7 @@ class RepoTool(Tool):
         result = await self._executor.execute(
             f"cd {shlex.quote(repo_path)} && {command}",
             timeout=timeout,
-            reuse_container=True,
+            reuse_container=False,
             environment=context.env,
         )
         output = truncate_tail(result.output, prefix=f"repo_{action}")

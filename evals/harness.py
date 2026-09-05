@@ -28,6 +28,7 @@ from ash.core.agent import AgentComponents, create_agent
 from evals.types import EvalCase, EvalSuite
 
 logger = logging.getLogger(__name__)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _EVAL_SANDBOX_READY = False
 _EVAL_SANDBOX_LOCK = asyncio.Lock()
 
@@ -93,8 +94,7 @@ async def ensure_eval_sandbox_image() -> None:
         if _EVAL_SANDBOX_READY:
             return
 
-        project_root = Path(__file__).resolve().parent.parent
-        dockerfile = project_root / "docker" / "Dockerfile.sandbox"
+        dockerfile = _PROJECT_ROOT / "docker" / "Dockerfile.sandbox"
         if not dockerfile.exists():
             raise RuntimeError(f"Dockerfile.sandbox not found: {dockerfile}")
 
@@ -106,7 +106,7 @@ async def ensure_eval_sandbox_image() -> None:
             "ash-sandbox:latest",
             "-f",
             str(dockerfile),
-            str(project_root),
+            str(_PROJECT_ROOT),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -210,8 +210,6 @@ async def eval_agent_context(agent_type: str) -> AsyncGenerator[AgentComponents,
     # Spec contract: specs/subsystems.md (Integration Hooks).
     async with isolated_ash_home() as _home:
         await ensure_eval_sandbox_image()
-        project_root = Path(__file__).resolve().parent.parent
-
         # Workspace
         workspace_id = uuid.uuid4().hex[:8]
         workspace_path = _home / f"ash-evals-{workspace_id}"
@@ -223,7 +221,7 @@ async def eval_agent_context(agent_type: str) -> AsyncGenerator[AgentComponents,
         fake_weather_skill_dir = workspace_path / "skills" / "fake-weather"
         fake_weather_skill_dir.mkdir(parents=True)
         (fake_weather_skill_dir / "SKILL.md").write_text(FAKE_WEATHER_EVAL_SKILL)
-        fixture_src = project_root / "evals" / "fixtures"
+        fixture_src = _PROJECT_ROOT / "evals" / "fixtures"
         if fixture_src.exists():
             shutil.copytree(
                 fixture_src,

@@ -172,7 +172,9 @@ class SandboxExecutor:
         escaped = script.replace("'", "'\\''")
         return await self.execute(f"bash -c '{escaped}'", timeout=timeout)
 
-    async def write_file(self, path: str, content: str) -> ExecutionResult:
+    async def write_file(
+        self, path: str, content: str, *, reuse_container: bool = True
+    ) -> ExecutionResult:
         import base64
 
         normalized_path = _normalize_workspace_path(path)
@@ -182,7 +184,7 @@ class SandboxExecutor:
             f'mkdir -p "$(dirname {safe_path})" && '
             f"echo {shlex.quote(encoded)} | base64 -d > {safe_path}"
         )
-        return await self.execute(command)
+        return await self.execute(command, reuse_container=reuse_container)
 
     async def read_file(self, path: str) -> ExecutionResult:
         return await self.execute(f"cat {shlex.quote(path)}")
@@ -228,7 +230,7 @@ class SandboxExecutor:
         try:
             await self._manager.start_container(container_id)
 
-            if self._setup_command and not self._container_setup_done:
+            if self._setup_command and (not reuse or not self._container_setup_done):
                 logger.info("container_setup_running")
                 exit_code, stdout, stderr = await self._manager.exec_command(
                     container_id,
@@ -244,7 +246,8 @@ class SandboxExecutor:
                     logger.debug(
                         f"Setup command completed: {stdout[:200] if stdout else ''}"
                     )
-                self._container_setup_done = True
+                if reuse:
+                    self._container_setup_done = True
         except Exception:
             try:
                 await self._manager.remove_container(container_id)
@@ -412,6 +415,7 @@ class SandboxExecutor:
             if (
                 str(mount.get("Source", "")) == expected_source
                 and str(mount.get("Destination", "")) == expected_dest
+                and mount.get("RW") is False
             ):
                 return True
         return False

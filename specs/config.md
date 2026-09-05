@@ -103,7 +103,7 @@ model = "sonnet"
 [sandbox]
 timeout = 60
 memory_limit = "512m"
-network_mode = "bridge"
+network_mode = "none"
 workspace_access = "rw"
 
 [telegram]

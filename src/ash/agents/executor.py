@@ -333,11 +333,14 @@ class AgentExecutor:
             return self._llm
         model_config = self._config.get_model(model_alias)
         current_provider = getattr(self._llm, "name", None)
-        if not isinstance(current_provider, str) or current_provider == model_config.provider:
+        if (
+            not isinstance(current_provider, str)
+            or current_provider == model_config.provider
+        ):
             return self._llm
         if model_alias not in self._llm_by_alias:
-            self._llm_by_alias[model_alias] = self._config.create_llm_provider_for_model(
-                model_alias
+            self._llm_by_alias[model_alias] = (
+                self._config.create_llm_provider_for_model(model_alias)
             )
         return self._llm_by_alias[model_alias]
 
@@ -1120,7 +1123,9 @@ class AgentExecutor:
                                 tool_use.name, tool_use.input, per_tool_context
                             )
                         if on_tool_complete:
-                            await on_tool_complete(tool_use.name, tool_use.input, result)
+                            await on_tool_complete(
+                                tool_use.name, tool_use.input, result
+                            )
                         sanitized = self._sanitize_tool_result(
                             tool_name=tool_use.name,
                             tool_use_id=tool_use.id,

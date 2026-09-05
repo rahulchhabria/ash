@@ -108,9 +108,7 @@ async def exchange_authorization_code(
         )
 
     if response.status_code != 200:
-        logger.error(
-            "Token exchange failed: %d %s", response.status_code, response.text
-        )
+        logger.error("Token exchange failed: %d", response.status_code)
         raise RuntimeError(f"Token exchange failed: {response.status_code}")
 
     data = response.json()
@@ -153,7 +151,7 @@ async def refresh_access_token(refresh_token: str) -> dict[str, str | float]:
         )
 
     if response.status_code != 200:
-        logger.error("Token refresh failed: %d %s", response.status_code, response.text)
+        logger.error("Token refresh failed: %d", response.status_code)
         raise RuntimeError(f"Token refresh failed: {response.status_code}")
 
     data = response.json()

@@ -7,7 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "sentry_codex_autofix.py"
+MODULE_PATH = (
+    Path(__file__).resolve().parents[1] / "scripts" / "sentry_codex_autofix.py"
+)
 spec = importlib.util.spec_from_file_location("sentry_codex_autofix", MODULE_PATH)
 autofix = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
@@ -44,7 +46,10 @@ class TestSettings(unittest.TestCase):
                 test_command=None,
                 no_resolve=True,
             )
-            with patch.dict(os.environ, {}, clear=True), patch("pathlib.Path.cwd", return_value=Path(tmpdir)):
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch("pathlib.Path.cwd", return_value=Path(tmpdir)),
+            ):
                 settings = autofix.load_settings(args)
             self.assertEqual(settings.sentry_auth_token, "token")
             self.assertEqual(settings.sentry_base_url, "https://example.test")
@@ -59,7 +64,9 @@ class TestOpsPlaybooks(unittest.TestCase):
         self.assertTrue(autofix.issue_matches_email_port_collision(detail))
 
     def test_does_not_match_unrelated_issue(self):
-        self.assertFalse(autofix.issue_matches_email_port_collision({"title": "parser failed"}))
+        self.assertFalse(
+            autofix.issue_matches_email_port_collision({"title": "parser failed"})
+        )
 
     def test_matches_transient_telegram_network_issue(self):
         detail = {
@@ -88,7 +95,9 @@ class TestOpsPlaybooks(unittest.TestCase):
             }
             with (
                 patch.object(autofix, "SentryClient", return_value=client),
-                patch.object(autofix, "remediate_email_port_collision", return_value=True),
+                patch.object(
+                    autofix, "remediate_email_port_collision", return_value=True
+                ),
                 patch.object(autofix, "run_command") as run_command,
             ):
                 self.assertTrue(autofix.run_issue(settings, "123"))
@@ -128,9 +137,21 @@ class TestLegacyReceiverRemediation(unittest.TestCase):
                 return 1, "unexpected"
 
             with patch.object(autofix, "command_output", side_effect=fake_command):
-                self.assertTrue(autofix.disable_legacy_email_receiver(settings, issue_dir))
+                self.assertTrue(
+                    autofix.disable_legacy_email_receiver(settings, issue_dir)
+                )
 
-            self.assertIn(["sudo", "-n", "systemctl", "disable", "--now", autofix.LEGACY_EMAIL_SYSTEM_UNIT], calls)
+            self.assertIn(
+                [
+                    "sudo",
+                    "-n",
+                    "systemctl",
+                    "disable",
+                    "--now",
+                    autofix.LEGACY_EMAIL_SYSTEM_UNIT,
+                ],
+                calls,
+            )
 
     def test_run_issue_resolves_transient_telegram_without_codex(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -153,7 +174,9 @@ class TestLegacyReceiverRemediation(unittest.TestCase):
             }
             with (
                 patch.object(autofix, "SentryClient", return_value=client),
-                patch.object(autofix, "remediate_transient_telegram_network", return_value=True),
+                patch.object(
+                    autofix, "remediate_transient_telegram_network", return_value=True
+                ),
                 patch.object(autofix, "run_command") as run_command,
             ):
                 self.assertTrue(autofix.run_issue(settings, "456"))

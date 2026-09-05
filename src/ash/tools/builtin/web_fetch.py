@@ -33,10 +33,10 @@ def _is_private_host(hostname: str) -> bool:
     try:
         addr_infos = socket.getaddrinfo(hostname, None)
     except socket.gaierror:
-        return False
+        return True
     for _, _, _, _, sockaddr in addr_infos:
         ip = ipaddress.ip_address(sockaddr[0])
-        if any(ip in network for network in _BLOCKED_NETWORKS):
+        if not ip.is_global or any(ip in network for network in _BLOCKED_NETWORKS):
             return True
     return False
 
@@ -46,18 +46,65 @@ logger = logging.getLogger(__name__)
 # Python script to execute inside sandbox for fetching URLs
 # Uses stdlib only - html.parser for HTML extraction
 FETCH_SCRIPT = '''
-import json, os, sys, urllib.request, urllib.error
+import ipaddress, json, socket, sys, urllib.request, urllib.error
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
 
 url = sys.argv[1]
 extract_mode = sys.argv[2] if len(sys.argv) > 2 else "markdown"
 max_length = int(sys.argv[3]) if len(sys.argv) > 3 else 50000
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _ = req, fp, code, msg, headers, newurl
+        return None
+
+def validate_target(target):
+    parsed = urlparse(target)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("Invalid URL: must be http or https")
+    if not parsed.hostname:
+        raise ValueError("Invalid URL: hostname is required")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("Invalid URL: embedded credentials are not allowed")
+    hostname = parsed.hostname.lower()
+    if hostname in {"localhost", "host.docker.internal"}:
+        raise ValueError("Cannot fetch internal/private network addresses")
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        addr_infos = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    except (socket.gaierror, ValueError) as error:
+        raise ValueError("URL hostname could not be resolved") from error
+    for _, _, _, _, sockaddr in addr_infos:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if not ip.is_global:
+            raise ValueError("Cannot fetch internal/private network addresses")
+    return parsed, addr_infos
+
+
+def open_pinned(opener, request, parsed, addr_infos):
+    original_getaddrinfo = socket.getaddrinfo
+    expected_hostname = parsed.hostname.rstrip(".").lower()
+    expected_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    def pinned_getaddrinfo(host, port, *args, **kwargs):
+        candidate = host.decode("ascii") if isinstance(host, bytes) else str(host)
+        normalized_host = candidate.rstrip(".").lower()
+        if normalized_host == expected_hostname and str(port) == str(expected_port):
+            return addr_infos
+        return original_getaddrinfo(host, port, *args, **kwargs)
+
+    socket.getaddrinfo = pinned_getaddrinfo
+    try:
+        return opener.open(request, timeout=30)
+    finally:
+        socket.getaddrinfo = original_getaddrinfo
+
 
 # Validate URL
-parsed = urlparse(url)
-if parsed.scheme not in ("http", "https"):
-    print(json.dumps({"error": "Invalid URL: must be http or https", "code": 400}))
+try:
+    validate_target(url)
+except ValueError as error:
+    print(json.dumps({"error": str(error), "code": 400}))
     sys.exit(1)
 
 class ContentExtractor(HTMLParser):
@@ -180,25 +227,38 @@ headers = {
 final_url = url
 redirect_count = 0
 max_redirects = 5
+max_download_bytes = min(max(max_length * 4, 1_000_000), 5_000_000)
 
 try:
-    while redirect_count < max_redirects:
+    while True:
+        parsed, addr_infos = validate_target(final_url)
         req = urllib.request.Request(final_url, headers=headers)
-        opener = urllib.request.build_opener(urllib.request.HTTPRedirectHandler())
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            _NoRedirectHandler(),
+        )
 
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            if resp.status in (301, 302, 303, 307, 308):
-                new_url = resp.headers.get("Location")
-                if new_url:
-                    final_url = urljoin(final_url, new_url)
-                    redirect_count += 1
-                    continue
+        try:
+            resp = open_pinned(opener, req, parsed, addr_infos)
+        except urllib.error.HTTPError as redirect:
+            if redirect.code not in (301, 302, 303, 307, 308):
+                raise
+            new_url = redirect.headers.get("Location")
+            if not new_url:
+                raise ValueError("Redirect response omitted Location")
+            if redirect_count >= max_redirects:
+                raise ValueError("Too many redirects (max 5)")
+            final_url = urljoin(final_url, new_url)
+            validate_target(final_url)
+            redirect_count += 1
+            continue
 
+        with resp:
             content_type = resp.headers.get("Content-Type", "")
 
             # Handle non-HTML content
             if "application/json" in content_type:
-                raw_content = resp.read().decode("utf-8", errors="replace")
+                raw_content = resp.read(max_download_bytes + 1).decode("utf-8", errors="replace")
                 try:
                     parsed_json = json.loads(raw_content)
                     content = json.dumps(parsed_json, indent=2)
@@ -217,7 +277,7 @@ try:
                 sys.exit(0)
 
             if "text/plain" in content_type:
-                content = resp.read().decode("utf-8", errors="replace")
+                content = resp.read(max_download_bytes + 1).decode("utf-8", errors="replace")
                 output = {
                     "url": url,
                     "final_url": final_url,
@@ -231,12 +291,12 @@ try:
                 sys.exit(0)
 
             # HTML content
-            raw_html = resp.read().decode("utf-8", errors="replace")
+            raw_html = resp.read(max_download_bytes + 1).decode("utf-8", errors="replace")
             break
-    else:
-        print(json.dumps({"error": "Too many redirects (max 5)", "code": 310}))
-        sys.exit(1)
 
+except ValueError as e:
+    print(json.dumps({"error": str(e), "code": 400}))
+    sys.exit(1)
 except urllib.error.HTTPError as e:
     error_msgs = {
         403: "Access forbidden (403)",
@@ -333,16 +393,12 @@ class WebFetchTool(Tool):
         if executor:
             self._executor = executor
         else:
-            # Check network mode
-            network_mode = sandbox_config.network_mode if sandbox_config else "bridge"
-            if network_mode == "none":
-                raise ValueError(
-                    "Web fetch requires network_mode: bridge in sandbox configuration"
-                )
-
             # Build sandbox config
             manager_config = build_sandbox_manager_config(
-                sandbox_config, workspace_path, default_network_mode="bridge"
+                sandbox_config,
+                workspace_path,
+                default_network_mode="bridge",
+                network_mode_override="bridge",
             )
             self._executor = SandboxExecutor(config=manager_config)
 
@@ -396,7 +452,11 @@ class WebFetchTool(Tool):
         if parsed.scheme not in ("http", "https"):
             return ToolResult.error("Invalid URL: must be http or https")
 
-        if parsed.hostname and _is_private_host(parsed.hostname):
+        if not parsed.hostname:
+            return ToolResult.error("Invalid URL: hostname is required")
+        if parsed.username is not None or parsed.password is not None:
+            return ToolResult.error("Invalid URL: embedded credentials are not allowed")
+        if _is_private_host(parsed.hostname):
             return ToolResult.error("Cannot fetch internal/private network addresses")
 
         extract_mode = input_data.get("extract_mode", "markdown")
@@ -424,7 +484,7 @@ class WebFetchTool(Tool):
             result = await self._executor.execute(
                 command,
                 timeout=self._timeout,
-                reuse_container=True,
+                reuse_container=False,
             )
 
             if result.timed_out:

@@ -56,7 +56,11 @@ def _frontmatter_list(text: str, key: str) -> list[str]:
             in_key = True
             tail = line.split(":", 1)[1].strip()
             if tail.startswith("[") and tail.endswith("]"):
-                return [part.strip().strip('"') for part in tail[1:-1].split(",") if part.strip()]
+                return [
+                    part.strip().strip('"')
+                    for part in tail[1:-1].split(",")
+                    if part.strip()
+                ]
             continue
         if in_key:
             if line.startswith("  - "):

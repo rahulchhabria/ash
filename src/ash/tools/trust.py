@@ -132,25 +132,24 @@ def sanitize_tool_result_for_model(
 
     has_risk = bool(matched_rules)
     action: TrustAction = "pass_through"
-    model_content = content
-    modified = truncated
+    sanitized = content
+    if policy.mode == "warn_sanitize":
+        for rule in policy.redact_patterns:
+            sanitized = _compile_rule(rule.pattern).sub(rule.replacement, sanitized)
 
     if policy.mode == "block" and has_risk:
         action = "blocked"
         model_content = (
             "[Tool output blocked: potential prompt-injection patterns were detected.]"
         )
-        modified = True
-    elif policy.mode == "warn_sanitize" and (has_risk or truncated):
+    elif policy.include_provenance_header:
         action = "sanitized"
-        sanitized = content
-        for rule in policy.redact_patterns:
-            sanitized = _compile_rule(rule.pattern).sub(rule.replacement, sanitized)
-        if policy.include_provenance_header:
-            model_content = _render_untrusted_envelope(tool_name, sanitized)
-        else:
-            model_content = sanitized
-        modified = model_content != raw_content
+        model_content = _render_untrusted_envelope(tool_name, sanitized)
+    else:
+        model_content = sanitized
+    modified = model_content != raw_content
+    if action == "pass_through" and modified:
+        action = "sanitized"
 
     risk_units = len(set(matched_rules)) + (1 if truncated else 0)
     risk_score = min(1.0, risk_units / 4)

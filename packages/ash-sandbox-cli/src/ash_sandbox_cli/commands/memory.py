@@ -1,6 +1,6 @@
 """Memory management commands for sandboxed CLI."""
 
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -182,7 +182,7 @@ def add_memory(
     Use --subject to link the memory to a person (e.g., --subject "Sarah").
     """
     try:
-        params = {
+        params: dict[str, Any] = {
             "content": content,
             "source": source,
             "shared": shared,

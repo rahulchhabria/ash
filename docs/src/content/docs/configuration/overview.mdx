@@ -55,9 +55,11 @@ provider = "openai-oauth"
 model = "gpt-5.2-codex"
 
 [sandbox]
+network_mode = "none"
 workspace_access = "rw"
-sessions_access = "ro"
-chats_access = "ro"
+sessions_access = "none"
+chats_access = "none"
+logs_access = "none"
 
 [memory]
 max_context_messages = 20

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import importlib.util
 import json
 import os
@@ -228,13 +229,16 @@ class AshTriageDeepAgentsTool(Tool):
                     inserted_path = path_str
 
         try:
-            from ash_triage import get_triage_guidance  # type: ignore[import-not-found]
-
+            module = importlib.import_module("ash_triage")
+            get_triage_guidance = getattr(module, "get_triage_guidance", None)
+            if not callable(get_triage_guidance):
+                raise AttributeError(
+                    "ash_triage does not expose callable get_triage_guidance"
+                )
             return get_triage_guidance(error_context, api_key)
-        except Exception:
+        finally:
             if inserted_path is not None:
                 try:
                     sys.path.remove(inserted_path)
                 except ValueError:
                     pass
-            raise

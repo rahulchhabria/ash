@@ -26,7 +26,6 @@ from typing import Any
 
 import requests
 
-
 DEFAULT_ORG = "rc-sentry-projects"
 DEFAULT_PROJECT = "school-email-service"
 DEFAULT_REPO_PATH = "/home/rahul/GitHub/ash"
@@ -264,7 +263,7 @@ def run_command(
     stdin_text: str | None = None,
     output_path: Path | None = None,
 ) -> int:
-    with subprocess.Popen(
+    with subprocess.Popen(  # noqa: S603 - explicit operator-configured commands
         args,
         cwd=cwd,
         stdin=subprocess.PIPE if stdin_text is not None else None,
@@ -279,7 +278,7 @@ def run_command(
 
 
 def command_output(args: list[str], *, cwd: Path, timeout: int = 30) -> tuple[int, str]:
-    completed = subprocess.run(
+    completed = subprocess.run(  # noqa: S603 - fixed remediation command lists
         args,
         cwd=cwd,
         stdout=subprocess.PIPE,
@@ -331,7 +330,11 @@ def disable_legacy_email_receiver(settings: Settings, issue_dir: Path) -> bool:
             cwd=settings.repo_path,
             timeout=30,
         )
-        record(f"sudo -n systemctl disable --now {LEGACY_EMAIL_SYSTEM_UNIT}", status, output)
+        record(
+            f"sudo -n systemctl disable --now {LEGACY_EMAIL_SYSTEM_UNIT}",
+            status,
+            output,
+        )
         if status != 0:
             return False
 
@@ -364,13 +367,17 @@ def remediate_email_port_collision(settings: Settings, issue_dir: Path) -> bool:
             cwd=settings.repo_path,
             timeout=10,
         )
-        record(f"systemctl --user is-active --quiet {EMAIL_SERVICE_UNIT}", status, output)
+        record(
+            f"systemctl --user is-active --quiet {EMAIL_SERVICE_UNIT}", status, output
+        )
         if status == 0 and legacy_disabled:
             return True
 
     # Kill only the expected receiver command, then let the canonical user unit own it.
     status, output = command_output(
-        ["pkill", "-f", EMAIL_SERVICE_RECEIVER_SCRIPT], cwd=settings.repo_path, timeout=10
+        ["pkill", "-f", EMAIL_SERVICE_RECEIVER_SCRIPT],
+        cwd=settings.repo_path,
+        timeout=10,
     )
     record(f"pkill -f {EMAIL_SERVICE_RECEIVER_SCRIPT}", status, output)
 
@@ -434,7 +441,9 @@ def run_issue(settings: Settings, issue_id: str) -> bool:
             if remediate_email_port_collision(settings, issue_dir):
                 if settings.resolve_on_success:
                     client.resolve_issue(issue_id)
-                done_path.write_text(time.strftime("%Y-%m-%dT%H:%M:%SZ"), encoding="utf-8")
+                done_path.write_text(
+                    time.strftime("%Y-%m-%dT%H:%M:%SZ"), encoding="utf-8"
+                )
                 return True
             (issue_dir / "ops-remediation-failed").write_text(
                 time.strftime("%Y-%m-%dT%H:%M:%SZ"), encoding="utf-8"
@@ -443,7 +452,9 @@ def run_issue(settings: Settings, issue_id: str) -> bool:
             if remediate_transient_telegram_network(settings, issue_dir):
                 if settings.resolve_on_success:
                     client.resolve_issue(issue_id)
-                done_path.write_text(time.strftime("%Y-%m-%dT%H:%M:%SZ"), encoding="utf-8")
+                done_path.write_text(
+                    time.strftime("%Y-%m-%dT%H:%M:%SZ"), encoding="utf-8"
+                )
                 return True
             (issue_dir / "ops-remediation-failed").write_text(
                 time.strftime("%Y-%m-%dT%H:%M:%SZ"), encoding="utf-8"
@@ -529,7 +540,7 @@ def poll(settings: Settings, limit: int, interval: int) -> None:
 
 
 class WebhookHandler(BaseHTTPRequestHandler):
-    server: "AutofixHTTPServer"
+    server: AutofixHTTPServer
 
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
@@ -601,10 +612,18 @@ def serve(settings: Settings, host: str, port: int) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--org", default=os.getenv("SENTRY_ORG", DEFAULT_ORG))
-    parser.add_argument("--project", default=os.getenv("SENTRY_PROJECT", DEFAULT_PROJECT))
-    parser.add_argument("--repo-path", default=os.getenv("AUTOFIX_REPO_PATH", DEFAULT_REPO_PATH))
-    parser.add_argument("--state-dir", default=os.getenv("AUTOFIX_STATE_DIR", DEFAULT_STATE_DIR))
-    parser.add_argument("--sentry-base-url", default=os.getenv("SENTRY_BASE_URL", DEFAULT_BASE_URL))
+    parser.add_argument(
+        "--project", default=os.getenv("SENTRY_PROJECT", DEFAULT_PROJECT)
+    )
+    parser.add_argument(
+        "--repo-path", default=os.getenv("AUTOFIX_REPO_PATH", DEFAULT_REPO_PATH)
+    )
+    parser.add_argument(
+        "--state-dir", default=os.getenv("AUTOFIX_STATE_DIR", DEFAULT_STATE_DIR)
+    )
+    parser.add_argument(
+        "--sentry-base-url", default=os.getenv("SENTRY_BASE_URL", DEFAULT_BASE_URL)
+    )
     parser.add_argument("--codex-bin", default=os.getenv("CODEX_BIN", "codex"))
     parser.add_argument("--codex-model", default=os.getenv("CODEX_MODEL"))
     parser.add_argument("--test-command", default=os.getenv("AUTOFIX_TEST_COMMAND"))
@@ -617,7 +636,9 @@ def parse_args() -> argparse.Namespace:
     sweep_parser.add_argument("--limit", type=int, default=20)
     poll_parser = subparsers.add_parser("poll")
     poll_parser.add_argument("--limit", type=int, default=20)
-    poll_parser.add_argument("--interval", type=int, default=int(os.getenv("AUTOFIX_POLL_INTERVAL", "300")))
+    poll_parser.add_argument(
+        "--interval", type=int, default=int(os.getenv("AUTOFIX_POLL_INTERVAL", "300"))
+    )
     serve_parser = subparsers.add_parser("serve")
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8797)

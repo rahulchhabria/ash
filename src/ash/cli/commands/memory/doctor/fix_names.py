@@ -49,7 +49,9 @@ async def memory_doctor_fix_names(store: Store, force: bool) -> None:
     # Match memories to people
     fixes: list[tuple[MemoryEntry, PersonEntry]] = []
     for memory in to_fix:
-        person = numeric_to_person.get(memory.source_username)  # type: ignore[arg-type]
+        if memory.source_username is None:
+            continue
+        person = numeric_to_person.get(memory.source_username)
         if person:
             fixes.append((memory, person))
 

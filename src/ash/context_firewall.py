@@ -37,7 +37,10 @@ def check_context_injection(
         _log_decision(integration, trigger, message, False, "integration_blocked")
         return ContextDecision(False, "integration_blocked")
 
-    if firewall.allowed_integrations and integration not in firewall.allowed_integrations:
+    if (
+        firewall.allowed_integrations
+        and integration not in firewall.allowed_integrations
+    ):
         _log_decision(integration, trigger, message, False, "integration_not_allowed")
         return ContextDecision(False, "integration_not_allowed")
 
@@ -46,7 +49,9 @@ def check_context_injection(
         return ContextDecision(False, "trigger_not_allowed")
 
     if trigger == "reply" and not message.reply_to_message_id:
-        _log_decision(integration, trigger, message, False, "reply_trigger_without_reply")
+        _log_decision(
+            integration, trigger, message, False, "reply_trigger_without_reply"
+        )
         return ContextDecision(False, "reply_trigger_without_reply")
 
     _log_decision(integration, trigger, message, True, "allowed")

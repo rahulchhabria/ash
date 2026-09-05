@@ -1,6 +1,10 @@
 import json
+from typing import Any, cast
+
+import pytest
 
 from ash.cli.commands.logs import _format_context_marker, _format_extras, query_logs
+from ash.rpc.methods.logs import register_log_methods
 
 
 def test_format_extras_keeps_more_error_message_detail() -> None:
@@ -177,3 +181,68 @@ def test_query_logs_searches_structured_fields(tmp_path) -> None:
     assert by_skill[0]["message"] == "skill_invoked"
     assert len(by_schedule_id) == 1
     assert by_schedule_id[0]["message"] == "scheduled_task_triggered"
+
+
+def test_query_logs_filters_to_verified_user_or_chat(tmp_path) -> None:
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    log_file = logs_dir / "2026-03-18.jsonl"
+    entries = [
+        {
+            "message": "own",
+            "user_id": "alice",
+            "chat_id": "private-alice",
+        },
+        {
+            "message": "shared-chat",
+            "user_id": "mallory",
+            "chat_id": "group-1",
+        },
+        {
+            "message": "other-private",
+            "user_id": "mallory",
+            "chat_id": "private-mallory",
+        },
+        {
+            "message": "system",
+        },
+    ]
+    log_file.write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+
+    results = query_logs(
+        logs_dir,
+        user_id="alice",
+        chat_id="group-1",
+    )
+
+    assert [entry["message"] for entry in results] == ["own", "shared-chat"]
+
+
+@pytest.mark.asyncio
+async def test_rpc_log_query_requires_and_forwards_verified_scope(
+    tmp_path, monkeypatch
+) -> None:
+    class FakeServer:
+        def __init__(self) -> None:
+            self.methods: dict[str, Any] = {}
+
+        def register(self, name: str, handler: Any) -> None:
+            self.methods[name] = handler
+
+    captured: dict[str, Any] = {}
+
+    def fake_query(_logs_path, **kwargs):
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr("ash.cli.commands.logs.query_logs", fake_query)
+    server = FakeServer()
+    register_log_methods(cast(Any, server), tmp_path)
+    handler = server.methods["logs.query"]
+
+    with pytest.raises(ValueError, match="verified user_id is required"):
+        await handler({})
+
+    assert await handler({"user_id": "alice", "chat_id": "group-1", "limit": 999}) == []
+    assert captured["user_id"] == "alice"
+    assert captured["chat_id"] == "group-1"

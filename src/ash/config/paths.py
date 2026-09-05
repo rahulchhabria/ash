@@ -237,7 +237,8 @@ def ensure_ash_home() -> Path:
         Path to the Ash home directory.
     """
     home = get_ash_home()
-    home.mkdir(parents=True, exist_ok=True)
+    home.mkdir(mode=0o700, parents=True, exist_ok=True)
+    home.chmod(0o700)
     return home
 
 

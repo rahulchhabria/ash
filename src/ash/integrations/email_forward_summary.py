@@ -233,8 +233,6 @@ class EmailForwardSummaryIntegration(IntegrationContributor):
         except ValueError:
             return None
 
-
-
     def _render_context_block(
         self, row: dict[str, Any], *, header: str = CONTEXT_HEADER
     ) -> str:
@@ -296,14 +294,53 @@ _CONTEXTUAL_START_RE = re.compile(
     r"need|remind|tell me|what about)\b",
     re.I,
 )
-_CONTEXTUAL_PRONOUN_RE = re.compile(r"\b(it|that|this|there|they|them|those|one)\b", re.I)
+_CONTEXTUAL_PRONOUN_RE = re.compile(
+    r"\b(it|that|this|there|they|them|those|one)\b", re.I
+)
 _WORD_RE = re.compile(r"[a-z0-9][a-z0-9'-]*", re.I)
 _STOPWORDS = {
-    "about", "after", "again", "also", "and", "are", "can", "could",
-    "did", "do", "does", "for", "from", "how", "is", "it", "me",
-    "need", "of", "on", "or", "should", "tell", "that", "the", "them",
-    "there", "they", "this", "to", "was", "what", "when", "where",
-    "which", "who", "with", "you", "i", "my", "we", "our",
+    "about",
+    "after",
+    "again",
+    "also",
+    "and",
+    "are",
+    "can",
+    "could",
+    "did",
+    "do",
+    "does",
+    "for",
+    "from",
+    "how",
+    "is",
+    "it",
+    "me",
+    "need",
+    "of",
+    "on",
+    "or",
+    "should",
+    "tell",
+    "that",
+    "the",
+    "them",
+    "there",
+    "they",
+    "this",
+    "to",
+    "was",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "with",
+    "you",
+    "i",
+    "my",
+    "we",
+    "our",
 }
 
 

@@ -26,10 +26,12 @@ timeout = 60
 memory_limit = "512m"
 cpu_limit = 1.0
 runtime = "runc"               # or "runsc"
-network_mode = "bridge"        # or "none"
+network_mode = "none"          # or "bridge"
 workspace_access = "rw"        # none | ro | rw
-sessions_access = "ro"         # none | ro
-chats_access = "ro"            # none | ro
+github_auth_access = "none"     # credential mounts are rejected
+sessions_access = "none"       # none | ro
+chats_access = "none"           # none | ro
+logs_access = "none"            # none | ro
 source_access = "none"         # none | ro
 mount_prefix = "/ash"
 ```
@@ -42,7 +44,7 @@ uv run ash sandbox status
 
 ## Configure Access And Isolation
 
-Common hardening changes:
+Optional restrictions beyond the secure defaults:
 
 ```toml
 [sandbox]
@@ -93,13 +95,17 @@ uv run ash sandbox build
 
 ### Tool cannot reach the network
 
-Check `network_mode`:
-
+General shell and coding commands are offline by default. For an intentionally
+networked general command, opt in explicitly:
 ```toml
 [sandbox]
+
 network_mode = "bridge"
 ```
 
+
+`web_search` and `web_fetch` use dedicated one-use networked containers and do not
+require changing the general sandbox network mode.
 ### Tools can read but not write files
 
 Set workspace mount mode intentionally:
@@ -116,8 +122,10 @@ Main config fields:
 - `runtime`: `runc` or `runsc`
 - `network_mode`: `bridge` or `none`
 - `workspace_access`: `none`, `ro`, `rw`
+- `github_auth_access`: must remain `none`; direct credential mounts are rejected
 - `sessions_access`: `none`, `ro`
 - `chats_access`: `none`, `ro`
+- `logs_access`: `none`, `ro`
 - `source_access`: `none`, `ro`
 - `mount_prefix`: bind mount prefix for internal paths
 

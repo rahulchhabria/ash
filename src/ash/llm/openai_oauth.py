@@ -4,7 +4,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import openai
 
@@ -84,9 +84,18 @@ class OpenAIOAuthProvider(OpenAIProvider):
     }
 
     def _build_request_kwargs(
-        self, *args: object, **kwargs: object
-    ) -> dict[str, object]:
-        result = super()._build_request_kwargs(*args, **kwargs)  # type: ignore[arg-type]
+        self,
+        messages: list[Message],
+        model: str | None,
+        tools: list[ToolDefinition] | None,
+        system: str | None,
+        max_tokens: int,
+        temperature: float | None,
+        reasoning: str | None = None,
+    ) -> dict[str, Any]:
+        result = super()._build_request_kwargs(
+            messages, model, tools, system, max_tokens, temperature, reasoning
+        )
         # Whitelist to Codex-supported params only, then force store=false.
         result = {k: v for k, v in result.items() if k in self._CODEX_ALLOWED_PARAMS}
         # Codex Responses API requires instructions to be present.
@@ -139,8 +148,11 @@ class OpenAIOAuthProvider(OpenAIProvider):
             )
             self._account_id = new_account_id
             logger.info("OpenAI OAuth token refreshed successfully")
-        except Exception:
-            logger.warning("Failed to refresh OpenAI OAuth token", exc_info=True)
+        except Exception as exc:
+            logger.warning(
+                "Failed to refresh OpenAI OAuth token",
+                extra={"error.type": type(exc).__name__},
+            )
 
     async def complete(
         self,

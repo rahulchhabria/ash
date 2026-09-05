@@ -11,24 +11,34 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
-from datetime import date, datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
-from urllib.request import Request, urlopen
+from urllib.parse import quote, urlencode, urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+from zoneinfo import ZoneInfo
 
 VERSION = 1
 CAPABILITY_ID = "gog.calendar"
-TOKEN_URL = "https://oauth2.googleapis.com/token"
+TOKEN_URL = "https://oauth2.googleapis.com/token"  # noqa: S105 - public endpoint
 CALENDAR_BASE_URL = "https://www.googleapis.com"
 CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar"
 TOKEN_CACHE_PATH = Path.home() / ".ash" / "gcal" / "token-cache.json"
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+
+def _open_without_redirects(request: Request) -> Any:
+    return build_opener(_NoRedirectHandler()).open(request, timeout=30)
 
 
 class BridgeError(ValueError):
@@ -44,7 +54,9 @@ def main() -> int:
             raise BridgeError("capability_invalid_input", "request must be an object")
         response = _dispatch(request)
     except BridgeError as exc:
-        response = _error_response(_request_id_from_stdin_fallback(), exc.code, str(exc))
+        response = _error_response(
+            _request_id_from_stdin_fallback(), exc.code, str(exc)
+        )
     except Exception as exc:
         response = _error_response(
             _request_id_from_stdin_fallback(),
@@ -60,7 +72,9 @@ _LAST_REQUEST_ID = ""
 
 def _dispatch(request: dict[str, Any]) -> dict[str, Any]:
     global _LAST_REQUEST_ID
-    request_id = _required_text(request.get("id"), "capability_invalid_input", "id is required")
+    request_id = _required_text(
+        request.get("id"), "capability_invalid_input", "id is required"
+    )
     _LAST_REQUEST_ID = request_id
     if request.get("version") != VERSION:
         raise BridgeError("capability_invalid_input", "unsupported bridge version")
@@ -135,10 +149,14 @@ def _auth_not_required() -> dict[str, Any]:
 
 def _invoke(params: dict[str, Any]) -> dict[str, Any]:
     capability_id = _required_text(
-        params.get("capability_id"), "capability_invalid_input", "capability_id is required"
+        params.get("capability_id"),
+        "capability_invalid_input",
+        "capability_id is required",
     )
     if capability_id != CAPABILITY_ID:
-        raise BridgeError("capability_invalid_input", f"unsupported capability: {capability_id}")
+        raise BridgeError(
+            "capability_invalid_input", f"unsupported capability: {capability_id}"
+        )
     operation = _required_text(
         params.get("operation"), "capability_invalid_input", "operation is required"
     )
@@ -151,15 +169,16 @@ def _invoke(params: dict[str, Any]) -> dict[str, Any]:
     elif operation == "create_event":
         output = _create_event(input_data, access_token=access_token)
     else:
-        raise BridgeError("capability_invalid_input", f"unsupported operation: {operation}")
+        raise BridgeError(
+            "capability_invalid_input", f"unsupported operation: {operation}"
+        )
     return {"output": output}
 
 
 def _service_account() -> dict[str, Any]:
-    path = (
-        _optional_text(os.environ.get("GCAL_SERVICE_ACCOUNT_FILE"))
-        or _optional_text(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"))
-    )
+    path = _optional_text(
+        os.environ.get("GCAL_SERVICE_ACCOUNT_FILE")
+    ) or _optional_text(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"))
     raw_json = _optional_text(os.environ.get("GCAL_SERVICE_ACCOUNT_JSON"))
     try:
         if raw_json:
@@ -172,14 +191,22 @@ def _service_account() -> dict[str, Any]:
                 "set GCAL_SERVICE_ACCOUNT_FILE or GOOGLE_APPLICATION_CREDENTIALS",
             )
     except OSError as exc:
-        raise BridgeError("capability_auth_required", f"cannot read service account: {exc}") from None
+        raise BridgeError(
+            "capability_auth_required", f"cannot read service account: {exc}"
+        ) from None
     except json.JSONDecodeError as exc:
-        raise BridgeError("capability_auth_required", f"invalid service account JSON: {exc}") from None
+        raise BridgeError(
+            "capability_auth_required", f"invalid service account JSON: {exc}"
+        ) from None
     if not isinstance(data, dict):
-        raise BridgeError("capability_auth_required", "service account JSON must be an object")
+        raise BridgeError(
+            "capability_auth_required", "service account JSON must be an object"
+        )
     for key in ("client_email", "private_key"):
         if not _optional_text(data.get(key)):
-            raise BridgeError("capability_auth_required", f"service account missing {key}")
+            raise BridgeError(
+                "capability_auth_required", f"service account missing {key}"
+            )
     return data
 
 
@@ -202,7 +229,9 @@ def _access_token() -> str:
     )
     access_token = _optional_text(token.get("access_token"))
     if not access_token:
-        error = _optional_text(token.get("error_description")) or _optional_text(token.get("error"))
+        error = _optional_text(token.get("error_description")) or _optional_text(
+            token.get("error")
+        )
         raise BridgeError(
             "capability_auth_required",
             f"Google token endpoint did not return an access token: {error or 'unknown error'}",
@@ -215,7 +244,11 @@ def _access_token() -> str:
 def _service_account_assertion(account: dict[str, Any]) -> str:
     now = int(time.time())
     claims: dict[str, Any] = {
-        "iss": _required_text(account.get("client_email"), "capability_auth_required", "client_email is required"),
+        "iss": _required_text(
+            account.get("client_email"),
+            "capability_auth_required",
+            "client_email is required",
+        ),
         "scope": CALENDAR_SCOPE,
         "aud": TOKEN_URL,
         "iat": now,
@@ -226,39 +259,46 @@ def _service_account_assertion(account: dict[str, Any]) -> str:
         claims["sub"] = subject
 
     header = {"alg": "RS256", "typ": "JWT"}
-    signing_input = (
-        f"{_b64url_json(header)}.{_b64url_json(claims)}".encode("ascii")
-    )
+    signing_input = f"{_b64url_json(header)}.{_b64url_json(claims)}".encode("ascii")
     signature = _rsa_sha256_sign(
         signing_input,
-        _required_text(account.get("private_key"), "capability_auth_required", "private_key is required"),
+        _required_text(
+            account.get("private_key"),
+            "capability_auth_required",
+            "private_key is required",
+        ),
     )
     return f"{signing_input.decode('ascii')}.{_b64url(signature)}"
 
 
 def _rsa_sha256_sign(payload: bytes, private_key: str) -> bytes:
+    openssl_path = shutil.which("openssl")
+    if not openssl_path:
+        raise BridgeError("capability_auth_required", "openssl is not installed")
+
     key_path = None
     try:
         with tempfile.NamedTemporaryFile("w", delete=False) as key_file:
             key_file.write(private_key)
             key_path = key_file.name
-        os.chmod(key_path, 0o600)
-        proc = subprocess.run(
-            ["openssl", "dgst", "-sha256", "-sign", key_path, "-binary"],
+        Path(key_path).chmod(0o600)
+        proc = subprocess.run(  # noqa: S603 - fixed executable and generated key path
+            [openssl_path, "dgst", "-sha256", "-sign", key_path, "-binary"],
             input=payload,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
     finally:
         if key_path:
             try:
-                os.unlink(key_path)
+                Path(key_path).unlink()
             except OSError:
                 pass
     if proc.returncode != 0:
         stderr = proc.stderr.decode("utf-8", errors="replace").strip()
-        raise BridgeError("capability_auth_required", f"openssl signing failed: {stderr}")
+        raise BridgeError(
+            "capability_auth_required", f"openssl signing failed: {stderr}"
+        )
     return proc.stdout
 
 
@@ -280,8 +320,11 @@ def _list_events(input_data: dict[str, Any], *, access_token: str) -> dict[str, 
         access_token=access_token,
         params=params,
     )
-    items = raw.get("items") if isinstance(raw.get("items"), list) else []
-    events = [_event_summary(item, calendar_id) for item in items if isinstance(item, dict)]
+    raw_items = raw.get("items")
+    items: list[Any] = raw_items if isinstance(raw_items, list) else []
+    events = [
+        _event_summary(item, calendar_id) for item in items if isinstance(item, dict)
+    ]
     output = {
         "window": window,
         "events": events,
@@ -306,9 +349,13 @@ def _list_event_params(
             day = date.fromisoformat(requested_date)
             tz = ZoneInfo(tz_name)
         except ValueError:
-            raise BridgeError("capability_invalid_input", "date must be YYYY-MM-DD") from None
+            raise BridgeError(
+                "capability_invalid_input", "date must be YYYY-MM-DD"
+            ) from None
         except Exception:
-            raise BridgeError("capability_invalid_input", f"invalid timezone: {tz_name}") from None
+            raise BridgeError(
+                "capability_invalid_input", f"invalid timezone: {tz_name}"
+            ) from None
         start = datetime.combine(day, datetime.min.time(), tzinfo=tz)
         end = start + timedelta(days=1)
         time_min = start.isoformat()
@@ -329,8 +376,12 @@ def _list_event_params(
 
 def _create_event(input_data: dict[str, Any], *, access_token: str) -> dict[str, Any]:
     calendar_id = _calendar_id(input_data)
-    title = _required_text(input_data.get("title"), "capability_invalid_input", "title is required")
-    start = _required_text(input_data.get("start"), "capability_invalid_input", "start is required")
+    title = _required_text(
+        input_data.get("title"), "capability_invalid_input", "title is required"
+    )
+    start = _required_text(
+        input_data.get("start"), "capability_invalid_input", "start is required"
+    )
     end = _optional_text(input_data.get("end"))
     body: dict[str, Any] = {"summary": title, "start": _event_time(start)}
     if end:
@@ -372,8 +423,10 @@ def _default_timezone() -> str:
 
 
 def _event_summary(item: dict[str, Any], calendar_id: str) -> dict[str, Any]:
-    start = item.get("start") if isinstance(item.get("start"), dict) else {}
-    end = item.get("end") if isinstance(item.get("end"), dict) else {}
+    raw_start = item.get("start")
+    raw_end = item.get("end")
+    start: dict[str, Any] = raw_start if isinstance(raw_start, dict) else {}
+    end: dict[str, Any] = raw_end if isinstance(raw_end, dict) else {}
     return {
         "id": _optional_text(item.get("id")) or "",
         "title": _optional_text(item.get("summary")) or "",
@@ -405,6 +458,27 @@ def _default_end(start: str) -> dict[str, str]:
         return {"dateTime": start}
 
 
+def _validated_http_url(url: str) -> str:
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise BridgeError(
+            "capability_invalid_input", "request URL must be HTTP or HTTPS"
+        )
+    if parsed.username is not None or parsed.password is not None:
+        raise BridgeError(
+            "capability_invalid_input", "request URL must not contain credentials"
+        )
+    hostname = parsed.hostname.lower()
+    is_loopback = hostname in {"127.0.0.1", "localhost", "::1"}
+    is_google_api = hostname == "googleapis.com" or hostname.endswith(".googleapis.com")
+    if not is_loopback and (parsed.scheme != "https" or not is_google_api):
+        raise BridgeError(
+            "capability_invalid_input",
+            "request URL must use Google HTTPS or a loopback test endpoint",
+        )
+    return url
+
+
 def _google_request(
     method: str,
     url: str,
@@ -418,39 +492,57 @@ def _google_request(
     data = None
     if json_body is not None:
         data = json.dumps(json_body, separators=(",", ":")).encode("utf-8")
-    request = Request(url, data=data, method=method)
+    request = Request(_validated_http_url(url), data=data, method=method)  # noqa: S310
     request.add_header("Authorization", f"Bearer {access_token}")
     if data is not None:
         request.add_header("Content-Type", "application/json")
     try:
-        with urlopen(request, timeout=30) as resp:  # noqa: S310
+        with _open_without_redirects(request) as resp:
             return json.loads(resp.read().decode("utf-8") or "{}")
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        raise BridgeError("capability_backend_unavailable", f"Google Calendar HTTP {exc.code}: {body[:500]}") from None
+        raise BridgeError(
+            "capability_backend_unavailable",
+            f"Google Calendar HTTP {exc.code}: {body[:500]}",
+        ) from None
     except URLError as exc:
-        raise BridgeError("capability_backend_unavailable", f"Google Calendar request failed: {exc.reason}") from None
+        raise BridgeError(
+            "capability_backend_unavailable",
+            f"Google Calendar request failed: {exc.reason}",
+        ) from None
     except json.JSONDecodeError as exc:
-        raise BridgeError("capability_invalid_output", f"Google Calendar returned invalid JSON: {exc}") from None
+        raise BridgeError(
+            "capability_invalid_output", f"Google Calendar returned invalid JSON: {exc}"
+        ) from None
 
 
 def _http_post_form(url: str, params: dict[str, str]) -> dict[str, Any]:
-    request = Request(url, data=urlencode(params).encode("utf-8"), method="POST")
+    request = Request(  # noqa: S310
+        _validated_http_url(url), data=urlencode(params).encode("utf-8"), method="POST"
+    )
     request.add_header("Content-Type", "application/x-www-form-urlencoded")
     try:
-        with urlopen(request, timeout=30) as resp:  # noqa: S310
+        with _open_without_redirects(request) as resp:
             return json.loads(resp.read().decode("utf-8") or "{}")
     except HTTPError as exc:
         try:
             return json.loads(exc.read().decode("utf-8"))
         except json.JSONDecodeError:
-            raise BridgeError("capability_backend_unavailable", f"Google token HTTP {exc.code}") from None
+            raise BridgeError(
+                "capability_backend_unavailable", f"Google token HTTP {exc.code}"
+            ) from None
     except URLError as exc:
-        raise BridgeError("capability_backend_unavailable", f"Google token request failed: {exc.reason}") from None
+        raise BridgeError(
+            "capability_backend_unavailable",
+            f"Google token request failed: {exc.reason}",
+        ) from None
 
 
 def _calendar_base() -> str:
-    return _optional_text(os.environ.get("GCAL_CALENDAR_API_BASE_URL")) or CALENDAR_BASE_URL
+    return (
+        _optional_text(os.environ.get("GCAL_CALENDAR_API_BASE_URL"))
+        or CALENDAR_BASE_URL
+    )
 
 
 def _read_token_cache() -> dict[str, Any] | None:
@@ -462,25 +554,53 @@ def _read_token_cache() -> dict[str, Any] | None:
 
 
 def _write_token_cache(payload: dict[str, Any]) -> None:
+    temp_path: Path | None = None
     try:
-        TOKEN_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        TOKEN_CACHE_PATH.write_text(json.dumps(payload, separators=(",", ":")))
-        TOKEN_CACHE_PATH.chmod(0o600)
+        parent = TOKEN_CACHE_PATH.parent
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        parent.chmod(0o700)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            delete=False,
+            dir=str(parent),
+            encoding="utf-8",
+        ) as handle:
+            handle.write(json.dumps(payload, separators=(",", ":")))
+            handle.flush()
+            os.fsync(handle.fileno())
+            temp_path = Path(handle.name)
+        temp_path.chmod(0o600)
+        temp_path.replace(TOKEN_CACHE_PATH)
+        temp_path = None
     except OSError:
         pass
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
 
 
 def _account_ref(params: dict[str, Any]) -> str:
-    return _optional_text(params.get("account_hint")) or _optional_text(params.get("account_ref")) or "default"
+    return (
+        _optional_text(params.get("account_hint"))
+        or _optional_text(params.get("account_ref"))
+        or "default"
+    )
 
 
 def _parse_window_seconds(window: str) -> int:
     if len(window) < 2:
-        raise BridgeError("capability_invalid_input", "window must look like 12h, 7d, or 2w")
+        raise BridgeError(
+            "capability_invalid_input", "window must look like 12h, 7d, or 2w"
+        )
     try:
         value = int(window[:-1])
     except ValueError:
-        raise BridgeError("capability_invalid_input", "window value must be an integer") from None
+        raise BridgeError(
+            "capability_invalid_input", "window value must be an integer"
+        ) from None
     if value <= 0:
         raise BridgeError("capability_invalid_input", "window must be positive")
     unit = window[-1].lower()
@@ -491,7 +611,7 @@ def _parse_window_seconds(window: str) -> int:
 
 
 def _iso8601(epoch: int) -> str:
-    return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.fromtimestamp(epoch, tz=UTC).isoformat().replace("+00:00", "Z")
 
 
 def _b64url_json(value: dict[str, Any]) -> str:

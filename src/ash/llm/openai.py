@@ -142,9 +142,8 @@ class OpenAIProvider(LLMProvider):
                 if isinstance(openai_tool, dict):
                     # Drop empty vector store placeholders; OpenAI rejects file_search
                     # without configured stores, while function tools should remain usable.
-                    if (
-                        openai_tool.get("type") == "file_search"
-                        and not openai_tool.get("vector_store_ids")
+                    if openai_tool.get("type") == "file_search" and not openai_tool.get(
+                        "vector_store_ids"
                     ):
                         continue
                     converted.append(dict(openai_tool))

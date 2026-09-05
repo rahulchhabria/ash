@@ -605,7 +605,7 @@ async def _sessions_view(
                 role_style = "bold yellow"
 
             # Build header
-            header_parts = [f"[{role_style}]{role}[/{role_style}]"]
+            header_parts: list[str] = [f"[{role_style}]{role}[/{role_style}]"]
             if entry.username:
                 header_parts.append(f"(@{entry.username})")
             header_parts.append(f"[dim]{timestamp}[/dim]")
@@ -850,7 +850,7 @@ async def _sessions_tools(
             )
             output = []
             for tool_use, result, agent in calls:
-                call_data = {
+                call_data: dict[str, Any] = {
                     "id": tool_use.id,
                     "name": tool_use.name,
                     "input": tool_use.input,
