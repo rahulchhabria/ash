@@ -91,7 +91,6 @@ CAPABILITY_SCOPES: dict[str, str] = {
         " https://www.googleapis.com/auth/gmail.send"
         " https://www.googleapis.com/auth/gmail.modify"
     ),
-    "gog.calendar": "https://www.googleapis.com/auth/calendar",
 }
 
 
@@ -741,26 +740,6 @@ def _handle_definitions() -> dict[str, Any]:
                     {
                         "name": "update_labels",
                         "description": "Add/remove labels on one or more messages",
-                        "requires_auth": True,
-                        "mutating": True,
-                    },
-                ],
-            },
-            {
-                "id": "gog.calendar",
-                "description": "Google Calendar operations",
-                "sensitive": True,
-                "allowed_chat_types": ["private"],
-                "operations": [
-                    {
-                        "name": "list_events",
-                        "description": "List calendar events",
-                        "requires_auth": True,
-                        "mutating": False,
-                    },
-                    {
-                        "name": "create_event",
-                        "description": "Create a calendar event",
                         "requires_auth": True,
                         "mutating": True,
                     },

@@ -132,6 +132,13 @@ class SandboxConfig(BaseModel):
     # Access: "none" = not mounted, "ro" = read-only, "rw" = read-write
     workspace_access: Literal["none", "ro", "rw"] = "rw"
 
+    # GitHub CLI auth mounting into sandbox.
+    # Access: "none" = do not mount host gh auth, "ro" = read-only auth.
+    github_auth_access: Literal["none", "ro"] = "ro"
+    github_config_path: Path = Field(
+        default_factory=lambda: Path.home() / ".config" / "gh"
+    )
+
     # Sessions mounting into sandbox (for agent to read chat history)
     # Mounted at /sessions in the container
     sessions_access: Literal["none", "ro"] = "ro"
@@ -294,7 +301,9 @@ class ReactiveWorkflowRule(BaseModel):
             return isinstance(value, str) and bool(value.strip())
 
         if not (_present(self.match_prefix) or _present(self.match_regex)):
-            raise ValueError("reactive workflow rule requires match_prefix or match_regex")
+            raise ValueError(
+                "reactive workflow rule requires match_prefix or match_regex"
+            )
         if not (
             _present(self.skill) or _present(self.agent) or _present(self.instruction)
         ):

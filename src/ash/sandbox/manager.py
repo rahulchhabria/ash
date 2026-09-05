@@ -74,6 +74,10 @@ class SandboxConfig:
     workspace_path: Path | None = None  # Host path to mount
     workspace_access: WorkspaceAccess = "rw"  # none, ro, or rw
 
+    # GitHub CLI auth mounting
+    github_config_path: Path | None = None  # Host gh config directory
+    github_auth_access: Literal["none", "ro"] = "ro"
+
     # Sessions mounting (for agent to read chat history)
     sessions_path: Path | None = None  # Host path to sessions directory
     sessions_access: Literal["none", "ro"] = "ro"  # none or ro (never rw)
@@ -199,6 +203,17 @@ class SandboxManager:
                 "bind": self._config.work_dir,
                 "mode": "ro" if self._config.workspace_access == "ro" else "rw",
             }
+
+        if (
+            self._config.github_config_path
+            and self._config.github_auth_access != "none"
+            and self._config.github_config_path.exists()
+        ):
+            volumes[str(self._config.github_config_path)] = {
+                "bind": "/home/sandbox/.config/gh",
+                "mode": "ro",
+            }
+            env["GH_CONFIG_DIR"] = "/home/sandbox/.config/gh"
 
         prefix = self._config.mount_prefix
 

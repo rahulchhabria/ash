@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -11,6 +12,7 @@ from typing import Any, Literal
 
 from ash.config.paths import get_ash_home
 
+logger = logging.getLogger(__name__)
 
 JobStatus = Literal[
     "planned",
@@ -22,6 +24,29 @@ JobStatus = Literal[
     "cancelled",
     "failed",
 ]
+
+
+@dataclass
+class ActiveCodingProject:
+    """The active coding project selected for a chat."""
+
+    repo_path: str
+    repo: str | None = None
+    chat_id: str | None = None
+    user_id: str | None = None
+    provider: str | None = None
+    thread_id: str | None = None
+    updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ActiveCodingProject:
+        return cls(**data)
+
+    def touch(self) -> None:
+        self.updated_at = datetime.now(UTC).isoformat()
 
 
 @dataclass
@@ -55,7 +80,7 @@ class CodingJob:
         provider: str | None = None,
         thread_id: str | None = None,
         telegram_message_id: str | None = None,
-    ) -> "CodingJob":
+    ) -> CodingJob:
         return cls(
             id=f"code-{uuid.uuid4().hex[:10]}",
             task=task,
@@ -71,11 +96,78 @@ class CodingJob:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "CodingJob":
+    def from_dict(cls, data: dict[str, Any]) -> CodingJob:
         return cls(**data)
 
     def touch(self) -> None:
         self.updated_at = datetime.now(UTC).isoformat()
+
+
+class ActiveCodingProjectStore:
+    """JSON-file backed store for active coding project selections."""
+
+    def __init__(self, root: Path | None = None) -> None:
+        self.root = root or get_ash_home() / "coding" / "projects"
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def set(
+        self,
+        *,
+        repo_path: str,
+        repo: str | None = None,
+        chat_id: str | None = None,
+        user_id: str | None = None,
+        provider: str | None = None,
+        thread_id: str | None = None,
+    ) -> ActiveCodingProject:
+        project = ActiveCodingProject(
+            repo_path=repo_path,
+            repo=repo,
+            chat_id=chat_id,
+            user_id=user_id,
+            provider=provider,
+            thread_id=thread_id,
+        )
+        self.save(project)
+        return project
+
+    def save(self, project: ActiveCodingProject) -> None:
+        project.touch()
+        self._path(
+            chat_id=project.chat_id,
+            user_id=project.user_id,
+            provider=project.provider,
+            thread_id=project.thread_id,
+        ).write_text(json.dumps(project.to_dict(), indent=2, sort_keys=True) + "\n")
+
+    def get(
+        self,
+        *,
+        chat_id: str | None,
+        user_id: str | None,
+        provider: str | None,
+        thread_id: str | None = None,
+    ) -> ActiveCodingProject | None:
+        path = self._path(
+            chat_id=chat_id, user_id=user_id, provider=provider, thread_id=thread_id
+        )
+        if not path.exists():
+            return None
+        return ActiveCodingProject.from_dict(json.loads(path.read_text()))
+
+    def _path(
+        self,
+        *,
+        chat_id: str | None,
+        user_id: str | None,
+        provider: str | None,
+        thread_id: str | None = None,
+    ) -> Path:
+        raw = "__".join(
+            part or "none" for part in (provider, chat_id, user_id, thread_id)
+        )
+        safe = "".join(ch for ch in raw if ch.isalnum() or ch in {"-", "_"})
+        return self.root / f"{safe}.json"
 
 
 class CodingJobStore:
@@ -126,6 +218,7 @@ class CodingJobStore:
             try:
                 jobs.append(CodingJob.from_dict(json.loads(path.read_text())))
             except Exception:
+                logger.debug("Skipping unreadable coding job state", exc_info=True)
                 continue
             if len(jobs) >= limit:
                 break

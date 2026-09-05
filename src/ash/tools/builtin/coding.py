@@ -53,7 +53,9 @@ class ApplyPatchTool(Tool):
             "required": ["patch"],
         }
 
-    async def execute(self, input_data: dict[str, Any], context: ToolContext) -> ToolResult:
+    async def execute(
+        self, input_data: dict[str, Any], context: ToolContext
+    ) -> ToolResult:
         patch = str(input_data.get("patch") or "")
         if not patch.strip():
             return ToolResult.error("Missing required parameter: patch")
@@ -104,8 +106,9 @@ class RepoTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Inspect and operate on the current git repo: status, diff, branch, test, "
-            "changed_files, and pr_summary. Outputs are line-oriented for agent parsing."
+            "Inspect and operate on a git repo: status, diff, branch, pull, push, "
+            "merge, commit, test, changed_files, pr_summary, and pr_create. Outputs "
+            "are line-oriented for agent parsing."
         )
 
     @property
@@ -115,7 +118,24 @@ class RepoTool(Tool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["status", "diff", "branch", "test", "changed_files", "pr_summary"],
+                    "enum": [
+                        "status",
+                        "diff",
+                        "branch",
+                        "pull",
+                        "push",
+                        "merge",
+                        "commit",
+                        "test",
+                        "changed_files",
+                        "pr_summary",
+                        "pr_create",
+                    ],
+                },
+                "repo_path": {
+                    "type": "string",
+                    "description": "Repo path inside the sandbox. Default: /workspace.",
+                    "default": "/workspace",
                 },
                 "command": {
                     "type": "string",
@@ -127,15 +147,33 @@ class RepoTool(Tool):
                 },
                 "base": {
                     "type": "string",
-                    "description": "Base ref for diff/pr_summary. Default: HEAD.",
+                    "description": "Base ref for diff/pr_summary/pr_create. Default: HEAD.",
                     "default": "HEAD",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Commit message for action=commit.",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "PR title for action=pr_create.",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "PR body for action=pr_create.",
                 },
             },
             "required": ["action"],
         }
 
-    async def execute(self, input_data: dict[str, Any], context: ToolContext) -> ToolResult:
+    async def execute(
+        self, input_data: dict[str, Any], context: ToolContext
+    ) -> ToolResult:
         action = str(input_data.get("action") or "").strip()
+        repo_path = (
+            str(input_data.get("repo_path") or "/workspace").strip() or "/workspace"
+        )
+        safe_repo_path = shlex.quote(repo_path)
         if action == "status":
             command = "git status --short --branch"
         elif action == "changed_files":
@@ -149,6 +187,21 @@ class RepoTool(Tool):
                 return ToolResult.error("branch is required for action=branch")
             safe = shlex.quote(branch)
             command = f"git switch -c {safe} 2>/dev/null || git switch {safe} && git status --short --branch"
+        elif action == "pull":
+            command = "git pull --ff-only"
+        elif action == "push":
+            command = "git push -u origin HEAD"
+        elif action == "merge":
+            branch = str(input_data.get("branch") or "").strip()
+            if not branch:
+                return ToolResult.error("branch is required for action=merge")
+            safe = shlex.quote(branch)
+            command = f"git merge --no-ff {safe}"
+        elif action == "commit":
+            message = str(input_data.get("message") or "").strip()
+            if not message:
+                return ToolResult.error("message is required for action=commit")
+            command = f"git add -A && git commit -m {shlex.quote(message)}"
         elif action == "test":
             test_command = str(input_data.get("command") or "").strip()
             if not test_command:
@@ -161,13 +214,25 @@ class RepoTool(Tool):
                 f"printf 'Changed files:\\n'; git diff --name-status {base}; "
                 f"printf '\\nDiff stat:\\n'; git diff --stat {base}"
             )
+        elif action == "pr_create":
+            title = str(input_data.get("title") or "").strip()
+            body = str(input_data.get("body") or "").strip()
+            base = shlex.quote(str(input_data.get("base") or "main"))
+            command = f"gh pr create --base {base}"
+            if title:
+                command += f" --title {shlex.quote(title)}"
+            if body:
+                command += f" --body {shlex.quote(body)}"
+            if not title and not body:
+                command += " --fill"
         else:
             return ToolResult.error(
-                "Unknown action. Use status, diff, branch, test, changed_files, or pr_summary."
+                "Unknown action. Use status, diff, branch, pull, push, merge, commit, "
+                "test, changed_files, pr_summary, or pr_create."
             )
 
         result = await self._executor.execute(
-            f"cd /workspace && {command}",
+            f"cd {safe_repo_path} && {command}",
             timeout=300 if action == "test" else 120,
             reuse_container=True,
             environment=context.env,
@@ -175,6 +240,7 @@ class RepoTool(Tool):
         output = truncate_tail(result.output, prefix=f"repo_{action}")
         header = [
             f"Repo action: {action}",
+            f"Repo path: {repo_path}",
             f"Exit code: {result.exit_code}",
             f"Timed out: {str(result.timed_out).lower()}",
             "Output:",
@@ -211,7 +277,10 @@ class CodingJobTool(Tool):
         return {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["create", "show", "list", "update"]},
+                "action": {
+                    "type": "string",
+                    "enum": ["create", "show", "list", "update"],
+                },
                 "job_id": {"type": "string"},
                 "task": {"type": "string"},
                 "repo_path": {"type": "string", "default": "/workspace"},
@@ -223,7 +292,9 @@ class CodingJobTool(Tool):
             "required": ["action"],
         }
 
-    async def execute(self, input_data: dict[str, Any], context: ToolContext) -> ToolResult:
+    async def execute(
+        self, input_data: dict[str, Any], context: ToolContext
+    ) -> ToolResult:
         action = str(input_data.get("action") or "").strip()
         if action == "create":
             task = str(input_data.get("task") or "").strip()
@@ -236,28 +307,46 @@ class CodingJobTool(Tool):
                 user_id=context.user_id,
                 provider=context.provider,
                 thread_id=context.thread_id,
-                telegram_message_id=str(context.metadata.get("message_id") or "") or None,
+                telegram_message_id=str(context.metadata.get("message_id") or "")
+                or None,
             )
-            return ToolResult.success(_format_job(job), job_id=job.id, status=job.status)
+            return ToolResult.success(
+                _format_job(job), job_id=job.id, status=job.status
+            )
         if action == "list":
             jobs = self._store.list(limit=10)
             body = "\n\n".join(_format_job(job) for job in jobs) or "No coding jobs."
             return ToolResult.success(f"{body}\n\nTotal: {len(jobs)} job(s)")
         job_id = str(input_data.get("job_id") or "").strip()
-        job = self._store.get(job_id) if job_id else self._store.latest_for_chat(
-            chat_id=context.chat_id, user_id=context.user_id, provider=context.provider
+        job = (
+            self._store.get(job_id)
+            if job_id
+            else self._store.latest_for_chat(
+                chat_id=context.chat_id,
+                user_id=context.user_id,
+                provider=context.provider,
+            )
         )
         if job is None:
             return ToolResult.error("Coding job not found")
         if action == "show":
-            return ToolResult.success(_format_job(job), job_id=job.id, status=job.status)
+            return ToolResult.success(
+                _format_job(job), job_id=job.id, status=job.status
+            )
         if action == "update":
-            for field in ("status", "last_diff_summary", "last_test_command", "last_test_result"):
+            for field in (
+                "status",
+                "last_diff_summary",
+                "last_test_command",
+                "last_test_result",
+            ):
                 value = input_data.get(field)
                 if value is not None:
                     setattr(job, field, str(value))
             self._store.save(job)
-            return ToolResult.success(_format_job(job), job_id=job.id, status=job.status)
+            return ToolResult.success(
+                _format_job(job), job_id=job.id, status=job.status
+            )
         return ToolResult.error("Unknown action. Use create, show, list, or update.")
 
 
@@ -271,7 +360,7 @@ def _format_job(job: Any) -> str:
             f"  Task: {job.task}",
             f"  Updated: {job.updated_at}",
             f"  Last diff: {job.last_diff_summary or '(none)'}",
-            f"  Last test: {job.last_test_result or '(none)' }",
+            f"  Last test: {job.last_test_result or '(none)'}",
         ]
     )
 
@@ -279,7 +368,9 @@ def _format_job(job: Any) -> str:
 class HostedOpenAITool(Tool):
     """Expose an OpenAI hosted/MCP tool definition to compatible LLM providers."""
 
-    def __init__(self, name: str, description: str, openai_tool: dict[str, Any]) -> None:
+    def __init__(
+        self, name: str, description: str, openai_tool: dict[str, Any]
+    ) -> None:
         self._name = name
         self._description = description
         self._openai_tool = openai_tool
@@ -307,7 +398,9 @@ class HostedOpenAITool(Tool):
             metadata={"openai_tool": self._openai_tool},
         )
 
-    async def execute(self, input_data: dict[str, Any], context: ToolContext) -> ToolResult:
+    async def execute(
+        self, input_data: dict[str, Any], context: ToolContext
+    ) -> ToolResult:
         return ToolResult.error(
             f"{self.name} is a provider-hosted tool and is not executed by Ash."
         )

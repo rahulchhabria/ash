@@ -13,7 +13,6 @@ from ash.config.models import ModelConfig
 from ash.integrations.email_forward_summary import (
     CONTEXT_FOOTER,
     CONTEXT_HEADER,
-    CONTEXT_HEADER_RECENT,
     EmailForwardSummaryIntegration,
 )
 from ash.integrations.runtime import IntegrationContext
@@ -128,7 +127,7 @@ async def test_noop_when_disabled(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_injects_recent_email_when_no_reply(tmp_path) -> None:
+async def test_noop_when_no_reply(tmp_path) -> None:
     db = tmp_path / "school.sqlite3"
     _seed_db(db, telegram_message_id=1013)
     integration = EmailForwardSummaryIntegration()
@@ -138,16 +137,12 @@ async def test_injects_recent_email_when_no_reply(tmp_path) -> None:
     message = _message(text="who are the new science teachers?", reply_to=None)
     updated = await integration.preprocess_incoming_message(message, context)
 
-    assert CONTEXT_HEADER_RECENT in updated.text
-    assert CONTEXT_FOOTER in updated.text
-    assert "Professional Community Updates" in updated.text
-    assert "who are the new science teachers?" in updated.text
-    assert updated.metadata["email_forward_summary.source"] == "recent"
-    assert updated.metadata["email_forward_summary.email_id"] == 1
+    assert updated.text == "who are the new science teachers?"
+    assert "email_forward_summary.email_id" not in updated.metadata
 
 
 @pytest.mark.asyncio
-async def test_falls_back_to_recent_when_reply_id_not_in_db(tmp_path) -> None:
+async def test_noop_when_reply_id_not_in_db(tmp_path) -> None:
     db = tmp_path / "school.sqlite3"
     _seed_db(db, telegram_message_id=42)
     integration = EmailForwardSummaryIntegration()
@@ -157,9 +152,8 @@ async def test_falls_back_to_recent_when_reply_id_not_in_db(tmp_path) -> None:
     message = _message(text="any updates?", reply_to="999")
     updated = await integration.preprocess_incoming_message(message, context)
 
-    assert CONTEXT_HEADER_RECENT in updated.text
-    assert "any updates?" in updated.text
-    assert updated.metadata["email_forward_summary.source"] == "recent"
+    assert updated.text == "any updates?"
+    assert "email_forward_summary.email_id" not in updated.metadata
 
 
 @pytest.mark.asyncio

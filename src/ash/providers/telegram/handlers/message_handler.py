@@ -50,6 +50,19 @@ logger = logging.getLogger("telegram")
 _LOCALHOST_CALLBACK_URL_PATTERN = re.compile(r"https?://localhost[^\s]*[?&]code=[^\s]*")
 
 
+def _coding_repo_path_from_arg(value: str) -> tuple[str, str | None]:
+    text = value.strip()
+    if not text:
+        return "/workspace", None
+    if text.startswith("/"):
+        return text, None
+    if "/" in text and not text.startswith("."):
+        owner, name = text.split("/", 1)
+        if owner and name:
+            return f"/workspace/git/{owner}/{name}", f"{owner}/{name}"
+    return text, None
+
+
 def _extract_tool_calls_from_session(session: SessionState) -> list[dict[str, Any]]:
     from ash.llm.types import ToolResult as LLMToolResult
     from ash.llm.types import ToolUse
@@ -446,8 +459,9 @@ class TelegramMessageHandler:
         )
         return True
 
-
-    async def _try_handle_coding_command(self, message: IncomingMessage) -> IncomingMessage | bool:
+    async def _try_handle_coding_command(
+        self, message: IncomingMessage
+    ) -> IncomingMessage | bool:
         """Handle Telegram coding harness slash commands.
 
         Returns a rewritten message for commands that should enter the normal
@@ -463,13 +477,131 @@ class TelegramMessageHandler:
         if parsed is None:
             return False
         command, arguments = parsed
-        if command not in {"/code", "/status", "/diff", "/test", "/cancel"}:
+        coding_commands = {
+            "/code",
+            "/status",
+            "/diff",
+            "/test",
+            "/cancel",
+            "/repos",
+            "/open",
+            "/clone",
+            "/create-repo",
+            "/pull",
+            "/push",
+            "/merge",
+            "/pr",
+        }
+        if command not in coding_commands:
             return False
 
-        from ash.coding import CodingJobStore
+        from ash.coding import ActiveCodingProjectStore, CodingJobStore
 
         store = CodingJobStore()
-        repo_path = getattr(coding_config, "default_repo_path", "/workspace")
+        project_store = ActiveCodingProjectStore()
+        thread_id = message.metadata.get("thread_id")
+        active_project = project_store.get(
+            chat_id=message.chat_id,
+            user_id=message.user_id,
+            provider=self._provider.name,
+            thread_id=thread_id,
+        )
+        repo_path = (
+            active_project.repo_path
+            if active_project is not None
+            else getattr(coding_config, "default_repo_path", "/workspace")
+        )
+
+        if command == "/open":
+            target = arguments.strip()
+            if not target:
+                await self._send_direct_result(
+                    message=message,
+                    assistant_text="Usage: /open <owner/repo or /workspace/path>",
+                    skip_user_message=False,
+                )
+                return True
+            repo_path, repo = _coding_repo_path_from_arg(target)
+            project_store.set(
+                repo_path=repo_path,
+                repo=repo,
+                chat_id=message.chat_id,
+                user_id=message.user_id,
+                provider=self._provider.name,
+                thread_id=thread_id,
+            )
+            await self._send_direct_result(
+                message=message,
+                assistant_text=f"Active coding project set to {repo or repo_path}\nPath: {repo_path}",
+                skip_user_message=False,
+            )
+            return True
+
+        if command in {"/repos", "/clone", "/create-repo"}:
+            target = arguments.strip()
+            if command in {"/clone", "/create-repo"} and not target:
+                await self._send_direct_result(
+                    message=message,
+                    assistant_text=f"Usage: {command} <owner/repo>",
+                    skip_user_message=False,
+                )
+                return True
+            if command == "/repos":
+                task = (
+                    "List GitHub repositories available to me. Run `ash-sb github auth-status`, "
+                    "then `ash-sb github orgs`, then list repos for the requested owner if one "
+                    "was provided. Requested owner: "
+                    f"{target or '(none)'}"
+                )
+            elif command == "/clone":
+                repo_path, repo = _coding_repo_path_from_arg(target)
+                project_store.set(
+                    repo_path=repo_path,
+                    repo=repo,
+                    chat_id=message.chat_id,
+                    user_id=message.user_id,
+                    provider=self._provider.name,
+                    thread_id=thread_id,
+                )
+                task = (
+                    f"Clone GitHub repository {target} into {repo_path}. "
+                    "Use `ash-sb github clone` if it is not already present, then run repo status."
+                )
+                repo_path = repo_path
+            else:
+                repo_arg = target.split()[0]
+                repo_path, repo = _coding_repo_path_from_arg(repo_arg)
+                project_store.set(
+                    repo_path=repo_path,
+                    repo=repo,
+                    chat_id=message.chat_id,
+                    user_id=message.user_id,
+                    provider=self._provider.name,
+                    thread_id=thread_id,
+                )
+                visibility = "public" if "--public" in target.split() else "private"
+                visibility_flag = "--public" if visibility == "public" else ""
+                task = (
+                    f"Create GitHub repository {repo_arg} as {visibility}, "
+                    f"clone or open it at {repo_path}, and report the result. "
+                    f"Use `ash-sb github create {repo_arg} {visibility_flag}`."
+                )
+            job = store.create(
+                task=task,
+                repo_path=repo_path,
+                chat_id=message.chat_id,
+                user_id=message.user_id,
+                provider=self._provider.name,
+                thread_id=thread_id,
+                telegram_message_id=message.id,
+            )
+            await self._run_coding_agent_command(
+                message=message,
+                task=task,
+                job_id=job.id,
+                repo_path=repo_path,
+            )
+            return True
 
         if command == "/code":
             task = arguments.strip()
@@ -503,6 +635,17 @@ class TelegramMessageHandler:
             provider=self._provider.name,
         )
         if job is None:
+            if command == "/status" and active_project is not None:
+                await self._send_direct_result(
+                    message=message,
+                    assistant_text=(
+                        "No active coding job for this chat.\n"
+                        f"Active project: {active_project.repo or active_project.repo_path}\n"
+                        f"Path: {active_project.repo_path}"
+                    ),
+                    skip_user_message=False,
+                )
+                return True
             await self._send_direct_result(
                 message=message,
                 assistant_text="No active coding job for this chat.",
@@ -550,7 +693,7 @@ class TelegramMessageHandler:
         if command == "/diff":
             rewritten = (
                 "Use the built-in coding agent to show and summarize the current diff "
-                f"for coding job {job.id}. Run repo(action=\"diff\") and explain what changed."
+                f'for coding job {job.id}. Run repo(action="diff") and explain what changed.'
             )
             return replace(message, text=rewritten)
 
@@ -559,14 +702,40 @@ class TelegramMessageHandler:
             rewritten = (
                 "Use the built-in coding agent to run tests for the active coding job.\n\n"
                 f"Job id: {job.id}\n"
+                f"Repo path: {job.repo_path}\n"
                 f"Command: {test_command}\n\n"
-                "Run repo(action=\"test\", command=the command), update the coding_job "
-                "with the result, and summarize failures if any."
+                'Run repo(action="test", repo_path=the repo path, command=the command), '
+                "update the coding_job with the result, and summarize failures if any."
+            )
+            return replace(message, text=rewritten)
+
+        if command in {"/pull", "/push", "/merge", "/pr"}:
+            if command == "/pull":
+                action = 'Run repo(action="pull", repo_path=the repo path).'
+            elif command == "/push":
+                action = 'Run repo(action="push", repo_path=the repo path).'
+            elif command == "/merge":
+                branch = arguments.strip()
+                if not branch:
+                    await self._send_direct_result(
+                        message=message,
+                        assistant_text="Usage: /merge <branch>",
+                        skip_user_message=False,
+                    )
+                    return True
+                action = f'Run repo(action="merge", repo_path=the repo path, branch={branch!r}).'
+            else:
+                action = 'Create a pull request for the active branch. Push first if needed, then run repo(action="pr_create", repo_path=the repo path).'
+            rewritten = (
+                "Use the built-in coding agent for this repository operation.\n\n"
+                f"Job id: {job.id}\n"
+                f"Repo path: {job.repo_path}\n"
+                f"Requested command: {command} {arguments.strip()}\n\n"
+                f"{action} Report the exact command output and update coding_job status as appropriate."
             )
             return replace(message, text=rewritten)
 
         return False
-
 
     async def _run_coding_agent_command(
         self,
@@ -661,7 +830,9 @@ class TelegramMessageHandler:
         else:
             if tracker.thinking_msg_id:
                 try:
-                    await self._provider.delete(message.chat_id, tracker.thinking_msg_id)
+                    await self._provider.delete(
+                        message.chat_id, tracker.thinking_msg_id
+                    )
                 except Exception:
                     logger.debug("Failed to delete coding thinking message")
             sent_message_id = await self._provider.send(

@@ -842,6 +842,8 @@ class TestSystemPromptBuilder:
         assert "read-only" in prompt
         assert "/workspace" in prompt
         assert "/ash/logs" in prompt
+        assert "ash-sb github auth-status" in prompt
+        assert "ash-sb github repos <owner>" in prompt
         # Bundled skill directories are no longer listed as a generic mount;
         # they appear per-skill in the Available Skills section instead.
         assert "Bundled skill references" not in prompt

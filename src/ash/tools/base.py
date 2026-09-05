@@ -219,6 +219,7 @@ def build_sandbox_manager_config(
         return SandboxManagerConfig(
             workspace_path=workspace_path,
             network_mode=default_network_mode,
+            github_config_path=Path.home() / ".config" / "gh",
             sessions_path=sessions_path,
             chats_path=chats_path,
             logs_path=logs_path,
@@ -242,6 +243,8 @@ def build_sandbox_manager_config(
         http_proxy=config.http_proxy,
         workspace_path=workspace_path,
         workspace_access=config.workspace_access,
+        github_config_path=config.github_config_path,
+        github_auth_access=config.github_auth_access,
         sessions_path=sessions_path,
         sessions_access=config.sessions_access,
         chats_path=chats_path,

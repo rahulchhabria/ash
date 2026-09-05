@@ -6,6 +6,7 @@ from ash_sandbox_cli.commands import (
     browser,
     capability,
     config,
+    github,
     logs,
     memory,
     repo,
@@ -22,6 +23,7 @@ app = typer.Typer(
 
 # Register command groups
 app.add_typer(config.app, name="config")
+app.add_typer(github.app, name="github")
 app.add_typer(logs.app, name="logs")
 app.add_typer(memory.app, name="memory")
 app.add_typer(repo.app, name="repo")
