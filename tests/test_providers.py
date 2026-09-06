@@ -187,6 +187,15 @@ def test_checkpoint_text_option_selection_accepts_common_replies():
     assert _select_checkpoint_option("approve", ["Proceed", "Cancel"]) == "Proceed"
     assert _select_checkpoint_option("no", ["Proceed", "Cancel"]) == "Cancel"
     assert _select_checkpoint_option("yes sf", ["Yes", "No"]) is None
+    options = [
+        "call now (ok to press ivr buttons)",
+        "call now (no ivr keypresses)",
+        "don't call",
+    ]
+    assert (
+        _select_checkpoint_option("Call now. It's okay to press IVR buttons", options)
+        == options[0]
+    )
     assert (
         _select_checkpoint_response("Roshan + yes, proceed", None)
         == "Roshan + yes, proceed"
@@ -433,6 +442,50 @@ class TestTelegramMessageHandler:
 
         mock_agent.process_message.assert_called_once()
         mock_provider.send.assert_called_once()
+
+    async def test_main_agent_checkpoint_has_inline_option_buttons(
+        self, mock_provider, mock_agent, incoming_message, tmp_path
+    ):
+        """Main-agent interrupts expose buttons, not text suggestions alone."""
+        from ash.sessions import SessionManager
+
+        options = [
+            "call now (ok to press ivr buttons)",
+            "call now (no ivr keypresses)",
+            "don't call",
+        ]
+        mock_agent.process_message.return_value = MagicMock(
+            text="",
+            compaction=None,
+            tool_calls=[],
+            checkpoint={
+                "checkpoint_id": "checkpoint_main_agent_buttons",
+                "prompt": "Want me to place the call now?",
+                "options": options,
+            },
+        )
+        handler = TelegramMessageHandler(
+            provider=mock_provider,
+            agent=mock_agent,
+            streaming=False,
+        )
+        session_manager = SessionManager(
+            provider="telegram",
+            chat_id="456",
+            user_id="789",
+            thread_id="1",
+            sessions_path=tmp_path,
+        )
+        handler._session_handler._session_managers[session_manager.session_key] = (
+            session_manager
+        )
+
+        await handler.handle_message(incoming_message)
+
+        outgoing = mock_provider.send.await_args.args[0]
+        assert outgoing.reply_markup is not None
+        labels = [row[0].text for row in outgoing.reply_markup.inline_keyboard]
+        assert labels == options
 
     async def test_session_creation(self, handler, incoming_message):
         """Test session is created for new chat."""
@@ -986,6 +1039,87 @@ class TestTelegramMessageHandler:
         assert synthetic.metadata["thread_id"] == thread_id
         assert synthetic.metadata["is_checkpoint_response"] is True
         assert synthetic.metadata["checkpoint.id"] == checkpoint_id
+        assert truncated_id not in handler._checkpoint_handler._pending_checkpoints
+
+    async def test_paraphrased_call_approval_keeps_originating_thread(
+        self, mock_provider, mock_agent, tmp_path
+    ):
+        """The exact screenshot wording resumes its checkpoint instead of Conduit."""
+        from ash.providers.base import IncomingMessage
+        from ash.providers.telegram.handlers import TelegramMessageHandler
+        from ash.sessions import SessionManager
+
+        handler = TelegramMessageHandler(
+            provider=mock_provider,
+            agent=mock_agent,
+            streaming=False,
+        )
+        checkpoint_id = "checkpoint_adidas_call_12345"
+        truncated_id = checkpoint_id[:55]
+        thread_id = "1765"
+        options = [
+            "call now (ok to press ivr buttons)",
+            "call now (no ivr keypresses)",
+            "don't call",
+        ]
+        session_manager = SessionManager(
+            provider="telegram",
+            chat_id="456",
+            user_id="789",
+            thread_id=thread_id,
+            sessions_path=tmp_path,
+        )
+        await session_manager.ensure_session()
+        handler._session_handler._session_managers[session_manager.session_key] = (
+            session_manager
+        )
+        await session_manager.add_tool_use(
+            tool_use_id="tool_main",
+            name="interrupt",
+            input_data={"prompt": "Want me to place the call now?"},
+        )
+        await session_manager.add_tool_result(
+            tool_use_id="tool_main",
+            output="Want me to place the call now?",
+            success=True,
+            metadata={
+                "checkpoint": {
+                    "checkpoint_id": checkpoint_id,
+                    "prompt": "Want me to place the call now?",
+                    "options": options,
+                }
+            },
+        )
+        handler._checkpoint_handler._pending_checkpoints[truncated_id] = {
+            "session_key": session_manager.session_key,
+            "chat_id": "456",
+            "user_id": "789",
+            "thread_id": thread_id,
+            "agent_name": None,
+            "original_message": None,
+        }
+        message = IncomingMessage(
+            id="1767",
+            chat_id="456",
+            user_id="789",
+            text="Call now. It's okay to press IVR buttons",
+            metadata={"chat_type": "private"},
+        )
+
+        resolved = await handler._checkpoint_handler.resolve_text_response_thread(
+            message
+        )
+        assert resolved == thread_id
+        message.metadata["thread_id"] = resolved
+
+        fallback = AsyncMock()
+        handler._checkpoint_handler._handle_message = fallback
+        assert await handler._checkpoint_handler.handle_text_response(message) is True
+
+        synthetic = fallback.await_args.args[0]
+        assert synthetic.text == options[0]
+        assert synthetic.metadata["thread_id"] == thread_id
+        assert synthetic.metadata["is_checkpoint_response"] is True
         assert truncated_id not in handler._checkpoint_handler._pending_checkpoints
 
     async def test_open_ended_checkpoint_reply_preserves_full_agent_context(

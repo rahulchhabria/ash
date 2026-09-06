@@ -177,7 +177,10 @@ class SyncHandler:
         # Check for checkpoint in response and create inline keyboard if present
         reply_markup = None
         if response.checkpoint:
-            from ash.providers.telegram.checkpoint_ui import format_checkpoint_message
+            from ash.providers.telegram.checkpoint_ui import (
+                create_checkpoint_keyboard,
+                format_checkpoint_message,
+            )
 
             checkpoint = response.checkpoint
 
@@ -202,6 +205,7 @@ class SyncHandler:
                 tool_use_id=tool_use_id,
             )
             checkpoint_msg = format_checkpoint_message(checkpoint)
+            reply_markup = create_checkpoint_keyboard(checkpoint)
             # Checkpoint replaces response content
             if tracker.progress_messages:
                 parts = tracker.progress_messages + ["", checkpoint_msg]

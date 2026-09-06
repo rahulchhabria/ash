@@ -46,7 +46,10 @@ _CANCEL_TEXT = {"cancel", "no", "n", "stop", "nevermind", "never mind"}
 
 
 def _normalize_checkpoint_text(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    normalized = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+    normalized = re.sub(r"\b(?:it is|it s|its) (?:ok|okay)\b", "ok", normalized)
+    normalized = re.sub(r"\bokay\b", "ok", normalized)
+    return " ".join(normalized.split())
 
 
 def _select_checkpoint_option(text: str, options: list[str]) -> str | None:
