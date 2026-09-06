@@ -347,6 +347,7 @@ async def _run_chat(
                     user_input: str, show_prefix: bool = False, show_meta: bool = False
                 ) -> None:
                     from ash.agents.types import ChildActivated
+                    from ash.core.types import StreamReset
 
                     await session_manager.add_user_message(user_input)
 
@@ -360,6 +361,10 @@ async def _run_chat(
                             async for chunk in agent.process_message_streaming(
                                 user_input, session
                             ):
+                                if isinstance(chunk, StreamReset):
+                                    response_text = ""
+                                    console.print("\r", end="")
+                                    continue
                                 console.print(chunk, end="")
                                 response_text += chunk
                             console.print("\n" if show_prefix else "")

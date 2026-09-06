@@ -37,6 +37,7 @@ class SessionContext:
     current_message_id: str | None = None
     has_reply_context: bool = False
     bot_name: str | None = None
+    conversation_envelope: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dict for ToolContext/AgentContext metadata propagation."""
@@ -67,6 +68,8 @@ class SessionContext:
         d["has_reply_context"] = self.has_reply_context
         if self.bot_name is not None:
             d["bot_name"] = self.bot_name
+        if self.conversation_envelope is not None:
+            d["conversation_envelope"] = self.conversation_envelope
         return d
 
     @classmethod
@@ -88,6 +91,7 @@ class SessionContext:
             current_message_id=data.get("current_message_id"),
             has_reply_context=data["has_reply_context"],
             bot_name=data.get("bot_name"),
+            conversation_envelope=data.get("conversation_envelope"),
         )
 
 
@@ -101,6 +105,9 @@ class SessionState:
     user_id: str
     messages: list[Message] = field(default_factory=list)
     context: SessionContext = field(default_factory=SessionContext)
+    # Runtime-only persistence handle. Session serialization intentionally omits it.
+    session_manager: Any = field(default=None, repr=False, compare=False)
+    gathered_context: Any = field(default=None, repr=False, compare=False)
     # Token tracking for smart pruning (populated from DB)
     _token_counts: list[int] = field(default_factory=list, repr=False)
     _message_ids: list[str] = field(default_factory=list, repr=False)

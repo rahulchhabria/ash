@@ -76,6 +76,7 @@ class ContextGatherer:
         chat_id: str | None = None,
         chat_type: str | None = None,
         sender_username: str | None = None,
+        recent_messages: tuple[str, ...] | None = None,
     ) -> GatheredContext:
         """Gather all context for a message.
 
@@ -103,6 +104,7 @@ class ContextGatherer:
             chat_type=chat_type,
             sender_username=sender_username,
             sender_person_ids=sender_person_ids,
+            recent_messages=recent_messages,
         )
 
         known_people = await self._list_known_people(user_id)
@@ -127,6 +129,7 @@ class ContextGatherer:
         chat_type: str | None = None,
         sender_username: str | None = None,
         sender_person_ids: set[str] | None = None,
+        recent_messages: tuple[str, ...] | None = None,
     ) -> RetrievedContext | None:
         """Retrieve memory context for a message.
 
@@ -150,6 +153,7 @@ class ContextGatherer:
                 chat_id=chat_id,
                 chat_type=chat_type,
                 sender_username=sender_username,
+                recent_messages=recent_messages,
             )
             memory_context = await self._retrieve_for_query(
                 user_id=user_id,
@@ -222,6 +226,7 @@ class ContextGatherer:
         chat_id: str | None,
         chat_type: str | None,
         sender_username: str | None,
+        recent_messages: tuple[str, ...] | None = None,
     ) -> PlannedMemoryQuery:
         base_query = PlannedMemoryQuery(
             query=user_message,
@@ -231,11 +236,12 @@ class ContextGatherer:
             return base_query
 
         try:
-            recent_messages = self._recent_messages_for_query_planner(
-                provider=provider,
-                chat_id=chat_id,
-                user_message=user_message,
-            )
+            if recent_messages is None:
+                recent_messages = self._recent_messages_for_query_planner(
+                    provider=provider,
+                    chat_id=chat_id,
+                    user_message=user_message,
+                )
             return await self._query_planner.plan(
                 user_message=user_message,
                 chat_type=chat_type,

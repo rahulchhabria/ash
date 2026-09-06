@@ -77,7 +77,7 @@ class SyncHandler:
         progress_tool = ProgressMessageTool(tracker)
 
         async def get_steering_messages() -> list[IncomingMessage]:
-            pending = ctx.take_pending()
+            pending = ctx.take_for_steering()
             if pending:
                 logger.info(
                     "steering_messages_received",
@@ -95,13 +95,14 @@ class SyncHandler:
             user_metadata["external_id"] = message.id
         if message.reply_to_message_id:
             user_metadata["reply_to_external_id"] = message.reply_to_message_id
-        await session_manager.add_user_message(
+        user_entry_id = await session_manager.add_user_message(
             content=message.text,
             metadata=user_metadata or None,
             username=message.username,
             display_name=message.display_name,
             user_id=message.user_id,
         )
+        session._message_ids.append(user_entry_id)
 
         typing_task = asyncio.create_task(self._typing_loop(message.chat_id))
         try:
@@ -112,14 +113,29 @@ class SyncHandler:
                 on_tool_start=tracker.on_tool_start,
                 on_tool_complete=tracker.on_tool_complete,
                 get_steering_messages=get_steering_messages,
+                turn_controller=ctx,
+                session_manager=session_manager,
                 tool_overrides={progress_tool.name: progress_tool},
             )
+        except BaseException:
+            await self._session_handler.persist_steered_messages(
+                ctx.take_consumed_steering(),
+                thread_id,
+                session.context.branch_id,
+            )
+            raise
         finally:
             typing_task.cancel()
             try:
                 await typing_task
             except asyncio.CancelledError:
                 pass
+
+        await self._session_handler.persist_steered_messages(
+            ctx.take_consumed_steering(),
+            thread_id,
+            session.context.branch_id,
+        )
 
         response_text = response.text or ""
 

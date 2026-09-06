@@ -47,14 +47,26 @@ class MemoryPostprocessService:
         self._context_messages = context_messages
         self._confidence_threshold = confidence_threshold
         self._last_extraction_time: float | None = None
+        self._last_extraction_times: dict[tuple[str, str, str, str], float] = {}
+        self._pending_tasks: dict[tuple[str, str, str, str], asyncio.Task[None]] = {}
+        self._pending_requests: dict[
+            tuple[str, str, str, str], tuple[SessionState, str, str | None]
+        ] = {}
+        self._extracting_keys: set[tuple[str, str, str, str]] = set()
+        self._rerun_requested: set[tuple[str, str, str, str]] = set()
 
-    def touch_debounce(self) -> None:
+    def touch_debounce(
+        self,
+        conversation_key: tuple[str, str, str, str] | None = None,
+    ) -> None:
         """Mark an extraction as having just occurred.
 
         Called by RPC extraction handlers so the postprocess debounce timer
         is aware that extraction already happened, preventing double-extraction.
         """
         self._last_extraction_time = time.time()
+        if conversation_key is not None:
+            self._last_extraction_times[conversation_key] = self._last_extraction_time
 
     def maybe_schedule(
         self,
@@ -63,30 +75,96 @@ class MemoryPostprocessService:
         session: SessionState,
         effective_user_id: str,
     ) -> None:
-        if not self._should_extract(user_message):
+        key = self._conversation_key(session, effective_user_id)
+        if not self._should_extract(user_message, key):
             return
 
+        self._pending_requests[key] = (session, effective_user_id, session.chat_id)
+        previous = self._pending_tasks.get(key)
+        if previous is not None and not previous.done():
+            if key in self._extracting_keys:
+                self._rerun_requested.add(key)
+                return
+            previous.cancel()
         task = asyncio.create_task(
-            self._extract_background(
+            self._extract_after_debounce(
+                key=key,
                 session=session,
                 user_id=effective_user_id,
                 chat_id=session.chat_id,
             ),
-            name="memory_extraction",
+            name=f"memory_extraction:{':'.join(key)}",
         )
+        self._pending_tasks[key] = task
         task.add_done_callback(self._handle_task_error)
 
-    def _should_extract(self, user_message: str) -> bool:
+    def _should_extract(
+        self,
+        user_message: str,
+        conversation_key: tuple[str, str, str, str] | None = None,
+    ) -> bool:
         if not self._extraction_enabled:
             return False
         if not self._extractor or not self._store:
             return False
-        if len(user_message) < self._min_message_length:
+        if len(user_message.strip()) < self._min_message_length:
             return False
-        if self._last_extraction_time is None:
+        last_extraction = (
+            self._last_extraction_times.get(conversation_key)
+            if conversation_key is not None
+            else self._last_extraction_time
+        )
+        if last_extraction is None:
             return True
-        elapsed = time.time() - self._last_extraction_time
+        elapsed = time.time() - last_extraction
         return elapsed >= self._debounce_seconds
+
+    @staticmethod
+    def _conversation_key(
+        session: SessionState, user_id: str
+    ) -> tuple[str, str, str, str]:
+        return (
+            session.provider or "",
+            session.chat_id or "",
+            user_id,
+            session.context.thread_id or "",
+        )
+
+    async def _extract_after_debounce(
+        self,
+        *,
+        key: tuple[str, str, str, str],
+        session: SessionState,
+        user_id: str,
+        chat_id: str | None,
+    ) -> None:
+        try:
+            if self._debounce_seconds > 0:
+                await asyncio.sleep(self._debounce_seconds)
+            while True:
+                latest = self._pending_requests.get(key)
+                if latest is not None:
+                    session, user_id, chat_id = latest
+                self._extracting_keys.add(key)
+                try:
+                    await self._extract_background(
+                        session=session,
+                        user_id=user_id,
+                        chat_id=chat_id,
+                    )
+                finally:
+                    self._extracting_keys.discard(key)
+                self._last_extraction_times[key] = time.time()
+                self._last_extraction_time = self._last_extraction_times[key]
+                if key not in self._rerun_requested:
+                    break
+                self._rerun_requested.discard(key)
+        finally:
+            current = self._pending_tasks.get(key)
+            if current is asyncio.current_task():
+                self._pending_tasks.pop(key, None)
+                self._pending_requests.pop(key, None)
+                self._rerun_requested.discard(key)
 
     @staticmethod
     def _handle_task_error(task: asyncio.Task[None]) -> None:
@@ -106,122 +184,165 @@ class MemoryPostprocessService:
             return
 
         try:
-            self._last_extraction_time = time.time()
-
-            existing_memories: list[str] = []
-            try:
-                recent = await self._store.list_memories(
-                    owner_user_id=user_id,
-                    chat_id=chat_id,
-                    limit=20,
-                )
-                existing_memories = [m.content for m in recent]
-            except Exception:
-                logger.debug(
-                    "Failed to get existing memories for extraction", exc_info=True
-                )
+            session_manager = session.session_manager
+            if session_manager is not None:
+                cursor = session_manager.get_memory_extraction_cursor()
+                unseen = await session_manager.load_message_entries_since(cursor)
+                unseen = [
+                    entry
+                    for entry in unseen
+                    if entry.role in {"user", "assistant"}
+                    and entry._extract_text_content().strip()
+                ]
+                batch_size = max(1, self._context_messages)
+                for start in range(0, len(unseen), batch_size):
+                    batch = unseen[start : start + batch_size]
+                    messages = [
+                        LLMMessage(
+                            role=Role(entry.role),
+                            content=entry._extract_text_content(),
+                        )
+                        for entry in batch
+                    ]
+                    await self._extract_messages(
+                        session=session,
+                        user_id=user_id,
+                        chat_id=chat_id,
+                        thread_messages=messages,
+                    )
+                    session_manager.set_memory_extraction_cursor(batch[-1].id)
+                return
 
             thread_messages: list[LLMMessage] = [
                 msg
                 for msg in session.messages
                 if msg.role in (Role.USER, Role.ASSISTANT) and msg.get_text().strip()
             ]
-            history_messages = self._load_recent_chat_history_messages(session)
-            llm_messages = (history_messages + thread_messages)[
-                -self._context_messages :
-            ]
-            if not llm_messages:
-                return
-
-            speaker_username = session.context.username
-            speaker_display_name = session.context.display_name
-
-            owner_names: list[str] = []
-            if speaker_username:
-                owner_names.append(speaker_username)
-            if speaker_display_name and speaker_display_name not in owner_names:
-                owner_names.append(speaker_display_name)
-            speaker_info = SpeakerInfo(
-                user_id=user_id,
-                username=speaker_username,
-                display_name=speaker_display_name,
-            )
-
-            speaker_person_id: str | None = None
-            if speaker_username or speaker_display_name:
-                effective_display = speaker_display_name or speaker_username
-                assert effective_display is not None
-                speaker_person_id = await self._ensure_self_person(
-                    user_id=user_id,
-                    username=speaker_username or "",
-                    display_name=effective_display,
-                )
-
-            if speaker_person_id and self._store:
-                await enrich_owner_names(
-                    self._store,
-                    owner_names,
-                    speaker_person_id,
-                )
-
-            facts = await self._extractor.extract_from_conversation(
-                messages=llm_messages,
-                existing_memories=existing_memories,
-                owner_names=owner_names if owner_names else None,
-                speaker_info=speaker_info,
-                current_datetime=datetime.now(UTC),
-            )
-
-            (logger.debug if len(facts) == 0 else logger.info)(
-                "facts_extracted",
-                extra={
-                    "count": len(facts),
-                    "fact.speaker": speaker_info.username if speaker_info else None,
-                },
-            )
-            for fact in facts:
-                logger.info(
-                    "fact_extracted",
-                    extra={
-                        "fact.content": fact.content[:80],
-                        "fact.type": fact.memory_type.value,
-                        "fact.confidence": fact.confidence,
-                        "fact.subjects": fact.subjects,
-                        "fact.speaker": fact.speaker,
-                    },
-                )
-
-            graph_chat_id: str | None = None
-            if session.provider and session.chat_id and self._store:
-                chat_entry = self._store.graph.find_chat_by_provider(
-                    session.provider, session.chat_id
-                )
-                if chat_entry:
-                    graph_chat_id = chat_entry.id
-                logger.debug(
-                    "memory_extraction_chat_lookup: provider=%s chat_id=%s graph_chat_id=%s chat_count=%d",
-                    session.provider,
-                    session.chat_id,
-                    graph_chat_id,
-                    len(self._store.graph.chats),
-                )
-
-            await process_extracted_facts(
-                facts=facts,
-                store=self._store,
+            await self._extract_messages(
+                session=session,
                 user_id=user_id,
                 chat_id=chat_id,
-                speaker_username=speaker_username,
-                speaker_display_name=speaker_display_name,
-                speaker_person_id=speaker_person_id,
-                owner_names=owner_names,
-                source="background_extraction",
-                confidence_threshold=self._confidence_threshold,
-                graph_chat_id=graph_chat_id,
-                chat_type=session.context.chat_type,
+                thread_messages=thread_messages,
             )
         except Exception:
             logger.warning("Background memory extraction failed", exc_info=True)
+
+    async def _extract_messages(
+        self,
+        *,
+        session: SessionState,
+        user_id: str,
+        chat_id: str | None,
+        thread_messages: list[LLMMessage],
+    ) -> None:
+        if not self._extractor or not self._store or not thread_messages:
+            return
+
+        existing_memories: list[str] = []
+        try:
+            recent = await self._store.list_memories(
+                owner_user_id=user_id,
+                chat_id=chat_id,
+                limit=20,
+            )
+            existing_memories = [m.content for m in recent]
+        except Exception:
+            logger.debug(
+                "Failed to get existing memories for extraction", exc_info=True
+            )
+
+        history_messages = self._load_recent_chat_history_messages(session)
+        llm_messages = (history_messages + thread_messages)[-self._context_messages :]
+        if not llm_messages:
+            return
+
+        speaker_username = session.context.username
+        speaker_display_name = session.context.display_name
+
+        owner_names: list[str] = []
+        if speaker_username:
+            owner_names.append(speaker_username)
+        if speaker_display_name and speaker_display_name not in owner_names:
+            owner_names.append(speaker_display_name)
+        speaker_info = SpeakerInfo(
+            user_id=user_id,
+            username=speaker_username,
+            display_name=speaker_display_name,
+        )
+
+        speaker_person_id: str | None = None
+        if speaker_username or speaker_display_name:
+            effective_display = speaker_display_name or speaker_username
+            assert effective_display is not None
+            speaker_person_id = await self._ensure_self_person(
+                user_id=user_id,
+                username=speaker_username or "",
+                display_name=effective_display,
+            )
+
+        if speaker_person_id and self._store:
+            await enrich_owner_names(
+                self._store,
+                owner_names,
+                speaker_person_id,
+            )
+
+        facts = await self._extractor.extract_from_conversation(
+            messages=llm_messages,
+            existing_memories=existing_memories,
+            owner_names=owner_names if owner_names else None,
+            speaker_info=speaker_info,
+            current_datetime=datetime.now(UTC),
+        )
+
+        (logger.debug if len(facts) == 0 else logger.info)(
+            "facts_extracted",
+            extra={
+                "count": len(facts),
+                "fact.speaker": speaker_info.username if speaker_info else None,
+            },
+        )
+        for fact in facts:
+            logger.info(
+                "fact_extracted",
+                extra={
+                    "fact.content": fact.content[:80],
+                    "fact.type": fact.memory_type.value,
+                    "fact.confidence": fact.confidence,
+                    "fact.subjects": fact.subjects,
+                    "fact.speaker": fact.speaker,
+                },
+            )
+
+        graph_chat_id: str | None = None
+        if session.provider and session.chat_id and self._store:
+            chat_entry = self._store.graph.find_chat_by_provider(
+                session.provider, session.chat_id
+            )
+            if chat_entry:
+                graph_chat_id = chat_entry.id
+            logger.debug(
+                "memory_extraction_chat_lookup: provider=%s chat_id=%s graph_chat_id=%s chat_count=%d",
+                session.provider,
+                session.chat_id,
+                graph_chat_id,
+                len(self._store.graph.chats),
+            )
+
+        await process_extracted_facts(
+            facts=facts,
+            store=self._store,
+            user_id=user_id,
+            chat_id=chat_id,
+            speaker_username=speaker_username,
+            speaker_display_name=speaker_display_name,
+            speaker_person_id=speaker_person_id,
+            owner_names=owner_names,
+            source="background_extraction",
+            confidence_threshold=self._confidence_threshold,
+            graph_chat_id=graph_chat_id,
+            chat_type=session.context.chat_type,
+        )
 
     def _load_recent_chat_history_messages(
         self,

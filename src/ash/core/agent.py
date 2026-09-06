@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -14,6 +15,11 @@ from ash.agents.types import ChildActivated
 from ash.context_token import issue_host_context_token
 from ash.core.compaction import CompactionSettings, compact_messages, should_compact
 from ash.core.context import ContextGatherer
+from ash.core.conversation import (
+    ConversationEnvelope,
+    MemorySnippet,
+    render_conversation_envelope,
+)
 from ash.core.prompt import (
     PromptContext,
     PromptMode,
@@ -34,6 +40,7 @@ from ash.core.types import (
     OnToolStartCallback,
     PromptContextAugmenter,
     SandboxEnvAugmenter,
+    StreamReset,
     _MessageSetup,
     _StreamToolAccumulator,
 )
@@ -398,8 +405,21 @@ class Agent:
             logger.debug("Compaction skipped - not enough messages to summarize")
             return None
 
+        first_kept_entry_id = ""
+        if result.first_kept_index < len(session._message_ids):
+            first_kept_entry_id = session._message_ids[result.first_kept_index]
+        if not first_kept_entry_id:
+            for message_id in session._message_ids[result.first_kept_index :]:
+                if message_id:
+                    first_kept_entry_id = message_id
+                    break
+        if not first_kept_entry_id:
+            logger.warning("compaction_missing_persistence_boundary")
+            return None
+
         session.messages = new_messages
         session._token_counts = new_token_counts
+        session._message_ids = [""] + session._message_ids[result.first_kept_index :]
 
         logger.info(
             "compaction_complete",
@@ -411,12 +431,22 @@ class Agent:
             },
         )
 
-        return CompactionInfo(
+        info = CompactionInfo(
             summary=result.summary,
             tokens_before=result.tokens_before,
             tokens_after=result.tokens_after,
             messages_removed=result.messages_removed,
+            first_kept_entry_id=first_kept_entry_id,
         )
+        if session.session_manager is not None:
+            await session.session_manager.add_compaction(
+                summary=info.summary,
+                tokens_before=info.tokens_before,
+                tokens_after=info.tokens_after,
+                first_kept_entry_id=info.first_kept_entry_id,
+                branch_id=session.context.branch_id,
+            )
+        return info
 
     @staticmethod
     def _normalize_context_text(text: str) -> str:
@@ -509,20 +539,26 @@ class Agent:
         # memory/people retrieval from the real task text instead of a wrapped
         # prompt, so autonomous runs stay personalized. Defaults to user_message.
         ctx = session.context
-        context_gatherer = ContextGatherer(
-            self._memory,
-            query_planner=self._memory_query_planner,
-            max_total_memories=self._memory_context_limit,
-            retrieval_memories=self._memory_retrieval_limit,
-        )
-        gathered = await context_gatherer.gather(
-            user_id=effective_user_id,
-            user_message=retrieval_query or user_message,
-            provider=session.provider,
-            chat_id=session.chat_id,
-            chat_type=ctx.chat_type,
-            sender_username=ctx.username,
-        )
+        envelope = self._get_conversation_envelope(session)
+        gathered = session.gathered_context
+        if gathered is None:
+            gathered = await self._gather_context(
+                user_id=effective_user_id,
+                user_message=retrieval_query or user_message,
+                session=session,
+                recent_messages=(envelope.planner_messages() if envelope else None),
+            )
+            session.gathered_context = gathered
+        if envelope is not None and gathered.memory is not None:
+            envelope.relevant_memories = [
+                MemorySnippet(
+                    id=memory.id,
+                    content=memory.content,
+                    similarity=memory.similarity,
+                )
+                for memory in gathered.memory.memories
+            ]
+            session.context.conversation_envelope = envelope.to_dict()
         ambient_chat_history = self._load_ambient_chat_history(session)
 
         system_prompt = self._build_system_prompt(
@@ -552,6 +588,10 @@ class Agent:
             bot_name=ctx.bot_name,
             session=session,
         )
+        if envelope is not None:
+            system_prompt = (
+                f"{system_prompt}\n\n{render_conversation_envelope(envelope)}"
+            )
 
         system_tokens = estimate_tokens(system_prompt)
         message_budget = (
@@ -566,6 +606,66 @@ class Agent:
             message_budget=message_budget,
         )
 
+    def _get_conversation_envelope(
+        self, session: SessionState
+    ) -> ConversationEnvelope | None:
+        value = session.context.conversation_envelope
+        if not isinstance(value, dict):
+            return None
+        return ConversationEnvelope.from_dict(value)
+
+    async def _gather_context(
+        self,
+        *,
+        user_id: str,
+        user_message: str,
+        session: SessionState,
+        recent_messages: tuple[str, ...] | None,
+    ) -> Any:
+        context_gatherer = ContextGatherer(
+            self._memory,
+            query_planner=self._memory_query_planner,
+            max_total_memories=self._memory_context_limit,
+            retrieval_memories=self._memory_retrieval_limit,
+        )
+        return await context_gatherer.gather(
+            user_id=user_id,
+            user_message=user_message,
+            provider=session.provider,
+            chat_id=session.chat_id,
+            chat_type=session.context.chat_type,
+            sender_username=session.context.username,
+            recent_messages=recent_messages,
+        )
+
+    async def enrich_conversation_envelope(
+        self,
+        envelope: ConversationEnvelope,
+        session: SessionState,
+        user_id: str | None = None,
+    ) -> ConversationEnvelope:
+        """Add privacy-filtered long-term memories to a route-independent envelope."""
+
+        effective_user_id = user_id or session.user_id
+        gathered = await self._gather_context(
+            user_id=effective_user_id,
+            user_message=envelope.current_message,
+            session=session,
+            recent_messages=envelope.planner_messages(),
+        )
+        session.gathered_context = gathered
+        if gathered.memory is not None:
+            envelope.relevant_memories = [
+                MemorySnippet(
+                    id=memory.id,
+                    content=memory.content,
+                    similarity=memory.similarity,
+                )
+                for memory in gathered.memory.memories
+            ]
+        session.context.conversation_envelope = envelope.to_dict()
+        return envelope
+
     def _build_tool_context(
         self,
         session: SessionState,
@@ -573,6 +673,7 @@ class Agent:
         session_manager: Any = None,
         tool_overrides: dict[str, Any] | None = None,
         current_user_message: str | None = None,
+        turn_controller: Any = None,
     ) -> ToolContext:
         """Build a ToolContext for tool execution, with reply anchor initialized.
 
@@ -605,8 +706,12 @@ class Agent:
             provider=session.provider,
             metadata=metadata,
             env=env,
-            session_manager=session_manager,
+            session_manager=session_manager or session.session_manager,
             tool_overrides=tool_overrides or {},
+            turn_controller=turn_controller,
+            cancellation_event=(
+                turn_controller.cancel_event if turn_controller else None
+            ),
         )
 
         # Initialize reply anchor from incoming message context
@@ -663,6 +768,7 @@ class Agent:
         session: SessionState,
         setup: Any,
         iterations: int,
+        turn_controller: Any = None,
     ) -> ChildActivated:
         """Build a ChildActivated with main_frame attached for provider handling.
 
@@ -684,6 +790,7 @@ class Agent:
                 chat_id=session.chat_id,
                 provider=session.provider,
                 metadata=session.context.to_dict(),
+                turn_controller=turn_controller,
             ),
             model_alias=None,
             model=self._config.model,
@@ -700,10 +807,22 @@ class Agent:
         on_tool_start: OnToolStartCallback | None,
         on_tool_complete: OnToolCompleteCallback | None = None,
         get_steering_messages: GetSteeringMessagesCallback | None = None,
+        turn_controller: Any = None,
     ) -> tuple[list[dict[str, Any]], list[IncomingMessage]]:
         tool_calls: list[dict[str, Any]] = []
 
         for i, tool_use in enumerate(pending_tools):
+            steering = (
+                await self._take_steering_messages(turn_controller, None)
+                if turn_controller is not None
+                else []
+            )
+            if steering:
+                self._skip_pending_tools(
+                    session, pending_tools[i:], tool_calls, "user updated the request"
+                )
+                return tool_calls, steering
+
             if tool_use.name == "interrupt":
                 prompt = tool_use.input.get("prompt", "Checkpoint reached")
                 options = tool_use.input.get("options")
@@ -712,6 +831,11 @@ class Agent:
                     "prompt": prompt,
                     "options": options,
                     "tool_use_id": tool_use.id,
+                    "approval_request": (
+                        dict(tool_use.input["approval_request"])
+                        if isinstance(tool_use.input.get("approval_request"), dict)
+                        else None
+                    ),
                 }
                 interrupt_result = ToolResult.success(
                     prompt,
@@ -808,13 +932,23 @@ class Agent:
                 tool_context,
                 tool_use_id=tool_use.id,
                 env=per_tool_env,
+                turn_controller=turn_controller,
+                cancellation_event=(
+                    turn_controller.cancel_event if turn_controller else None
+                ),
             )
 
-            result = await self._tools.execute(
-                tool_use.name,
-                tool_use.input,
-                per_tool_context,
+            result, steering = await self._await_with_steering(
+                self._tools.execute(
+                    tool_use.name,
+                    tool_use.input,
+                    per_tool_context,
+                ),
+                turn_controller,
+                cancel_on_revision=False,
             )
+            if result is None:
+                result = ToolResult.error("Cancelled: user updated the request")
             if on_tool_complete:
                 await on_tool_complete(tool_use.name, tool_use.input, result)
             sanitized = self._add_sanitized_tool_result(
@@ -844,32 +978,104 @@ class Agent:
                 }
             )
 
-            if get_steering_messages and i < len(pending_tools) - 1:
-                steering = await get_steering_messages()
-                if steering:
-                    for remaining in pending_tools[i + 1 :]:
-                        tool_calls.append(
-                            {
-                                "id": remaining.id,
-                                "name": remaining.name,
-                                "input": remaining.input,
-                                "result": "Skipped: user sent new message",
-                                "is_error": True,
-                            }
-                        )
-                        self._add_sanitized_tool_result(
-                            session=session,
-                            tool_use_id=remaining.id,
-                            tool_name=remaining.name,
-                            result=ToolResult.error("Skipped: user sent new message"),
-                        )
-                    logger.info(
-                        "steering_received",
-                        extra={"tools_skipped": len(pending_tools) - i - 1},
-                    )
-                    return tool_calls, steering
+            if not steering:
+                steering = await self._take_steering_messages(
+                    turn_controller,
+                    get_steering_messages,
+                )
+            if steering:
+                self._skip_pending_tools(
+                    session,
+                    pending_tools[i + 1 :],
+                    tool_calls,
+                    "user updated the request",
+                )
+                logger.info(
+                    "steering_received",
+                    extra={"tools_skipped": len(pending_tools) - i - 1},
+                )
+                return tool_calls, steering
 
         return tool_calls, []
+
+    async def _take_steering_messages(
+        self,
+        turn_controller: Any,
+        get_steering_messages: GetSteeringMessagesCallback | None,
+    ) -> list[IncomingMessage]:
+        if turn_controller is not None:
+            return list(turn_controller.take_for_steering())
+        if get_steering_messages is not None:
+            return await get_steering_messages()
+        return []
+
+    async def _await_with_steering(
+        self,
+        awaitable: Any,
+        turn_controller: Any,
+        *,
+        cancel_on_revision: bool = True,
+    ) -> tuple[Any | None, list[IncomingMessage]]:
+        if turn_controller is None:
+            return await awaitable, []
+
+        task = asyncio.create_task(awaitable)
+        revision_task = asyncio.create_task(turn_controller.wait_for_revision())
+        done, _ = await asyncio.wait(
+            {task, revision_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if task in done:
+            revision_task.cancel()
+            try:
+                await revision_task
+            except asyncio.CancelledError:
+                pass
+            result = await task
+            steering = (
+                list(turn_controller.take_for_steering())
+                if turn_controller.pending_messages
+                else []
+            )
+            if steering and cancel_on_revision:
+                return None, steering
+            return result, steering
+
+        steering = list(turn_controller.take_for_steering())
+        if cancel_on_revision:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            return None, steering
+        # Once a tool has started, let it report a definitive outcome. Hard
+        # cancellation can lose whether an external side effect already happened.
+        return await task, steering
+
+    def _skip_pending_tools(
+        self,
+        session: SessionState,
+        pending_tools: list[ToolUse],
+        tool_calls: list[dict[str, Any]],
+        reason: str,
+    ) -> None:
+        for remaining in pending_tools:
+            result = ToolResult.error(f"Skipped: {reason}")
+            tool_calls.append(
+                {
+                    "id": remaining.id,
+                    "name": remaining.name,
+                    "input": remaining.input,
+                    "result": result.content,
+                    "is_error": True,
+                }
+            )
+            self._add_sanitized_tool_result(
+                session=session,
+                tool_use_id=remaining.id,
+                tool_name=remaining.name,
+                result=result,
+            )
 
     async def send_message(
         self,
@@ -927,6 +1133,7 @@ class Agent:
         session_manager: Any = None,  # Type: SessionManager | None
         tool_overrides: dict[str, Any] | None = None,
         retrieval_query: str | None = None,
+        turn_controller: Any = None,
     ) -> AgentResponse:
         from ash.logging import log_context
         from ash.observability import set_sentry_conversation_id
@@ -954,19 +1161,37 @@ class Agent:
             while iterations < self._config.max_tool_iterations:
                 iterations += 1
 
-                response = await self._llm.complete(
-                    messages=session.get_messages_for_llm(
-                        token_budget=setup.message_budget,
-                        recency_window=self._config.recency_window,
-                    ),
-                    model=self._config.model,
-                    tools=self._get_tool_definitions(),
-                    system=setup.system_prompt,
-                    max_tokens=self._config.max_tokens,
-                    temperature=self._config.temperature,
-                    thinking=self._config.thinking,
-                    reasoning=self._config.reasoning,
+                steering = (
+                    await self._take_steering_messages(turn_controller, None)
+                    if turn_controller is not None
+                    else []
                 )
+                if steering:
+                    for steering_message in steering:
+                        if steering_message.text:
+                            session.add_user_message(steering_message.text)
+
+                response, steering = await self._await_with_steering(
+                    self._llm.complete(
+                        messages=session.get_messages_for_llm(
+                            token_budget=setup.message_budget,
+                            recency_window=self._config.recency_window,
+                        ),
+                        model=self._config.model,
+                        tools=self._get_tool_definitions(),
+                        system=setup.system_prompt,
+                        max_tokens=self._config.max_tokens,
+                        temperature=self._config.temperature,
+                        thinking=self._config.thinking,
+                        reasoning=self._config.reasoning,
+                    ),
+                    turn_controller,
+                )
+                if response is None:
+                    for steering_message in steering:
+                        if steering_message.text:
+                            session.add_user_message(steering_message.text)
+                    continue
 
                 session.add_assistant_message(response.message.content)
 
@@ -1002,6 +1227,7 @@ class Agent:
                     session_manager,
                     tool_overrides,
                     current_user_message=user_message,
+                    turn_controller=turn_controller,
                 )
 
                 try:
@@ -1012,13 +1238,14 @@ class Agent:
                         on_tool_start,
                         on_tool_complete,
                         get_steering_messages,
+                        turn_controller,
                     )
                 except ChildActivated as ca:
                     # A tool spawned an interactive child subagent.
                     # Build main_frame, attach to exception, and re-raise
                     # so the provider can enter the orchestration loop.
                     raise self._build_child_activated(
-                        ca, session, setup, iterations
+                        ca, session, setup, iterations, turn_controller
                     ) from None
 
                 tool_calls.extend(new_calls)
@@ -1074,7 +1301,8 @@ class Agent:
         session_manager: Any = None,  # Type: SessionManager | None
         tool_overrides: dict[str, Any] | None = None,
         retrieval_query: str | None = None,
-    ) -> AsyncIterator[str]:
+        turn_controller: Any = None,
+    ) -> AsyncIterator[str | StreamReset]:
         from ash.logging import log_context
         from ash.observability import set_sentry_conversation_id
 
@@ -1100,9 +1328,18 @@ class Agent:
             while iterations < self._config.max_tool_iterations:
                 iterations += 1
 
+                steering = await self._take_steering_messages(
+                    turn_controller, get_steering_messages
+                )
+                if steering:
+                    for steering_message in steering:
+                        if steering_message.text:
+                            session.add_user_message(steering_message.text)
+
                 content_blocks: list[ContentBlock] = []
                 current_text = ""
                 tool_accumulator = _StreamToolAccumulator()
+                stream_steering: list[IncomingMessage] = []
 
                 async for chunk in self._llm.stream(
                     messages=session.get_messages_for_llm(
@@ -1117,6 +1354,13 @@ class Agent:
                     thinking=self._config.thinking,
                     reasoning=self._config.reasoning,
                 ):
+                    stream_steering = (
+                        await self._take_steering_messages(turn_controller, None)
+                        if turn_controller is not None
+                        else []
+                    )
+                    if stream_steering:
+                        break
                     if chunk.type == StreamEventType.TEXT_DELTA:
                         text = chunk.content if isinstance(chunk.content, str) else ""
                         current_text += text
@@ -1131,6 +1375,15 @@ class Agent:
                     elif chunk.type == StreamEventType.TOOL_USE_END:
                         if tool_use := tool_accumulator.finish():
                             content_blocks.append(tool_use)
+
+                if stream_steering:
+                    yield StreamReset()
+                    if current_text:
+                        session.add_assistant_message(current_text)
+                    for steering_message in stream_steering:
+                        if steering_message.text:
+                            session.add_user_message(steering_message.text)
+                    continue
 
                 if current_text:
                     content_blocks.insert(0, TextContent(text=current_text))
@@ -1160,6 +1413,7 @@ class Agent:
                     session_manager,
                     tool_overrides,
                     current_user_message=user_message,
+                    turn_controller=turn_controller,
                 )
 
                 try:
@@ -1170,10 +1424,11 @@ class Agent:
                         on_tool_start,
                         on_tool_complete,
                         get_steering_messages,
+                        turn_controller,
                     )
                 except ChildActivated as ca:
                     raise self._build_child_activated(
-                        ca, session, setup, iterations
+                        ca, session, setup, iterations, turn_controller
                     ) from None
 
                 self._sync_reply_anchor(tool_context, session)
@@ -1228,6 +1483,7 @@ async def create_agent(
         RememberTool,
         RepoTool,
         SearchMemoriesTool,
+        VapiCallStatusTool,
         VapiEndCallTool,
         VapiOutboundCallTool,
         WebFetchTool,
@@ -1356,6 +1612,7 @@ async def create_agent(
             telegram_bot_token=telegram_bot_token,
         )
     )
+    tool_registry.register(VapiCallStatusTool(config.vapi))
     tool_registry.register(VapiEndCallTool(config.vapi))
     logger.info("tools_registered", extra={"count": len(tool_registry)})
 

@@ -14,7 +14,7 @@ from ash.providers.telegram.formatting import rendered_text_length
 from ash.providers.telegram.handlers import TelegramMessageHandler
 from ash.providers.telegram.provider import TelegramProvider
 from ash.sessions import SessionManager
-from ash.sessions.types import generate_id
+from ash.sessions.types import PendingCheckpointRecord, generate_id
 
 
 class TestTelegramProvider:
@@ -899,13 +899,10 @@ class TestTelegramMessageHandler:
         # Set up a checkpoint in the handler
         checkpoint_id = "chkpt_test123456789"
         truncated_id = checkpoint_id[:55]
-        handler._checkpoint_handler._pending_checkpoints[truncated_id] = {
-            "session_key": "telegram_456_789",
-            "chat_id": "456",
-            "user_id": "789",
-            "thread_id": None,
-            "username": "testuser",
-            "display_name": "Test User",
+        checkpoint = {
+            "checkpoint_id": checkpoint_id,
+            "prompt": "Choose an option",
+            "options": ["Proceed", "Cancel"],
         }
 
         # Set up session manager
@@ -932,13 +929,18 @@ class TestTelegramMessageHandler:
             tool_use_id="tool_123",
             output="Pausing for input",
             success=True,
-            metadata={
-                "checkpoint": {
-                    "checkpoint_id": checkpoint_id,
-                    "prompt": "Choose an option",
-                    "options": ["Proceed", "Cancel"],
-                }
-            },
+            metadata={"checkpoint": checkpoint},
+        )
+        handler._checkpoint_handler.store_checkpoint(
+            checkpoint,
+            IncomingMessage(
+                id="99",
+                chat_id="456",
+                user_id="789",
+                text="test",
+                username="testuser",
+                display_name="Test User",
+            ),
         )
 
         # Create mock callback query
@@ -979,6 +981,11 @@ class TestTelegramMessageHandler:
         checkpoint_id = "checkpoint_main_agent_12345"
         truncated_id = checkpoint_id[:55]
         thread_id = "1706"
+        checkpoint = {
+            "checkpoint_id": checkpoint_id,
+            "prompt": "Approve this call?",
+            "options": ["approve", "change script", "cancel"],
+        }
         session_manager = SessionManager(
             provider="telegram",
             chat_id="456",
@@ -999,22 +1006,18 @@ class TestTelegramMessageHandler:
             tool_use_id="tool_main",
             output="Approve this call?",
             success=True,
-            metadata={
-                "checkpoint": {
-                    "checkpoint_id": checkpoint_id,
-                    "prompt": "Approve this call?",
-                    "options": ["approve", "change script", "cancel"],
-                }
-            },
+            metadata={"checkpoint": checkpoint},
         )
-        handler._checkpoint_handler._pending_checkpoints[truncated_id] = {
-            "session_key": session_manager.session_key,
-            "chat_id": "456",
-            "user_id": "789",
-            "thread_id": thread_id,
-            "agent_name": None,
-            "original_message": None,
-        }
+        handler._checkpoint_handler.store_checkpoint(
+            checkpoint,
+            IncomingMessage(
+                id="1706",
+                chat_id="456",
+                user_id="789",
+                text="Approve this call?",
+                metadata={"thread_id": thread_id},
+            ),
+        )
         message = IncomingMessage(
             id="1710",
             chat_id="456",
@@ -1062,6 +1065,11 @@ class TestTelegramMessageHandler:
             "call now (no ivr keypresses)",
             "don't call",
         ]
+        checkpoint = {
+            "checkpoint_id": checkpoint_id,
+            "prompt": "Want me to place the call now?",
+            "options": options,
+        }
         session_manager = SessionManager(
             provider="telegram",
             chat_id="456",
@@ -1082,22 +1090,18 @@ class TestTelegramMessageHandler:
             tool_use_id="tool_main",
             output="Want me to place the call now?",
             success=True,
-            metadata={
-                "checkpoint": {
-                    "checkpoint_id": checkpoint_id,
-                    "prompt": "Want me to place the call now?",
-                    "options": options,
-                }
-            },
+            metadata={"checkpoint": checkpoint},
         )
-        handler._checkpoint_handler._pending_checkpoints[truncated_id] = {
-            "session_key": session_manager.session_key,
-            "chat_id": "456",
-            "user_id": "789",
-            "thread_id": thread_id,
-            "agent_name": None,
-            "original_message": None,
-        }
+        handler._checkpoint_handler.store_checkpoint(
+            checkpoint,
+            IncomingMessage(
+                id="1765",
+                chat_id="456",
+                user_id="789",
+                text="Want me to place the call now?",
+                metadata={"thread_id": thread_id},
+            ),
+        )
         message = IncomingMessage(
             id="1767",
             chat_id="456",
@@ -1136,8 +1140,11 @@ class TestTelegramMessageHandler:
             streaming=False,
         )
         checkpoint_id = "checkpoint_conduit_details_12345"
-        truncated_id = checkpoint_id[:55]
         thread_id = "1729"
+        checkpoint = {
+            "checkpoint_id": checkpoint_id,
+            "prompt": "Who is the recipient, and is tomorrow September 6?",
+        }
         session_manager = SessionManager(
             provider="telegram",
             chat_id="456",
@@ -1161,21 +1168,21 @@ class TestTelegramMessageHandler:
             tool_use_id="tool_conduit",
             output="Who is the recipient, and is tomorrow September 6?",
             success=True,
-            metadata={
-                "checkpoint": {
-                    "checkpoint_id": checkpoint_id,
-                    "prompt": "Who is the recipient, and is tomorrow September 6?",
-                }
-            },
+            metadata={"checkpoint": checkpoint},
         )
-        handler._checkpoint_handler._pending_checkpoints[truncated_id] = {
-            "session_key": session_manager.session_key,
-            "chat_id": "456",
-            "user_id": "789",
-            "thread_id": thread_id,
-            "agent_name": "conduit",
-            "original_message": "Call this number and ask when he is arriving.",
-        }
+        handler._checkpoint_handler.store_checkpoint(
+            checkpoint,
+            IncomingMessage(
+                id="1729",
+                chat_id="456",
+                user_id="789",
+                text="Call this number and ask when he is arriving.",
+                metadata={"thread_id": thread_id},
+            ),
+            agent_name="conduit",
+            original_message="Call this number and ask when he is arriving.",
+            tool_use_id="tool_conduit",
+        )
         message = IncomingMessage(
             id="1731",
             chat_id="456",
@@ -1234,10 +1241,10 @@ class TestTelegramMessageHandler:
 
         mock_callback.answer.assert_awaited_once()
 
-    async def test_checkpoint_recovery_from_session_log(
+    async def test_checkpoint_recovery_requires_authoritative_state(
         self, mock_provider, mock_agent, tmp_path
     ):
-        """Test checkpoint restored after handler restart (empty in-memory cache)."""
+        """A restart restores state-backed checkpoints, never log-only records."""
 
         from ash.providers.telegram.handlers import TelegramMessageHandler
         from ash.sessions import SessionManager
@@ -1253,6 +1260,11 @@ class TestTelegramMessageHandler:
 
         checkpoint_id = "chkpt_recovery_test_12345"
         truncated_id = checkpoint_id[:55]
+        checkpoint_data = {
+            "checkpoint_id": checkpoint_id,
+            "prompt": "Continue?",
+            "options": ["Yes", "No"],
+        }
 
         # Store checkpoint via tool_result metadata (as done in real flow)
         await session_manager.add_tool_use(
@@ -1264,13 +1276,7 @@ class TestTelegramMessageHandler:
             tool_use_id="tool_456",
             output="Pausing for input",
             success=True,
-            metadata={
-                "checkpoint": {
-                    "checkpoint_id": checkpoint_id,
-                    "prompt": "Continue?",
-                    "options": ["Yes", "No"],
-                }
-            },
+            metadata={"checkpoint": checkpoint_data},
         )
 
         # Create a NEW handler instance (simulating restart)
@@ -1289,7 +1295,7 @@ class TestTelegramMessageHandler:
             session_manager
         )
 
-        # Try to recover checkpoint using get_checkpoint (disk recovery path)
+        # Append-only logs are audit records, not authorization state.
         routing, checkpoint = await handler._checkpoint_handler.get_checkpoint(
             truncated_id,
             response_external_id="100",  # Dummy ID
@@ -1297,7 +1303,25 @@ class TestTelegramMessageHandler:
             user_id="789",
         )
 
-        # Should have recovered from disk
+        assert routing is None
+        assert checkpoint is None
+
+        session_manager.save_pending_checkpoint(
+            PendingCheckpointRecord(
+                checkpoint_id=checkpoint_id,
+                prompt="Continue?",
+                options=["Yes", "No"],
+                checkpoint=checkpoint_data,
+            )
+        )
+        handler._checkpoint_handler.clear_all_checkpoints()
+        routing, checkpoint = await handler._checkpoint_handler.get_checkpoint(
+            truncated_id,
+            response_external_id="100",
+            chat_id="456",
+            user_id="789",
+        )
+
         assert checkpoint is not None
         assert checkpoint["checkpoint_id"] == checkpoint_id
         assert checkpoint["options"] == ["Yes", "No"]

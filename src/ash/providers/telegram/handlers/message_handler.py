@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 from ash.agents.types import ChildActivated
 from ash.config.models import ConversationConfig
 from ash.core import Agent
+from ash.core.conversation import ConversationEnvelope
 from ash.core.signals import is_no_reply
 from ash.providers.base import IncomingMessage, OutgoingMessage
 from ash.providers.telegram.handlers.checkpoint_handler import CheckpointHandler
@@ -153,6 +154,7 @@ class TelegramMessageHandler:
             get_session_managers_dict=lambda: self._session_handler._session_managers,
             get_thread_index=self._session_handler.get_thread_index,
             handle_message=self.handle_message,
+            get_turn_controller=self._session_handler.get_session_context,
             mark_active_thread=lambda chat_id, thread_id: (
                 self._session_handler.mark_active_thread(
                     chat_id, thread_id, reason="pending_checkpoint"
@@ -883,6 +885,8 @@ class TelegramMessageHandler:
         session_manager = self._session_handler.get_session_manager(
             message.chat_id, message.user_id, thread_id
         )
+        session_manager.set_active_goal(task)
+        turn_controller = self._session_handler.get_session_context(session_key)
         tracker = self._create_tool_tracker(message)
         progress_tool = ProgressMessageTool(tracker)
         tool_use_id = f"{tool_use_prefix}_{uuid.uuid4().hex[:12]}"
@@ -898,6 +902,7 @@ class TelegramMessageHandler:
             thread_id=thread_id,
             provider=self._provider.name,
             metadata={
+                **message.metadata,
                 "message_id": message.id,
                 "current_message_id": message.id,
                 "username": message.username,
@@ -910,10 +915,38 @@ class TelegramMessageHandler:
             tool_use_id=tool_use_id,
             tool_overrides={progress_tool.name: progress_tool},
             env=env or {},
+            turn_controller=turn_controller,
+            cancellation_event=turn_controller.cancel_event,
         )
 
+        user_metadata: dict[str, str] = {"external_id": message.id}
+        if message.reply_to_message_id:
+            user_metadata["reply_to_external_id"] = message.reply_to_message_id
+        await session_manager.add_user_message(
+            content=message.text,
+            metadata=user_metadata,
+            username=message.username,
+            display_name=message.display_name,
+            user_id=message.user_id,
+        )
+        await session_manager.add_tool_use(
+            tool_use_id=tool_use_id,
+            name="use_agent",
+            input_data=tool_input,
+        )
         await self._provider.send_typing(message.chat_id)
         result = await use_agent_tool.execute(tool_input, tool_context)
+        await session_manager.add_tool_result(
+            tool_use_id=tool_use_id,
+            output=result.content,
+            success=not result.is_error,
+            metadata=result.metadata,
+        )
+        await self._session_handler.persist_steered_messages(
+            turn_controller.take_consumed_steering(),
+            thread_id,
+            message.metadata.get("branch_id"),
+        )
         response_text = _unwrap_direct_agent_output(result.content)
         reply_markup = None
         checkpoint = result.metadata.get(CHECKPOINT_METADATA_KEY)
@@ -958,22 +991,22 @@ class TelegramMessageHandler:
             username=message.username,
             display_name=message.display_name,
             thread_id=thread_id,
-            skip_user_message=False,
-        )
-        await session_manager.add_tool_use(
-            tool_use_id=tool_use_id,
-            name="use_agent",
-            input_data=tool_input,
-        )
-        await session_manager.add_tool_result(
-            tool_use_id=tool_use_id,
-            output=result.content,
-            success=not result.is_error,
-            metadata=result.metadata,
+            branch_id=message.metadata.get("branch_id"),
+            skip_user_message=True,
         )
         self._session_handler.mark_active_thread(
             message.chat_id, thread_id, reason="direct_agent_command"
         )
+        conversation_session = await self._session_handler.get_or_create_session(
+            message
+        )
+        await self._agent.run_message_postprocess_hooks(
+            user_message=message.text,
+            session=conversation_session,
+            effective_user_id=message.user_id,
+        )
+        if not isinstance(checkpoint, dict):
+            session_manager.set_active_goal(None)
         self._log_response(response_text)
 
     async def _try_handle_capability_oauth_callback(
@@ -1201,8 +1234,9 @@ class TelegramMessageHandler:
         while message:
             async with self._concurrency_semaphore:
                 async with ctx.lock:
+                    ctx.begin_turn()
                     await self._process_single_message(message, ctx)
-                    pending = ctx.take_pending()
+                    pending = ctx.take_for_next_turn()
                     if pending:
                         message = pending[0]
                         for msg in pending[1:]:
@@ -1234,7 +1268,19 @@ class TelegramMessageHandler:
             chat_type=message.metadata.get("chat_type"),
             source_username=message.username,
         ):
-            await self._process_single_message_inner(message, ctx)
+            try:
+                await self._process_single_message_inner(message, ctx)
+            finally:
+                await self._provider.clear_reaction(message.chat_id, message.id)
+                steered = ctx.take_consumed_steering()
+                if steered:
+                    await self._session_handler.persist_steered_messages(
+                        steered, thread_id
+                    )
+                for steered_message in steered:
+                    await self._provider.clear_reaction(
+                        steered_message.chat_id, steered_message.id
+                    )
 
     async def _process_single_message_inner(
         self, message: IncomingMessage, ctx: SessionLock
@@ -1260,6 +1306,25 @@ class TelegramMessageHandler:
 
         if await self._try_handle_capability_oauth_callback(message):
             return
+
+        session = await self._session_handler.get_or_create_session(message)
+        envelope = await self._session_handler.build_conversation_envelope(
+            message, session
+        )
+        enrich_envelope = getattr(self._agent, "enrich_conversation_envelope", None)
+        if callable(enrich_envelope):
+            candidate = enrich_envelope(envelope, session, message.user_id)
+            if inspect.isawaitable(candidate):
+                candidate = await candidate
+            if isinstance(candidate, ConversationEnvelope):
+                envelope = candidate
+        envelope_data = envelope.to_dict()
+        message.metadata["conversation_envelope"] = envelope_data
+        raw_message.metadata["conversation_envelope"] = envelope_data
+        session.context.conversation_envelope = envelope_data
+        if session.context.branch_id:
+            message.metadata["branch_id"] = session.context.branch_id
+            raw_message.metadata["branch_id"] = session.context.branch_id
 
         conduit_message = self._message_for_raw_slash_command(
             raw_message=raw_message,
@@ -1312,8 +1377,6 @@ class TelegramMessageHandler:
             finally:
                 await self._provider.clear_reaction(message.chat_id, message.id)
             return
-
-        session = await self._session_handler.get_or_create_session(message)
 
         if session.has_incomplete_tool_use():
             logger.warning(
@@ -1384,6 +1447,11 @@ class TelegramMessageHandler:
                     display_name=message.display_name,
                     skip_user_message=True,
                 )
+                await self._agent.run_message_postprocess_hooks(
+                    user_message=message.text,
+                    session=session,
+                    effective_user_id=message.user_id,
+                )
                 # Clean up orphaned thinking message if no response sent
                 if not response_external_id and tracker.thinking_msg_id:
                     try:
@@ -1394,15 +1462,6 @@ class TelegramMessageHandler:
                         logger.debug("Failed to delete orphaned thinking message")
             else:
                 logger.warning("child_activated_no_executor")
-        finally:
-            await self._provider.clear_reaction(message.chat_id, message.id)
-            steered = ctx.take_steered()
-            # Persist steered messages with was_steering flag
-            if steered:
-                thread_id = message.metadata.get("thread_id")
-                await self._session_handler.persist_steered_messages(steered, thread_id)
-            for msg in steered:
-                await self._provider.clear_reaction(msg.chat_id, msg.id)
 
     def _persist_stack(self, session_key: str, sm: Any) -> None:
         """Persist the current agent stack to state.json."""
@@ -1483,20 +1542,53 @@ class TelegramMessageHandler:
         from ash.core.session import SessionState
 
         frames: list[StackFrame] = []
+        turn_controller = self._session_handler.get_session_context(sm.session_key)
 
         for meta in persisted:
-            # Build AgentContext from message metadata
+            snapshot = getattr(meta, "context_snapshot", {}) or {}
+            snapshot_metadata = snapshot.get("metadata")
+            snapshot_input_data = snapshot.get("input_data")
+            restored_metadata = (
+                dict(snapshot_metadata) if isinstance(snapshot_metadata, dict) else {}
+            )
+            restored_metadata.update(message.metadata)
             agent_context = AgentContext(
-                session_id=sm.session_key,
-                user_id=message.user_id,
-                chat_id=message.chat_id,
-                thread_id=message.metadata.get("thread_id"),
-                provider=self._provider.name,
+                session_id=snapshot.get("session_id") or sm.session_key,
+                user_id=snapshot.get("user_id") or message.user_id,
+                chat_id=snapshot.get("chat_id") or message.chat_id,
+                thread_id=(
+                    message.metadata.get("thread_id") or snapshot.get("thread_id")
+                ),
+                provider=snapshot.get("provider") or self._provider.name,
+                metadata=restored_metadata,
+                input_data=(
+                    dict(snapshot_input_data)
+                    if isinstance(snapshot_input_data, dict)
+                    else {}
+                ),
                 voice=meta.voice,
+                shared_prompt=(
+                    str(snapshot["shared_prompt"])
+                    if isinstance(snapshot.get("shared_prompt"), str)
+                    else None
+                ),
+                turn_controller=turn_controller,
             )
 
             # Rebuild session
-            if meta.agent_type == "main":
+            persisted_session = getattr(meta, "session_json", None)
+            if persisted_session:
+                try:
+                    session = SessionState.from_json(persisted_session)
+                    session.session_manager = sm
+                except Exception:
+                    logger.warning(
+                        "stack_restore_session_failed",
+                        extra={"agent_name": meta.agent_name},
+                        exc_info=True,
+                    )
+                    return None
+            elif meta.agent_type == "main":
                 # Main frame: load from context.jsonl via get_or_create_session
                 session = await self._session_handler.get_or_create_session(message)
             else:
@@ -1523,8 +1615,10 @@ class TelegramMessageHandler:
                 )
                 session.messages.extend(messages_list)
 
-            # Rebuild system_prompt
-            system_prompt = self._rebuild_system_prompt(meta, agent_context)
+            # New frames persist the exact prompt; legacy frames rebuild it.
+            system_prompt = getattr(meta, "system_prompt", None)
+            if not system_prompt:
+                system_prompt = self._rebuild_system_prompt(meta, agent_context)
             if system_prompt is None:
                 logger.warning(
                     "stack_restore_prompt_failed",
@@ -1557,8 +1651,13 @@ class TelegramMessageHandler:
     def _rebuild_system_prompt(self, meta: Any, context: Any) -> str | None:
         """Rebuild the system prompt for a stack frame from registry lookup."""
         if meta.agent_type == "main":
-            # Use a simplified main agent prompt (no memory/people context)
-            return self._agent._build_system_prompt()
+            prompt = self._agent._build_system_prompt()
+            envelope = context.metadata.get("conversation_envelope")
+            if isinstance(envelope, dict):
+                from ash.core.conversation import render_conversation_envelope
+
+                prompt = f"{prompt}\n\n{render_conversation_envelope(envelope)}"
+            return prompt
 
         agent_name = meta.agent_name
 
@@ -1594,6 +1693,11 @@ class TelegramMessageHandler:
                 "input.preview": _truncate(message.text),
             },
         )
+        stack = self._stack_manager.get_or_create(session_key)
+        if stack.frames:
+            branch_id = stack.frames[0].context.metadata.get("branch_id")
+            if isinstance(branch_id, str) and branch_id:
+                message.metadata.setdefault("branch_id", branch_id)
         tracker = self._create_tool_tracker(message)
         response_external_id = await self._run_orchestration_loop(
             message,
@@ -1607,6 +1711,14 @@ class TelegramMessageHandler:
             if thread_id:
                 thread_index = self._session_handler.get_thread_index(message.chat_id)
                 thread_index.register_message(response_external_id, thread_id)
+        conversation_session = await self._session_handler.get_or_create_session(
+            message
+        )
+        await self._agent.run_message_postprocess_hooks(
+            user_message=message.text,
+            session=conversation_session,
+            effective_user_id=message.user_id,
+        )
 
     async def _run_orchestration_loop(
         self,
@@ -1642,6 +1754,7 @@ class TelegramMessageHandler:
         if thinking_msg_id:
             orchestration_tracker.thinking_msg_id = thinking_msg_id
         progress_tool = ProgressMessageTool(orchestration_tracker)
+        turn_controller = self._session_handler.get_session_context(session_key)
 
         while True:
             top = stack.top
@@ -1658,6 +1771,7 @@ class TelegramMessageHandler:
                 tool_overrides={progress_tool.name: progress_tool},
                 on_tool_start=orchestration_tracker.on_tool_start,
                 on_tool_complete=orchestration_tracker.on_tool_complete,
+                turn_controller=turn_controller,
             )
             entry_user_message = None
             entry_tool_result = None
@@ -1858,6 +1972,18 @@ class TelegramMessageHandler:
 
         if not final_text.strip():
             return None
+        session_key = make_session_key(
+            self._provider.name,
+            message.chat_id,
+            message.user_id,
+            message.metadata.get("thread_id"),
+        )
+        turn_controller = self._session_handler.get_session_context(session_key)
+        await self._session_handler.persist_steered_messages(
+            turn_controller.take_consumed_steering(),
+            message.metadata.get("thread_id"),
+            message.metadata.get("branch_id"),
+        )
         bot_name = self._provider.bot_username or "bot"
         logger.info(
             "bot_response_sent",
@@ -1869,24 +1995,42 @@ class TelegramMessageHandler:
 
         from ash.providers.telegram.provider import MAX_SEND_LENGTH
 
+        sent_message_id: str | None
         if thinking_msg_id and len(final_text) <= MAX_SEND_LENGTH:
             await self._provider.edit(message.chat_id, thinking_msg_id, final_text)
-            return thinking_msg_id
+            sent_message_id = thinking_msg_id
+        else:
+            if thinking_msg_id:
+                # Content too long for edit — delete thinking message, send chunked
+                try:
+                    await self._provider.delete(message.chat_id, thinking_msg_id)
+                except Exception:
+                    logger.debug(
+                        "Failed to delete thinking message before chunked send"
+                    )
 
-        if thinking_msg_id:
-            # Content too long for edit — delete thinking message, send chunked
-            try:
-                await self._provider.delete(message.chat_id, thinking_msg_id)
-            except Exception:
-                logger.debug("Failed to delete thinking message before chunked send")
-
-        return await self._provider.send(
-            OutgoingMessage(
-                chat_id=message.chat_id,
-                text=final_text,
-                reply_to_message_id=message.id,
+            sent_message_id = await self._provider.send(
+                OutgoingMessage(
+                    chat_id=message.chat_id,
+                    text=final_text,
+                    reply_to_message_id=message.id,
+                )
             )
+
+        await self._session_handler.persist_messages(
+            chat_id=message.chat_id,
+            user_id=message.user_id,
+            user_message=message.text,
+            assistant_message=final_text,
+            external_id=message.id,
+            reply_to_external_id=message.reply_to_message_id,
+            response_external_id=sent_message_id,
+            username=message.username,
+            display_name=message.display_name,
+            thread_id=message.metadata.get("thread_id"),
+            branch_id=message.metadata.get("branch_id"),
         )
+        return sent_message_id
 
     def _store_checkpoint(
         self,

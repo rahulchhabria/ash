@@ -89,6 +89,12 @@ class Agent(ABC):
         """
         sections = []
 
+        envelope = context.metadata.get("conversation_envelope")
+        if isinstance(envelope, dict):
+            from ash.core.conversation import render_conversation_envelope
+
+            sections.append(render_conversation_envelope(envelope))
+
         # Add shared environment context (sandbox, runtime, tool guidance)
         if context.shared_prompt:
             sections.append(context.shared_prompt)

@@ -37,6 +37,7 @@ class CheckpointState:
     prompt: str  # What to show the user
     tool_use_id: str  # ID of the interrupt tool_use (required for resume)
     options: list[str] | None = None  # Optional suggested responses
+    approval_request: dict[str, Any] | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def is_expired(self) -> bool:
@@ -53,6 +54,7 @@ class CheckpointState:
             "iteration": self.iteration,
             "prompt": self.prompt,
             "options": self.options,
+            "approval_request": self.approval_request,
             "tool_use_id": self.tool_use_id,
             "created_at": self.created_at.isoformat(),
         }
@@ -75,6 +77,11 @@ class CheckpointState:
             prompt=data["prompt"],
             tool_use_id=data["tool_use_id"],
             options=data.get("options"),
+            approval_request=(
+                dict(data["approval_request"])
+                if isinstance(data.get("approval_request"), dict)
+                else None
+            ),
             created_at=created_at,
         )
 
@@ -122,6 +129,7 @@ class AgentContext:
     shared_prompt: str | None = (
         None  # Shared environment context (sandbox, runtime, tool guidance)
     )
+    turn_controller: Any = field(default=None, repr=False, compare=False)
 
     @classmethod
     def from_tool_context(
@@ -142,6 +150,7 @@ class AgentContext:
             input_data=input_data or {},
             voice=voice,
             shared_prompt=shared_prompt,
+            turn_controller=ctx.turn_controller,
         )
 
 
@@ -238,6 +247,19 @@ class StackFrame:
             is_skill_agent=self.is_skill_agent,
             environment=dict(self.environment) if self.environment else {},
             voice=self.voice,
+            context_snapshot={
+                "session_id": self.context.session_id,
+                "user_id": self.context.user_id,
+                "chat_id": self.context.chat_id,
+                "thread_id": self.context.thread_id,
+                "provider": self.context.provider,
+                "metadata": dict(self.context.metadata),
+                "input_data": dict(self.context.input_data),
+                "shared_prompt": self.context.shared_prompt,
+            },
+            session_json=self.session.to_json(),
+            system_prompt=self.system_prompt,
+            prompt_version=2,
         )
 
 

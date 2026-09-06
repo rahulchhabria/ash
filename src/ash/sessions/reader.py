@@ -93,14 +93,25 @@ class SessionReader:
         self,
         entries: list[Entry],
         include_timestamps: bool = False,
+        branch_id: str | None = None,
     ) -> tuple[list[Message], list[str], list[int]]:
+        from ash.core.compaction import create_summary_message
         from ash.core.tokens import estimate_message_tokens
 
+        entries, compaction = self._apply_latest_compaction(entries, branch_id)
         tool_use_ids = self._collect_tool_use_ids(entries)
         messages: list[Message] = []
         message_ids: list[str] = []
         token_counts: list[int] = []
         pending_results: list[ToolResult] = []
+
+        if compaction is not None:
+            summary_message = create_summary_message(compaction.summary)
+            messages.append(summary_message)
+            message_ids.append(compaction.id)
+            token_counts.append(
+                estimate_message_tokens("user", summary_message.content)
+            )
 
         def flush_pending_results() -> None:
             if not pending_results:
@@ -151,6 +162,31 @@ class SessionReader:
 
         flush_pending_results()
         return messages, message_ids, token_counts
+
+    @staticmethod
+    def _apply_latest_compaction(
+        entries: list[Entry],
+        branch_id: str | None = None,
+    ) -> tuple[list[Entry], CompactionEntry | None]:
+        """Apply the newest compaction with a valid first-kept boundary."""
+
+        message_positions = {
+            entry.id: index
+            for index, entry in enumerate(entries)
+            if isinstance(entry, MessageEntry)
+        }
+        for entry in reversed(entries):
+            if not isinstance(entry, CompactionEntry):
+                continue
+            if entry.branch_id is not None and entry.branch_id != branch_id:
+                continue
+            if entry.first_kept_entry_id is None:
+                continue
+            boundary = message_positions.get(entry.first_kept_entry_id)
+            if boundary is None:
+                continue
+            return entries[boundary:], entry
+        return entries, None
 
     def _collect_tool_use_ids(self, entries: list[Entry]) -> set[str]:
         tool_use_ids: set[str] = set()
@@ -222,6 +258,30 @@ class SessionReader:
             if isinstance(entry, CompactionEntry):
                 return entry
         return None
+
+    async def get_latest_applicable_compaction(
+        self,
+        *,
+        branch_id: str | None = None,
+        head_message_id: str | None = None,
+    ) -> CompactionEntry | None:
+        entries = await self.load_entries()
+        if branch_id is not None and head_message_id is not None:
+            entries = self._resolve_branch(entries, head_message_id, branch_id)
+        elif branch_id is not None:
+            message_ids = {
+                entry.id for entry in entries if isinstance(entry, MessageEntry)
+            }
+            for entry in reversed(entries):
+                if (
+                    isinstance(entry, CompactionEntry)
+                    and entry.branch_id == branch_id
+                    and entry.first_kept_entry_id in message_ids
+                ):
+                    return entry
+            return None
+        _, compaction = self._apply_latest_compaction(entries, branch_id)
+        return compaction
 
     async def has_message_with_external_id(self, external_id: str) -> bool:
         """Check if a message with the given external ID exists in this session."""
@@ -349,7 +409,9 @@ class SessionReader:
         entries = await self.load_entries()
         branch_entries = self._resolve_branch(entries, head_message_id, branch_id)
         messages, message_ids, token_counts = self._build_messages(
-            branch_entries, include_timestamps=include_timestamps
+            branch_entries,
+            include_timestamps=include_timestamps,
+            branch_id=branch_id,
         )
         return prune_messages_to_budget(
             messages,

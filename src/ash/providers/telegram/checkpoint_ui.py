@@ -77,6 +77,27 @@ def format_checkpoint_message(checkpoint: dict[str, Any]) -> str:
         Formatted message string.
     """
     prompt = str(checkpoint.get("prompt", "Agent paused for input"))
+    approval_request = checkpoint.get("approval_request")
+    if (
+        isinstance(approval_request, dict)
+        and approval_request.get("action") == "vapi_call"
+    ):
+        details = [
+            "",
+            "Call approval:",
+            f"Destination: {approval_request.get('business_name') or approval_request.get('customer_number') or 'Unknown'}",
+            f"Phone: {approval_request.get('customer_number') or 'Unknown'}",
+            f"Objective: {approval_request.get('objective') or 'Unknown'}",
+            "IVR keypad navigation: "
+            + (
+                "routing only"
+                if approval_request.get("allow_ivr_navigation") is True
+                else "not allowed"
+            ),
+        ]
+        if voicemail := str(approval_request.get("voicemail_message") or "").strip():
+            details.append(f"Voicemail: {voicemail}")
+        prompt = "\n".join([prompt, *details])
     options = checkpoint.get("options") or []
     if not options:
         return prompt

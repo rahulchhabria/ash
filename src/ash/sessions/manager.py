@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -16,7 +16,10 @@ from ash.sessions.types import (
     AgentSessionEntry,
     BranchHead,
     CompactionEntry,
+    ConversationWorkingState,
     MessageEntry,
+    OperationState,
+    PendingCheckpointRecord,
     PersistedSessionState,
     SessionHeader,
     StackFrameMeta,
@@ -84,6 +87,10 @@ class SessionManager:
         self._header = await self._reader.load_header()
         if self._header is not None:
             self._ensure_state_file()
+            if self._current_message_id is None:
+                message_ids = await self._reader.get_message_ids_in_order()
+                if message_ids:
+                    self._current_message_id = message_ids[-1]
             return self._header
 
         self._header = SessionHeader.create(
@@ -123,6 +130,20 @@ class SessionManager:
         parent_id: str | None = None,
     ) -> str:
         await self.ensure_session()
+        duplicate = await self._find_external_id_duplicate(
+            metadata, agent_session_id=agent_session_id
+        )
+        if duplicate is not None:
+            if self._current_message_id is None:
+                self._current_message_id = duplicate.id
+            logger.info(
+                "session_message_deduplicated",
+                extra={
+                    "session.key": self._key,
+                    "message.external_id": (metadata or {}).get("external_id"),
+                },
+            )
+            return duplicate.id
         entry = MessageEntry.create(
             role="user",
             content=content,
@@ -150,6 +171,20 @@ class SessionManager:
         parent_id: str | None = None,
     ) -> str:
         await self.ensure_session()
+        duplicate = await self._find_external_id_duplicate(
+            metadata, agent_session_id=agent_session_id
+        )
+        if duplicate is not None:
+            if self._current_message_id is None:
+                self._current_message_id = duplicate.id
+            logger.info(
+                "session_message_deduplicated",
+                extra={
+                    "session.key": self._key,
+                    "message.external_id": (metadata or {}).get("external_id"),
+                },
+            )
+            return duplicate.id
         stored_content: str | list[dict[str, Any]]
         if isinstance(content, str):
             stored_content = content
@@ -245,15 +280,40 @@ class SessionManager:
         tokens_before: int,
         tokens_after: int,
         first_kept_entry_id: str,
+        branch_id: str | None = None,
     ) -> None:
         await self.ensure_session()
+        previous = await self._reader.get_last_compaction()
+        if (
+            previous is not None
+            and previous.summary == summary
+            and previous.first_kept_entry_id == first_kept_entry_id
+            and previous.branch_id == branch_id
+        ):
+            return
         entry = CompactionEntry.create(
             summary=summary,
             tokens_before=tokens_before,
             tokens_after=tokens_after,
             first_kept_entry_id=first_kept_entry_id,
+            branch_id=branch_id,
         )
         await self._writer.write_compaction(entry)
+
+    async def _find_external_id_duplicate(
+        self,
+        metadata: dict[str, Any] | None,
+        *,
+        agent_session_id: str | None,
+    ) -> MessageEntry | None:
+        """Return an existing top-level message with the same external ID."""
+
+        if agent_session_id is not None or not metadata:
+            return None
+        external_id = metadata.get("external_id")
+        if not isinstance(external_id, str) or not external_id:
+            return None
+        return await self._reader.get_message_by_external_id(external_id)
 
     async def start_agent_session(
         self,
@@ -454,6 +514,286 @@ class SessionManager:
             return None
         return state.active_stack
 
+    def load_conversation_state(self) -> ConversationWorkingState:
+        state = self._load_state()
+        if state is None:
+            return ConversationWorkingState()
+        return state.conversation.model_copy(deep=True)
+
+    def save_conversation_state(self, conversation: ConversationWorkingState) -> None:
+        state = self._load_state()
+        if state is None:
+            state = PersistedSessionState(
+                provider=self.provider,
+                chat_id=self.chat_id,
+                user_id=self.user_id,
+                thread_id=self.thread_id,
+            )
+        conversation.updated_at = datetime.now(UTC)
+        state.conversation = conversation
+        self._save_state(state)
+
+    def update_last_user_intent(self, text: str) -> None:
+        conversation = self.load_conversation_state()
+        conversation.last_user_intent = text.strip() or conversation.last_user_intent
+        self.save_conversation_state(conversation)
+
+    def set_active_goal(self, goal: str | None) -> None:
+        conversation = self.load_conversation_state()
+        conversation.active_goal = goal.strip() if goal and goal.strip() else None
+        self.save_conversation_state(conversation)
+
+    def save_pending_checkpoint(self, record: PendingCheckpointRecord) -> None:
+        conversation = self.load_conversation_state()
+        conversation.pending_checkpoints = [
+            item
+            for item in conversation.pending_checkpoints
+            if item.checkpoint_id != record.checkpoint_id
+        ]
+        conversation.pending_checkpoints.append(record)
+        conversation.pending_question = record.prompt or None
+        self.save_conversation_state(conversation)
+
+    def get_pending_checkpoint(
+        self, checkpoint_id: str
+    ) -> PendingCheckpointRecord | None:
+        matches = [
+            item
+            for item in self.load_conversation_state().pending_checkpoints
+            if item.checkpoint_id == checkpoint_id
+            or item.checkpoint_id.startswith(checkpoint_id)
+        ]
+        if len(matches) != 1:
+            return None
+        return matches[0].model_copy(deep=True)
+
+    def claim_pending_checkpoint(
+        self,
+        checkpoint_id: str,
+        selected_option: str,
+        *,
+        ttl_seconds: int,
+    ) -> PendingCheckpointRecord | None:
+        """Atomically transition one pending checkpoint to claimed state."""
+        conversation = self.load_conversation_state()
+        matches = [
+            item
+            for item in conversation.pending_checkpoints
+            if item.checkpoint_id == checkpoint_id
+            or item.checkpoint_id.startswith(checkpoint_id)
+        ]
+        if len(matches) != 1:
+            return None
+        record = matches[0]
+        now = datetime.now(UTC)
+        if record.status != "pending":
+            return None
+        if (now - record.created_at).total_seconds() > ttl_seconds:
+            conversation.pending_checkpoints.remove(record)
+            conversation.pending_question = (
+                conversation.pending_checkpoints[-1].prompt
+                if conversation.pending_checkpoints
+                else None
+            )
+            self.save_conversation_state(conversation)
+            return None
+        record.status = "claimed"
+        record.selected_option = selected_option
+        record.claimed_at = now
+        self.save_conversation_state(conversation)
+        return record.model_copy(deep=True)
+
+    def release_pending_checkpoint(self, checkpoint_id: str) -> None:
+        conversation = self.load_conversation_state()
+        for record in conversation.pending_checkpoints:
+            if record.checkpoint_id != checkpoint_id:
+                continue
+            if record.status == "claimed" and record.approval_consumed_at is None:
+                record.status = "pending"
+                record.selected_option = None
+                record.claimed_at = None
+                self.save_conversation_state(conversation)
+            return
+
+    def consume_checkpoint_approval(
+        self, checkpoint_id: str, approval_request: dict[str, Any]
+    ) -> bool:
+        """Consume a claimed checkpoint's consequential-action grant once."""
+        conversation = self.load_conversation_state()
+        for record in conversation.pending_checkpoints:
+            if record.checkpoint_id != checkpoint_id:
+                continue
+            if (
+                record.status != "claimed"
+                or record.approval_consumed_at is not None
+                or not isinstance(record.checkpoint, dict)
+                or not isinstance(record.checkpoint.get("approval_request"), dict)
+                or record.checkpoint["approval_request"] != approval_request
+            ):
+                return False
+            record.approval_consumed_at = datetime.now(UTC)
+            self.save_conversation_state(conversation)
+            return True
+        return False
+
+    def clear_pending_checkpoint(self, checkpoint_id: str) -> None:
+        conversation = self.load_conversation_state()
+        before = len(conversation.pending_checkpoints)
+        conversation.pending_checkpoints = [
+            item
+            for item in conversation.pending_checkpoints
+            if item.checkpoint_id != checkpoint_id
+        ]
+        if len(conversation.pending_checkpoints) != before:
+            conversation.pending_question = (
+                conversation.pending_checkpoints[-1].prompt
+                if conversation.pending_checkpoints
+                else None
+            )
+            self.save_conversation_state(conversation)
+
+    def list_pending_checkpoints(self) -> list[PendingCheckpointRecord]:
+        return self.load_conversation_state().pending_checkpoints
+
+    def record_operation(self, operation: OperationState) -> None:
+        conversation = self.load_conversation_state()
+        conversation.operations = [
+            item
+            for item in conversation.operations
+            if item.operation_id != operation.operation_id
+        ]
+        conversation.operations.append(operation)
+        conversation.operations = conversation.operations[-25:]
+        self.save_conversation_state(conversation)
+
+    def get_operation(self, operation_id: str) -> OperationState | None:
+        for operation in reversed(self.load_conversation_state().operations):
+            if operation.operation_id == operation_id:
+                return operation
+        return None
+
+    def latest_operation(
+        self,
+        kind: str,
+        *,
+        destination: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> OperationState | None:
+        for operation in reversed(self.load_conversation_state().operations):
+            if operation.kind != kind:
+                continue
+            if destination is not None and operation.destination != destination:
+                continue
+            if (
+                idempotency_key is not None
+                and operation.idempotency_key != idempotency_key
+            ):
+                continue
+            return operation
+        return None
+
+    def update_operation_status(
+        self,
+        operation_id: str,
+        status: str,
+        *,
+        metadata: dict[str, Any] | None = None,
+    ) -> OperationState | None:
+        conversation = self.load_conversation_state()
+        for operation in conversation.operations:
+            if operation.operation_id != operation_id:
+                continue
+            operation.status = status
+            operation.updated_at = datetime.now(UTC)
+            if metadata:
+                operation.metadata.update(metadata)
+            self.save_conversation_state(conversation)
+            return operation
+        return None
+
+    def get_memory_extraction_cursor(self) -> str | None:
+        return self.load_conversation_state().memory_extraction_cursor
+
+    def set_memory_extraction_cursor(self, message_id: str) -> None:
+        conversation = self.load_conversation_state()
+        conversation.memory_extraction_cursor = message_id
+        self.save_conversation_state(conversation)
+
+    async def load_message_entries_since(
+        self, message_id: str | None
+    ) -> list[MessageEntry]:
+        entries = [
+            entry
+            for entry in await self._reader.load_entries()
+            if isinstance(entry, MessageEntry) and entry.agent_session_id is None
+        ]
+        if message_id is None:
+            return entries
+        for index, entry in enumerate(entries):
+            if entry.id == message_id:
+                return entries[index + 1 :]
+        return entries
+
+    async def get_latest_compaction(
+        self, branch_id: str | None = None
+    ) -> CompactionEntry | None:
+        head_message_id: str | None = None
+        if branch_id is not None:
+            state = self._load_state()
+            if state is not None:
+                branch = next(
+                    (item for item in state.branches if item.branch_id == branch_id),
+                    None,
+                )
+                if branch is not None:
+                    head_message_id = branch.head_message_id
+        return await self._reader.get_latest_applicable_compaction(
+            branch_id=branch_id,
+            head_message_id=head_message_id,
+        )
+
+    @classmethod
+    def discover(
+        cls,
+        *,
+        provider: str,
+        chat_id: str,
+        user_id: str,
+        sessions_path: Path | None = None,
+    ) -> list[SessionManager]:
+        root = sessions_path or get_sessions_path()
+        if not root.exists():
+            return []
+        managers: list[SessionManager] = []
+        for state_path in root.glob(f"*/{STATE_FILENAME}"):
+            try:
+                state = PersistedSessionState.model_validate_json(
+                    state_path.read_text()
+                )
+            except Exception:
+                logger.debug(
+                    "session_discovery_skipped_invalid_state",
+                    extra={"session.state_path": str(state_path)},
+                    exc_info=True,
+                )
+                continue
+            if (
+                state.provider != provider
+                or state.chat_id != chat_id
+                or state.user_id != user_id
+            ):
+                continue
+            managers.append(
+                cls(
+                    provider=provider,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    thread_id=state.thread_id,
+                    sessions_path=root,
+                )
+            )
+        return managers
+
     def _load_state(self) -> PersistedSessionState | None:
         """Load the session state from state.json."""
         if not self.state_path.exists():
@@ -468,9 +808,11 @@ class SessionManager:
     def _save_state(self, state: PersistedSessionState) -> None:
         """Save the session state to state.json."""
         self._session_dir.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text(
+        temp_path = self.state_path.with_suffix(".json.tmp")
+        temp_path.write_text(
             json.dumps(state.model_dump(mode="json"), indent=2, default=str)
         )
+        temp_path.replace(self.state_path)
 
     async def _read_context_fail_open[T](
         self,

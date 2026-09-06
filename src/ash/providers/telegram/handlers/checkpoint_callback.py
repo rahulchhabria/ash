@@ -173,6 +173,7 @@ class ResponseFinalizer:
         """
         from ash.providers.base import IncomingMessage
         from ash.providers.telegram.checkpoint_ui import (
+            create_checkpoint_keyboard,
             format_checkpoint_message,
         )
         from ash.tools.builtin.agents import CHECKPOINT_METADATA_KEY
@@ -195,6 +196,15 @@ class ResponseFinalizer:
                     "thread_id": self._thread_id,
                     "chat_type": self._routing.get("chat_type"),
                     "chat_title": self._routing.get("chat_title"),
+                    **(
+                        {
+                            "conversation_envelope": self._routing[
+                                "conversation_envelope"
+                            ]
+                        }
+                        if isinstance(self._routing.get("conversation_envelope"), dict)
+                        else {}
+                    ),
                 },
             )
             new_truncated_id = store_checkpoint_fn(
@@ -205,6 +215,7 @@ class ResponseFinalizer:
             )
 
             response_text = format_checkpoint_message(new_checkpoint)
+            reply_markup = create_checkpoint_keyboard(new_checkpoint)
             logger.info(
                 "nested_checkpoint_detected",
                 extra={"checkpoint.id": new_truncated_id},

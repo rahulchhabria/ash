@@ -12,6 +12,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from ash.core.signals import contains_no_reply, is_no_reply
+from ash.core.types import StreamReset
 from ash.providers.base import IncomingMessage, OutgoingMessage
 from ash.providers.telegram.handlers.utils import (
     MIN_EDIT_INTERVAL,
@@ -73,13 +74,14 @@ class StreamingHandler:
             user_metadata["external_id"] = message.id
         if message.reply_to_message_id:
             user_metadata["reply_to_external_id"] = message.reply_to_message_id
-        await session_manager.add_user_message(
+        user_entry_id = await session_manager.add_user_message(
             content=message.text,
             metadata=user_metadata or None,
             username=message.username,
             display_name=message.display_name,
             user_id=message.user_id,
         )
+        session._message_ids.append(user_entry_id)
 
         if tracker is None:
             tracker = self._create_tool_tracker(message)
@@ -90,7 +92,7 @@ class StreamingHandler:
         last_edit_time = 0.0
 
         async def get_steering_messages() -> list[IncomingMessage]:
-            pending = ctx.take_pending()
+            pending = ctx.take_for_steering()
             if pending:
                 logger.info(
                     "steering_messages_received",
@@ -106,8 +108,14 @@ class StreamingHandler:
                 on_tool_start=tracker.on_tool_start,
                 on_tool_complete=tracker.on_tool_complete,
                 get_steering_messages=get_steering_messages,
+                turn_controller=ctx,
+                session_manager=session_manager,
                 tool_overrides={progress_tool.name: progress_tool},
             ):
+                if isinstance(chunk, StreamReset):
+                    response_content = ""
+                    last_edit_time = 0.0
+                    continue
                 response_content += chunk
                 elapsed = time.time() - start_time
                 since_last_edit = time.time() - last_edit_time
@@ -139,7 +147,12 @@ class StreamingHandler:
                             message.chat_id, response_msg_id, response_content
                         )
                     last_edit_time = time.time()
-        except Exception:
+        except BaseException:
+            await self._session_handler.persist_steered_messages(
+                ctx.take_consumed_steering(),
+                thread_id,
+                session.context.branch_id,
+            )
             # Clean up dangling thinking message on streaming errors
             if tracker.thinking_msg_id:
                 try:
@@ -150,6 +163,12 @@ class StreamingHandler:
                     logger.debug("Failed to delete thinking message on error")
                 tracker.thinking_msg_id = None
             raise
+
+        await self._session_handler.persist_steered_messages(
+            ctx.take_consumed_steering(),
+            thread_id,
+            session.context.branch_id,
+        )
 
         # Suppress [NO_REPLY] responses (passive engagement, nothing to add)
         if is_no_reply(response_content):

@@ -11,7 +11,8 @@ from ash.config.workspace import Workspace
 from ash.core.agent import Agent, AgentConfig
 from ash.core.prompt import PromptContext, SystemPromptBuilder
 from ash.core.session import SessionState
-from ash.core.types import CHECKPOINT_METADATA_KEY
+from ash.core.steering import TurnController
+from ash.core.types import CHECKPOINT_METADATA_KEY, StreamReset
 from ash.llm.types import (
     Message,
     Role,
@@ -498,6 +499,67 @@ class TestAgent:
 
         assert "Hello " in chunks
         assert "world!" in chunks
+
+    async def test_streaming_steering_replaces_abandoned_draft(self, workspace):
+        controller: TurnController[IncomingMessage] = TurnController()
+
+        class SteeringLLM(MockLLMProvider):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            async def stream(self, *args, **kwargs):
+                self.calls += 1
+                yield StreamChunk(type=StreamEventType.MESSAGE_START)
+                if self.calls == 1:
+                    yield StreamChunk(
+                        type=StreamEventType.TEXT_DELTA, content="Old draft"
+                    )
+                    controller.enqueue(
+                        IncomingMessage(
+                            id="steering-1",
+                            chat_id="chat",
+                            user_id="user",
+                            text="Use the corrected request",
+                        )
+                    )
+                    yield StreamChunk(
+                        type=StreamEventType.TEXT_DELTA, content=" ignored"
+                    )
+                else:
+                    yield StreamChunk(
+                        type=StreamEventType.TEXT_DELTA, content="Revised answer"
+                    )
+                yield StreamChunk(type=StreamEventType.MESSAGE_END)
+
+        llm = SteeringLLM()
+        registry = ToolRegistry()
+        agent = Agent(
+            llm=llm,
+            tool_executor=ToolExecutor(registry),
+            prompt_builder=make_prompt_builder(workspace, registry),
+        )
+        session = make_session()
+        emitted = []
+        rendered = ""
+
+        async for chunk in agent.process_message_streaming(
+            "Original request", session, turn_controller=controller
+        ):
+            emitted.append(chunk)
+            if isinstance(chunk, StreamReset):
+                rendered = ""
+            else:
+                rendered += chunk
+
+        assert any(isinstance(chunk, StreamReset) for chunk in emitted)
+        assert rendered == "Revised answer"
+        assert [message.get_text() for message in session.messages] == [
+            "Original request",
+            "Old draft",
+            "Use the corrected request",
+            "Revised answer",
+        ]
 
     async def test_steering_messages_skips_remaining_tools(self, workspace):
         tool_use_response = Message(

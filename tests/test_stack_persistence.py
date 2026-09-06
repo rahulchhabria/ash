@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from ash.agents.types import AgentContext, StackFrame
 from ash.core.session import SessionState
+from ash.llm.types import ToolUse
+from ash.providers.base import IncomingMessage
+from ash.providers.telegram.handlers.message_handler import TelegramMessageHandler
 from ash.sessions.manager import SessionManager
 from ash.sessions.types import (
     AgentSessionCompleteEntry,
@@ -38,11 +42,15 @@ def _make_frame(
         chat_id="123",
         user_id="456",
     )
+    session.add_assistant_message(
+        [ToolUse(id="pending-tool", name="use_agent", input={"agent": "test"})]
+    )
     context = AgentContext(
         session_id="test-session",
         user_id="456",
         chat_id="123",
         provider="telegram",
+        shared_prompt="Shared runtime guidance.",
     )
     return StackFrame(
         frame_id=frame_id,
@@ -99,16 +107,20 @@ class TestStackFrameToMeta:
         assert meta.agent_type == "main"
         assert meta.parent_tool_use_id is None
 
-    def test_strips_non_serializable_fields(self):
-        """to_meta() should not contain session, system_prompt, or context."""
+    def test_persists_resumable_state_without_runtime_handles(self):
+        """to_meta() should preserve state needed to resume an exact tool turn."""
         frame = _make_frame()
         meta = frame.to_meta()
 
-        # StackFrameMeta is a Pydantic model — verify it doesn't have runtime-only fields
         data = meta.model_dump()
         assert "session" not in data
-        assert "system_prompt" not in data
         assert "context" not in data
+        assert meta.system_prompt == "You are a test agent."
+        assert meta.context_snapshot["shared_prompt"] == "Shared runtime guidance."
+        restored_session = SessionState.from_json(meta.session_json or "")
+        pending = restored_session.get_pending_tool_uses()
+        assert [tool.id for tool in pending] == ["pending-tool"]
+        assert meta.prompt_version == 2
 
     def test_environment_dict_is_copied(self):
         """Environment should be a copy, not a reference."""
@@ -265,6 +277,42 @@ class TestSaveLoadActiveStack:
         assert raw["provider"] == "telegram"
         assert raw["chat_id"] == "123"
         assert raw["active_stack"] is not None
+
+
+@pytest.mark.asyncio
+async def test_reconstruct_frames_restores_exact_pending_turn(tmp_path) -> None:
+    frame = _make_frame()
+    meta = frame.to_meta()
+    sm = SessionManager(
+        provider="telegram",
+        chat_id="123",
+        user_id="456",
+        sessions_path=tmp_path,
+    )
+    handler = object.__new__(TelegramMessageHandler)
+    handler._session_handler = SimpleNamespace(
+        get_session_context=lambda _session_key: object()
+    )
+    handler._provider = SimpleNamespace(name="telegram")
+    message = IncomingMessage(
+        id="incoming",
+        chat_id="123",
+        user_id="456",
+        text="Continue",
+        metadata={"thread_id": "thread-2"},
+    )
+
+    restored = await handler._reconstruct_frames([meta], message, sm)
+
+    assert restored is not None
+    assert len(restored) == 1
+    restored_frame = restored[0]
+    assert restored_frame.system_prompt == "You are a test agent."
+    assert restored_frame.context.shared_prompt == "Shared runtime guidance."
+    assert restored_frame.context.thread_id == "thread-2"
+    assert restored_frame.session.session_manager is sm
+    pending = restored_frame.session.get_pending_tool_uses()
+    assert [tool.id for tool in pending] == ["pending-tool"]
 
 
 class TestStaleStackDetection:

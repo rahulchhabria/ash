@@ -39,6 +39,32 @@ class InterruptTool(Tool):
                     "items": {"type": "string"},
                     "description": "Optional suggested responses (e.g., ['Proceed', 'Cancel', 'Modify'])",
                 },
+                "approval_request": {
+                    "type": "object",
+                    "description": (
+                        "Machine-readable parameters for a consequential action. "
+                        "Use this only when the resumed execution will perform the "
+                        "exact action described here."
+                    ),
+                    "properties": {
+                        "action": {"type": "string", "enum": ["vapi_call"]},
+                        "customer_number": {"type": "string"},
+                        "objective": {"type": "string"},
+                        "business_name": {"type": "string"},
+                        "context": {"type": "string"},
+                        "customer_name": {"type": "string"},
+                        "allow_ivr_navigation": {"type": "boolean"},
+                        "voicemail_message": {"type": "string"},
+                        "retry_operation_id": {"type": "string"},
+                    },
+                    "required": [
+                        "action",
+                        "customer_number",
+                        "objective",
+                        "allow_ivr_navigation",
+                    ],
+                    "additionalProperties": False,
+                },
             },
             "required": ["prompt"],
         }

@@ -421,7 +421,7 @@ class CompactionEntry:
     summary: str
     tokens_before: int
     tokens_after: int
-    first_kept_entry_id: str
+    first_kept_entry_id: str | None = None
     created_at: datetime = field(default_factory=now_utc)
     branch_id: str | None = None  # Scopes compaction to a specific branch
     type: Literal["compaction"] = "compaction"
@@ -433,9 +433,10 @@ class CompactionEntry:
             "summary": self.summary,
             "tokens_before": self.tokens_before,
             "tokens_after": self.tokens_after,
-            "first_kept_entry_id": self.first_kept_entry_id,
             "created_at": self.created_at.isoformat(),
         }
+        if self.first_kept_entry_id:
+            result["first_kept_entry_id"] = self.first_kept_entry_id
         if self.branch_id:
             result["branch_id"] = self.branch_id
         return result
@@ -447,7 +448,7 @@ class CompactionEntry:
             summary=data["summary"],
             tokens_before=data["tokens_before"],
             tokens_after=data["tokens_after"],
-            first_kept_entry_id=data["first_kept_entry_id"],
+            first_kept_entry_id=data.get("first_kept_entry_id"),
             created_at=_parse_datetime(data["created_at"]),
             branch_id=data.get("branch_id"),
         )
@@ -562,6 +563,58 @@ class StackFrameMeta(BaseModel):
     is_skill_agent: bool = False
     environment: dict[str, str] = {}
     voice: str | None = None
+    context_snapshot: dict[str, Any] = Field(default_factory=dict)
+    prompt_version: int = 1
+    session_json: str | None = None
+    system_prompt: str | None = None
+
+
+class PendingCheckpointRecord(BaseModel):
+    """Durable routing state for a pending user checkpoint."""
+
+    checkpoint_id: str
+    prompt: str
+    options: list[str] | None = None
+    agent_name: str | None = None
+    original_message: str | None = None
+    tool_use_id: str | None = None
+    response_external_id: str | None = None
+    envelope: dict[str, Any] | None = None
+    checkpoint: dict[str, Any] | None = None
+    status: Literal["pending", "claimed"] = "pending"
+    selected_option: str | None = None
+    claimed_at: datetime | None = None
+    approval_consumed_at: datetime | None = None
+    created_at: datetime = Field(default_factory=now_utc)
+
+
+class OperationState(BaseModel):
+    """Durable state for a consequential external operation."""
+
+    kind: str
+    operation_id: str
+    status: str
+    idempotency_key: str
+    destination: str | None = None
+    objective: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime = Field(default_factory=now_utc)
+
+
+class ConversationWorkingState(BaseModel):
+    """Small durable state capsule used to keep a conversation on course."""
+
+    version: int = 1
+    active_goal: str | None = None
+    constraints: list[str] = Field(default_factory=list)
+    entities: dict[str, str] = Field(default_factory=dict)
+    pending_question: str | None = None
+    pending_checkpoints: list[PendingCheckpointRecord] = Field(default_factory=list)
+    operations: list[OperationState] = Field(default_factory=list)
+    last_user_intent: str | None = None
+    memory_extraction_cursor: str | None = None
+    updated_at: datetime = Field(default_factory=now_utc)
 
 
 class BranchHead(BaseModel):
@@ -583,3 +636,6 @@ class PersistedSessionState(BaseModel):
     created_at: datetime = Field(default_factory=now_utc)
     active_stack: list[StackFrameMeta] | None = None  # Interactive subagent stack
     branches: list[BranchHead] = []  # All known branch tips
+    conversation: ConversationWorkingState = Field(
+        default_factory=ConversationWorkingState
+    )

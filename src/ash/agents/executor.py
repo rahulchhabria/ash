@@ -373,6 +373,62 @@ class AgentExecutor:
         return sanitized
 
     @staticmethod
+    def _take_steering(context: AgentContext) -> list[Any]:
+        controller = context.turn_controller
+        if controller is None:
+            return []
+        return list(controller.take_for_steering())
+
+    @staticmethod
+    def _append_steering(session: SessionState, steering: list[Any]) -> None:
+        for item in steering:
+            text = getattr(item, "text", item)
+            if isinstance(text, str) and text.strip():
+                session.add_user_message(text)
+
+    async def _await_with_controller(
+        self,
+        awaitable: Any,
+        context: AgentContext,
+        *,
+        cancel_on_revision: bool = True,
+    ) -> tuple[Any | None, list[Any]]:
+        controller = context.turn_controller
+        if controller is None:
+            return await awaitable, []
+        task = asyncio.create_task(awaitable)
+        revision_task = asyncio.create_task(controller.wait_for_revision())
+        done, _ = await asyncio.wait(
+            {task, revision_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        if task in done:
+            revision_task.cancel()
+            try:
+                await revision_task
+            except asyncio.CancelledError:
+                pass
+            result = await task
+            steering = (
+                list(controller.take_for_steering())
+                if controller.pending_messages
+                else []
+            )
+            if steering and cancel_on_revision:
+                return None, steering
+            return result, steering
+        steering = list(controller.take_for_steering())
+        if not cancel_on_revision:
+            # Preserve the outcome of an already-started side effect before
+            # applying the user's revision to the remaining plan.
+            return await task, steering
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return None, steering
+
+    @staticmethod
     def _build_result_metadata(tool_context: ToolContext) -> dict[str, str]:
         """Extract metadata to propagate from tool context to agent result."""
         metadata: dict[str, str] = {}
@@ -659,20 +715,29 @@ class AgentExecutor:
             agent_config.supports_checkpointing,
         )
 
-        tool_context = ToolContext.from_agent_context(context, env=environment)
+        tool_context = ToolContext.from_agent_context(
+            context,
+            env=environment,
+            session_manager=session_manager,
+        )
 
         for iteration in range(start_iteration, max_iterations + 1):
             logger.debug(
                 f"Agent '{agent_config.name}' iteration {iteration}/{max_iterations}"
             )
 
+            self._append_steering(session, self._take_steering(context))
+
             try:
-                response = await llm.complete(
-                    messages=session.get_messages_for_llm(),
-                    model=resolved_model,
-                    system=system_prompt,
-                    tools=tool_definitions or None,
-                    max_tokens=4096,
+                response, steering = await self._await_with_controller(
+                    llm.complete(
+                        messages=session.get_messages_for_llm(),
+                        model=resolved_model,
+                        system=system_prompt,
+                        tools=tool_definitions or None,
+                        max_tokens=4096,
+                    ),
+                    context,
                 )
             except Exception as e:
                 logger.error(
@@ -683,6 +748,9 @@ class AgentExecutor:
                     },
                 )
                 return AgentResult.error(f"LLM error: {e}")
+            if response is None:
+                self._append_steering(session, steering)
+                continue
 
             message = response.message
             session.add_assistant_message(message.content)
@@ -738,6 +806,7 @@ class AgentExecutor:
 
                 prompt = interrupt_tool.input.get("prompt", "Checkpoint reached")
                 options = interrupt_tool.input.get("options")
+                approval_request = interrupt_tool.input.get("approval_request")
 
                 checkpoint = CheckpointState(
                     checkpoint_id=str(uuid.uuid4()),
@@ -746,6 +815,11 @@ class AgentExecutor:
                     iteration=iteration,
                     prompt=prompt,
                     options=options,
+                    approval_request=(
+                        dict(approval_request)
+                        if isinstance(approval_request, dict)
+                        else None
+                    ),
                     tool_use_id=interrupt_tool.id,
                 )
 
@@ -760,7 +834,19 @@ class AgentExecutor:
 
                 return AgentResult.interrupted(checkpoint, iterations=iteration)
 
-            for tool_use in tool_uses:
+            restart_for_steering = False
+            for tool_index, tool_use in enumerate(tool_uses):
+                steering = self._take_steering(context)
+                if steering:
+                    for skipped in tool_uses[tool_index:]:
+                        session.add_tool_result(
+                            skipped.id,
+                            "Skipped: user updated the request",
+                            is_error=True,
+                        )
+                    self._append_steering(session, steering)
+                    restart_for_steering = True
+                    break
                 # Prevent agents from invoking themselves via use_agent
                 if tool_use.name == "use_agent":
                     target_agent = tool_use.input.get("agent", "")
@@ -795,13 +881,21 @@ class AgentExecutor:
                     continue
 
                 try:
-                    result = await self._tools.execute(
-                        tool_use.name,
-                        tool_use.input,
-                        context=tool_context,
+                    result, steering = await self._await_with_controller(
+                        self._tools.execute(
+                            tool_use.name,
+                            tool_use.input,
+                            context=tool_context,
+                        ),
+                        context,
+                        cancel_on_revision=False,
                     )
-                    output = result.content
-                    is_error = result.is_error
+                    if result is None:
+                        output = "Cancelled: user updated the request"
+                        is_error = True
+                    else:
+                        output = result.content
+                        is_error = result.is_error
                 except Exception as e:
                     logger.error("agent_tool_error", extra={"error.message": str(e)})
                     output = f"Tool error: {e}"
@@ -833,6 +927,19 @@ class AgentExecutor:
                         },
                         agent_session_id=agent_session_id,
                     )
+                if steering:
+                    for skipped in tool_uses[tool_index + 1 :]:
+                        session.add_tool_result(
+                            skipped.id,
+                            "Skipped: user updated the request",
+                            is_error=True,
+                        )
+                    self._append_steering(session, steering)
+                    restart_for_steering = True
+                    break
+
+            if restart_for_steering:
+                continue
 
         logger.warning(
             "agent_max_iterations",
@@ -927,6 +1034,7 @@ class AgentExecutor:
         tool_overrides: dict[str, Any] | None = None,
         on_tool_start: "OnToolStartCallback | None" = None,
         on_tool_complete: "OnToolCompleteCallback | None" = None,
+        turn_controller: Any = None,
     ) -> TurnResult:
         """Run one logical turn for a stack frame.
 
@@ -952,6 +1060,8 @@ class AgentExecutor:
         from ash.logging import log_context
 
         session = frame.session
+        if turn_controller is not None:
+            frame.context.turn_controller = turn_controller
         agent_session_id = frame.agent_session_id
         tool_defs = self._get_turn_tool_definitions(frame)
         turn_env = dict(frame.environment or {})
@@ -1014,6 +1124,7 @@ class AgentExecutor:
 
             while frame.iteration < frame.max_iterations:
                 frame.iteration += 1
+                self._append_steering(session, self._take_steering(frame.context))
 
                 # Check for unresolved tool_uses from a previous assistant message
                 unresolved = self._get_unresolved_tool_uses(session)
@@ -1022,12 +1133,15 @@ class AgentExecutor:
                     # Need LLM call
                     try:
                         llm = self._llm_for_model_alias(frame.model_alias)
-                        response = await llm.complete(
-                            messages=session.get_messages_for_llm(),
-                            model=frame.model,
-                            system=frame.system_prompt,
-                            tools=tool_defs or None,
-                            max_tokens=4096,
+                        response, steering = await self._await_with_controller(
+                            llm.complete(
+                                messages=session.get_messages_for_llm(),
+                                model=frame.model,
+                                system=frame.system_prompt,
+                                tools=tool_defs or None,
+                                max_tokens=4096,
+                            ),
+                            frame.context,
                         )
                     except Exception as e:
                         logger.error(
@@ -1035,6 +1149,9 @@ class AgentExecutor:
                             extra={"error.message": str(e)},
                         )
                         return TurnResult(TurnAction.ERROR, text=f"LLM error: {e}")
+                    if response is None:
+                        self._append_steering(session, steering)
+                        continue
 
                     session.add_assistant_message(response.message.content)
 
@@ -1056,7 +1173,19 @@ class AgentExecutor:
                     unresolved = tool_uses
 
                 # Execute tools
-                for tool_use in unresolved:
+                restart_for_steering = False
+                for tool_index, tool_use in enumerate(unresolved):
+                    steering = self._take_steering(frame.context)
+                    if steering:
+                        for skipped in unresolved[tool_index:]:
+                            session.add_tool_result(
+                                skipped.id,
+                                "Skipped: user updated the request",
+                                is_error=True,
+                            )
+                        self._append_steering(session, steering)
+                        restart_for_steering = True
+                        break
                     if tool_use.name == "complete":
                         result_text = tool_use.input.get("result", "")
                         # Add tool result so session is well-formed
@@ -1111,16 +1240,34 @@ class AgentExecutor:
                             env=per_tool_env,
                             session_manager=session_manager,
                             tool_use_id=tool_use.id,
+                            turn_controller=frame.context.turn_controller,
+                            cancellation_event=(
+                                frame.context.turn_controller.cancel_event
+                                if frame.context.turn_controller
+                                else None
+                            ),
                         )
                         override_tool = (tool_overrides or {}).get(tool_use.name)
                         if override_tool is not None:
-                            result = await override_tool.execute(
-                                tool_use.input,
-                                per_tool_context,
+                            result, steering = await self._await_with_controller(
+                                override_tool.execute(
+                                    tool_use.input,
+                                    per_tool_context,
+                                ),
+                                frame.context,
+                                cancel_on_revision=False,
                             )
                         else:
-                            result = await self._tools.execute(
-                                tool_use.name, tool_use.input, per_tool_context
+                            result, steering = await self._await_with_controller(
+                                self._tools.execute(
+                                    tool_use.name, tool_use.input, per_tool_context
+                                ),
+                                frame.context,
+                                cancel_on_revision=False,
+                            )
+                        if result is None:
+                            result = ToolResult.error(
+                                "Cancelled: user updated the request"
                             )
                         if on_tool_complete:
                             await on_tool_complete(
@@ -1153,6 +1300,16 @@ class AgentExecutor:
                                 },
                                 agent_session_id=agent_session_id,
                             )
+                        if steering:
+                            for skipped in unresolved[tool_index + 1 :]:
+                                session.add_tool_result(
+                                    skipped.id,
+                                    "Skipped: user updated the request",
+                                    is_error=True,
+                                )
+                            self._append_steering(session, steering)
+                            restart_for_steering = True
+                            break
                     except ChildActivated as ca:
                         # Parent paused — tool_use has no result yet
                         return TurnResult(
@@ -1194,6 +1351,9 @@ class AgentExecutor:
                                 },
                                 agent_session_id=agent_session_id,
                             )
+
+                if restart_for_steering:
+                    continue
 
             logger.warning(
                 "agent_max_iterations",

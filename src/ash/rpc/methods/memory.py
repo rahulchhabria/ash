@@ -502,7 +502,14 @@ def register_memory_methods(
         # Touch postprocess debounce so the background extraction timer
         # knows an RPC extraction just occurred, preventing double-extraction.
         if postprocess_service and stored_ids:
-            postprocess_service.touch_debounce()
+            postprocess_service.touch_debounce(
+                (
+                    provider or "",
+                    chat_id or "",
+                    effective_user_id,
+                    "",
+                )
+            )
 
         return {"stored": len(stored_ids)}
 

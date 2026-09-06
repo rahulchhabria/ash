@@ -537,6 +537,7 @@ class ConversationConfig(BaseModel):
     gap_threshold_minutes: int = 15  # Signal gap if longer than this
     reply_context_window: int = 3  # Messages before/after reply target
     chat_history_limit: int = 5  # Recent chat messages to include in LLM context
+    active_thread_timeout_minutes: int = 30
 
 
 class SessionsConfig(BaseModel):

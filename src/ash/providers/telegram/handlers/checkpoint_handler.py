@@ -6,15 +6,20 @@ This module provides:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
 from collections.abc import Callable, Coroutine
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from ash.agents.types import CHECKPOINT_TTL_SECONDS
 from ash.providers.base import IncomingMessage, OutgoingMessage
 from ash.providers.telegram.provider import _truncate
+from ash.sessions import SessionManager
+from ash.sessions.types import PendingCheckpointRecord
 from ash.sessions.types import session_key as make_session_key
 
 from .tool_tracker import ProgressMessageTool, ToolTracker
@@ -26,11 +31,12 @@ if TYPE_CHECKING:
     from ash.chats import ThreadIndex
     from ash.config import AshConfig
     from ash.providers.telegram.provider import TelegramProvider
-    from ash.sessions import SessionManager
     from ash.skills import SkillRegistry
     from ash.tools.registry import ToolRegistry
 
 logger = logging.getLogger("telegram")
+VAPI_APPROVE_OPTION = "Call now"
+VAPI_REJECT_OPTION = "Don't call"
 _APPROVE_TEXT = {
     "approve",
     "approved",
@@ -108,6 +114,7 @@ class CheckpointHandler:
         get_session_managers_dict: Callable[[], dict[str, SessionManager]],
         get_thread_index: Callable[[str], ThreadIndex],
         handle_message: Callable[[IncomingMessage], Coroutine[Any, Any, None]],
+        get_turn_controller: Callable[[str], Any] | None = None,
         mark_active_thread: Callable[[str, str | None], None] | None = None,
         config: AshConfig | None = None,
         agent_registry: AgentRegistry | None = None,
@@ -119,16 +126,20 @@ class CheckpointHandler:
         self._get_session_managers_dict = get_session_managers_dict
         self._get_thread_index = get_thread_index
         self._handle_message = handle_message
+        self._get_turn_controller = get_turn_controller
         self._mark_active_thread = mark_active_thread
         self._config = config
         self._agent_registry = agent_registry
         self._skill_registry = skill_registry
         self._tool_registry = tool_registry
         self._pending_checkpoints: dict[str, dict[str, Any]] = {}
+        self._hydrated_users: set[tuple[str, str]] = set()
+        self._checkpoint_claim_lock = asyncio.Lock()
 
     def clear_all_checkpoints(self) -> None:
         """Clear all pending checkpoints from memory cache."""
         self._pending_checkpoints.clear()
+        self._hydrated_users.clear()
 
     def store_checkpoint(
         self,
@@ -141,10 +152,16 @@ class CheckpointHandler:
     ) -> str:
         """Store checkpoint routing info for callback lookup and return its truncated ID.
 
-        Stores routing info in-memory for fast lookup. Full checkpoint data is
-        persisted in tool_result metadata in the session log.
+        Stores routing info in memory and the complete checkpoint in durable state.
         """
         from ash.providers.telegram.checkpoint_ui import MAX_CHECKPOINT_ID_LEN
+
+        approval_request = checkpoint.get("approval_request")
+        if (
+            isinstance(approval_request, dict)
+            and approval_request.get("action") == "vapi_call"
+        ):
+            checkpoint["options"] = [VAPI_APPROVE_OPTION, VAPI_REJECT_OPTION]
 
         truncated_id = checkpoint.get("checkpoint_id", "")[:MAX_CHECKPOINT_ID_LEN]
         thread_id = message.metadata.get("thread_id")
@@ -152,8 +169,7 @@ class CheckpointHandler:
             self._provider.name, message.chat_id, message.user_id, thread_id
         )
 
-        # Store routing info in memory for fast lookup
-        # Full checkpoint data is in session log via tool_result metadata
+        # Store routing info in memory for fast lookup.
         self._pending_checkpoints[truncated_id] = {
             "session_key": session_key,
             "chat_id": message.chat_id,
@@ -165,7 +181,31 @@ class CheckpointHandler:
             "display_name": message.display_name,
             "agent_name": agent_name,
             "original_message": original_message,
+            "tool_use_id": tool_use_id,
+            "checkpoint_id": checkpoint.get("checkpoint_id"),
+            "conversation_envelope": message.metadata.get("conversation_envelope"),
         }
+        self._hydrated_users.add((message.chat_id, message.user_id))
+        session_manager = self._get_session_manager(
+            message.chat_id, message.user_id, thread_id
+        )
+        checkpoint_options = checkpoint.get("options")
+        session_manager.save_pending_checkpoint(
+            PendingCheckpointRecord(
+                checkpoint_id=str(checkpoint.get("checkpoint_id") or ""),
+                prompt=str(checkpoint.get("prompt") or ""),
+                options=(
+                    [str(option) for option in checkpoint_options]
+                    if isinstance(checkpoint_options, list)
+                    else None
+                ),
+                agent_name=agent_name,
+                original_message=original_message,
+                tool_use_id=tool_use_id,
+                envelope=message.metadata.get("conversation_envelope"),
+                checkpoint=dict(checkpoint),
+            )
+        )
         if self._mark_active_thread:
             self._mark_active_thread(message.chat_id, thread_id)
 
@@ -178,6 +218,7 @@ class CheckpointHandler:
         if message.metadata.get("thread_id"):
             return None
 
+        await self._hydrate_pending_checkpoints(message.chat_id, message.user_id)
         text = (message.text or "").strip()
         if not text or not self._pending_checkpoints:
             return None
@@ -200,6 +241,53 @@ class CheckpointHandler:
 
         return None
 
+    async def _hydrate_pending_checkpoints(self, chat_id: str, user_id: str) -> None:
+        """Rebuild checkpoint routing from session state after a restart."""
+
+        identity = (chat_id, user_id)
+        if identity in self._hydrated_users:
+            return
+
+        managers = list(self._get_session_managers_dict().values())
+        known_keys = {manager.session_key for manager in managers}
+        for manager in SessionManager.discover(
+            provider=self._provider.name,
+            chat_id=chat_id,
+            user_id=user_id,
+        ):
+            if manager.session_key in known_keys:
+                continue
+            self._get_session_managers_dict()[manager.session_key] = manager
+            managers.append(manager)
+            known_keys.add(manager.session_key)
+
+        now = datetime.now(UTC)
+        for manager in managers:
+            if manager.chat_id != chat_id or manager.user_id != user_id:
+                continue
+            for record in manager.list_pending_checkpoints():
+                if (now - record.created_at).total_seconds() > CHECKPOINT_TTL_SECONDS:
+                    manager.clear_pending_checkpoint(record.checkpoint_id)
+                    continue
+                if record.status != "pending":
+                    continue
+                truncated_id = record.checkpoint_id[:55]
+                self._pending_checkpoints.setdefault(
+                    truncated_id,
+                    {
+                        "session_key": manager.session_key,
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "thread_id": manager.thread_id,
+                        "agent_name": record.agent_name,
+                        "original_message": record.original_message,
+                        "tool_use_id": record.tool_use_id,
+                        "checkpoint_id": record.checkpoint_id,
+                        "conversation_envelope": record.envelope,
+                    },
+                )
+        self._hydrated_users.add(identity)
+
     async def get_checkpoint(
         self,
         truncated_id: str,
@@ -207,70 +295,138 @@ class CheckpointHandler:
         chat_id: str | None = None,
         user_id: str | None = None,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        """Get checkpoint, using cache or falling back to session log lookup.
+        """Get an authoritative pending checkpoint and its routing information."""
 
-        Returns (routing_info, checkpoint_data) or (None, None).
-        routing_info contains session routing info, checkpoint_data contains the full checkpoint.
-        """
-        # Fast path: check in-memory cache for routing info
+        async def load_from_manager(
+            manager: SessionManager,
+            routing: dict[str, Any] | None = None,
+        ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+            record = manager.get_pending_checkpoint(truncated_id)
+            if record is None or record.status != "pending":
+                return None, None
+            if (
+                datetime.now(UTC) - record.created_at
+            ).total_seconds() > CHECKPOINT_TTL_SECONDS:
+                manager.clear_pending_checkpoint(record.checkpoint_id)
+                self._pending_checkpoints.pop(truncated_id, None)
+                return None, None
+
+            checkpoint = record.checkpoint
+            if not isinstance(checkpoint, dict):
+                # One-time migration path for pending records written by older builds.
+                result = await manager.get_pending_checkpoint_from_log(truncated_id)
+                if result is None:
+                    return None, None
+                _, _, checkpoint = result
+
+            resolved_routing = dict(routing or {})
+            resolved_routing.update(
+                {
+                    "session_key": manager.session_key,
+                    "chat_id": manager.chat_id,
+                    "user_id": manager.user_id,
+                    "thread_id": manager.thread_id,
+                    "agent_name": record.agent_name,
+                    "original_message": record.original_message,
+                    "tool_use_id": record.tool_use_id,
+                    "checkpoint_id": record.checkpoint_id,
+                    "conversation_envelope": record.envelope,
+                }
+            )
+            return resolved_routing, dict(checkpoint)
+
         if truncated_id in self._pending_checkpoints:
             routing = self._pending_checkpoints[truncated_id]
             session_manager = self._get_session_manager(
                 routing["chat_id"], routing["user_id"], routing.get("thread_id")
             )
-            result = await session_manager.get_pending_checkpoint_from_log(truncated_id)
-            if result:
-                _, _, checkpoint = result
-                return routing, checkpoint
+            found = await load_from_manager(session_manager, routing)
+            if found[1] is not None:
+                return found
 
-        # Slow path (recovery): find session by external bot message id in loaded sessions
+        # Use the callback message only to locate a session; state.json remains authoritative.
         if response_external_id:
             for sm in self._get_session_managers_dict().values():
                 if await sm.has_message_with_external_id(response_external_id):
-                    result = await sm.get_pending_checkpoint_from_log(truncated_id)
-                    if result:
-                        _, _, checkpoint = result
-                        # Build routing info from checkpoint
-                        routing = {
-                            "session_key": sm.session_key,
-                            "chat_id": sm.chat_id,
-                            "user_id": sm.user_id,
-                            "thread_id": sm.thread_id,
-                        }
+                    found = await load_from_manager(sm)
+                    if found[1] is not None:
                         logger.info(
-                            "checkpoint_recovered_from_log",
+                            "checkpoint_recovered_from_state",
                             extra={"checkpoint.id": truncated_id[:20]},
                         )
-                        return routing, checkpoint
+                        return found
 
         # Disk recovery: try loading session directly from chat/user context
         # This handles server restarts where _session_managers is empty
         if chat_id and user_id:
-            # Try without thread_id first (most common case)
-            session_manager = self._get_session_manager(chat_id, user_id, None)
-            result = await session_manager.get_pending_checkpoint_from_log(truncated_id)
-            if result:
-                _, _, checkpoint = result
-                routing = {
-                    "session_key": session_manager.session_key,
-                    "chat_id": chat_id,
-                    "user_id": user_id,
-                    "thread_id": None,
-                }
-                logger.info(
-                    "checkpoint_recovered_from_disk",
-                    extra={"checkpoint.id": truncated_id[:20]},
+            await self._hydrate_pending_checkpoints(chat_id, user_id)
+            if truncated_id in self._pending_checkpoints:
+                routing = self._pending_checkpoints[truncated_id]
+                session_manager = self._get_session_manager(
+                    routing["chat_id"], routing["user_id"], routing.get("thread_id")
                 )
-                return routing, checkpoint
+                return await load_from_manager(session_manager, routing)
 
         return None, None
 
+    async def _claim_checkpoint(
+        self,
+        routing: dict[str, Any],
+        checkpoint: dict[str, Any],
+        selected_option: str,
+    ) -> PendingCheckpointRecord | None:
+        checkpoint_id = str(checkpoint.get("checkpoint_id") or "")
+        if not checkpoint_id:
+            return None
+        manager = self._get_session_manager(
+            str(routing.get("chat_id") or ""),
+            str(routing.get("user_id") or ""),
+            routing.get("thread_id"),
+        )
+        async with self._checkpoint_claim_lock:
+            return manager.claim_pending_checkpoint(
+                checkpoint_id,
+                selected_option,
+                ttl_seconds=CHECKPOINT_TTL_SECONDS,
+            )
+
+    @staticmethod
+    def _approval_grant(
+        record: PendingCheckpointRecord, selected_option: str
+    ) -> dict[str, Any] | None:
+        checkpoint = record.checkpoint or {}
+        request = checkpoint.get("approval_request")
+        if (
+            not isinstance(request, dict)
+            or request.get("action") != "vapi_call"
+            or selected_option != VAPI_APPROVE_OPTION
+        ):
+            return None
+        return {
+            "checkpoint_id": record.checkpoint_id,
+            "approval_request": dict(request),
+        }
+
     def clear_checkpoint(self, truncated_id: str) -> None:
-        """Clear checkpoint routing info from memory cache."""
-        self._pending_checkpoints.pop(truncated_id, None)
+        """Clear a checkpoint from both the routing cache and authoritative state."""
+        routing = self._pending_checkpoints.pop(truncated_id, None)
+        if routing:
+            manager = self._get_session_manager(
+                routing["chat_id"], routing["user_id"], routing.get("thread_id")
+            )
+            manager.clear_pending_checkpoint(
+                str(routing.get("checkpoint_id") or truncated_id)
+            )
+            return
+        for manager in self._get_session_managers_dict().values():
+            record = manager.get_pending_checkpoint(truncated_id)
+            if record is not None:
+                manager.clear_pending_checkpoint(record.checkpoint_id)
+                return
 
     async def handle_text_response(self, message: IncomingMessage) -> bool:
         """Resume a pending checkpoint from an unambiguous text reply."""
+        await self._hydrate_pending_checkpoints(message.chat_id, message.user_id)
         text = (message.text or "").strip()
         if not text or not self._pending_checkpoints:
             return False
@@ -284,22 +440,22 @@ class CheckpointHandler:
             if routing.get("thread_id") != current_thread_id:
                 continue
 
-            session_manager = self._get_session_manager(
-                routing["chat_id"], routing["user_id"], routing.get("thread_id")
+            authoritative_routing, checkpoint = await self.get_checkpoint(
+                truncated_id,
+                chat_id=message.chat_id,
+                user_id=message.user_id,
             )
-            result = await session_manager.get_pending_checkpoint_from_log(truncated_id)
-            if not result:
+            if authoritative_routing is None or checkpoint is None:
                 continue
-            _, _, checkpoint = result
             selected_option = _select_checkpoint_response(
                 text, checkpoint.get("options")
             )
             if selected_option is None:
-                return False
+                continue
 
             await self._resume_checkpoint_from_text(
                 message=message,
-                routing=routing,
+                routing=authoritative_routing,
                 checkpoint=checkpoint,
                 selected_option=selected_option,
                 truncated_id=truncated_id,
@@ -319,7 +475,7 @@ class CheckpointHandler:
     ) -> None:
         from ash.agents.types import CheckpointState
         from ash.tools.base import ToolContext
-        from ash.tools.builtin.agents import UseAgentTool
+        from ash.tools.builtin.agents import CHECKPOINT_METADATA_KEY, UseAgentTool
 
         from .checkpoint_callback import ResponseFinalizer
 
@@ -329,7 +485,20 @@ class CheckpointHandler:
         session_key = routing.get("session_key", "")
         agent_name = routing.get("agent_name")
         original_message = routing.get("original_message")
+        conversation_envelope = routing.get("conversation_envelope")
         checkpoint_id = checkpoint.get("checkpoint_id")
+
+        claimed = await self._claim_checkpoint(routing, checkpoint, selected_option)
+        if claimed is None:
+            await self._provider.send(
+                OutgoingMessage(
+                    chat_id=chat_id,
+                    text="That approval was already used, is being processed, or expired.",
+                    reply_to_message_id=message.id,
+                )
+            )
+            return
+        approval_grant = self._approval_grant(claimed, selected_option)
 
         has_agent_context = agent_name and original_message and checkpoint_id
         has_tool_registry = self._tool_registry and self._tool_registry.has("use_agent")
@@ -358,6 +527,9 @@ class CheckpointHandler:
         assert self._tool_registry is not None
         use_agent_tool = self._tool_registry.get("use_agent")
         if not isinstance(use_agent_tool, UseAgentTool):
+            self._get_session_manager(
+                chat_id, user_id, thread_id
+            ).release_pending_checkpoint(claimed.checkpoint_id)
             await self._provider.send(
                 OutgoingMessage(
                     chat_id=chat_id,
@@ -388,17 +560,44 @@ class CheckpointHandler:
             "resume_checkpoint_id": checkpoint_id,
             "checkpoint_response": selected_option,
         }
+        turn_controller = (
+            self._get_turn_controller(session_key)
+            if self._get_turn_controller
+            else None
+        )
         tool_context = ToolContext(
             session_id=session_key,
             user_id=user_id,
             chat_id=chat_id,
             thread_id=thread_id,
             provider=self._provider.name,
-            metadata={"current_message_id": message.id},
+            metadata={
+                "current_message_id": message.id,
+                **(
+                    {"approval_grant": approval_grant}
+                    if approval_grant is not None
+                    else {}
+                ),
+                **(
+                    {"conversation_envelope": conversation_envelope}
+                    if isinstance(conversation_envelope, dict)
+                    else {}
+                ),
+            },
+            session_manager=self._get_session_manager(chat_id, user_id, thread_id),
             tool_overrides={progress_tool.name: progress_tool},
+            turn_controller=turn_controller,
+            cancellation_event=(
+                turn_controller.cancel_event if turn_controller else None
+            ),
         )
 
-        result = await use_agent_tool.execute(tool_input, tool_context)
+        try:
+            result = await use_agent_tool.execute(tool_input, tool_context)
+        except Exception:
+            session_manager = self._get_session_manager(chat_id, user_id, thread_id)
+            session_manager.release_pending_checkpoint(claimed.checkpoint_id)
+            raise
         self.clear_checkpoint(truncated_id)
 
         session_manager = self._get_session_manager(chat_id, user_id, thread_id)
@@ -424,6 +623,8 @@ class CheckpointHandler:
             original_message=original_message,
             store_checkpoint_fn=self.store_checkpoint,
         )
+        if CHECKPOINT_METADATA_KEY not in result.metadata:
+            session_manager.set_active_goal(None)
 
     async def handle_callback_query(self, callback_query: CallbackQuery) -> None:
         """Handle callback queries from checkpoint inline keyboards.
@@ -527,7 +728,15 @@ class CheckpointHandler:
         checkpoint_id = checkpoint.get("checkpoint_id")
         session_key = routing.get("session_key", "")
 
-        # Don't clear checkpoint yet - wait until processing succeeds
+        claimed = await self._claim_checkpoint(routing, checkpoint, selected_option)
+        if claimed is None:
+            await callback_query.answer(
+                "That approval was already used, is being processed, or expired.",
+                show_alert=True,
+            )
+            return
+        approval_grant = self._approval_grant(claimed, selected_option)
+
         await callback_query.answer(f"Selected: {selected_option}")
 
         # Store checkpoint message ID for reply threading and update the message
@@ -552,7 +761,6 @@ class CheckpointHandler:
                 "checkpoint_fallback_to_message_flow",
                 extra={"checkpoint.missing": reason, "checkpoint.id": truncated_id},
             )
-            # Clear checkpoint before fallback (fallback will create new session context)
             self.clear_checkpoint(truncated_id)
             await self._handle_checkpoint_via_message(
                 callback_query, routing, checkpoint, selected_option
@@ -574,7 +782,7 @@ class CheckpointHandler:
 
         # Restore CheckpointState to UseAgentTool's cache before calling execute
         from ash.agents.types import CheckpointState
-        from ash.tools.builtin.agents import UseAgentTool
+        from ash.tools.builtin.agents import CHECKPOINT_METADATA_KEY, UseAgentTool
 
         use_agent_tool = self._tool_registry.get("use_agent")
         if not isinstance(use_agent_tool, UseAgentTool):
@@ -586,6 +794,9 @@ class CheckpointHandler:
                     reply_to_message_id=checkpoint_message_id,
                 )
             )
+            self._get_session_manager(
+                chat_id, user_id, thread_id
+            ).release_pending_checkpoint(claimed.checkpoint_id)
             return
 
         # checkpoint_id is guaranteed to be non-None here (checked in has_agent_context above)
@@ -610,14 +821,39 @@ class CheckpointHandler:
         )
         progress_tool = ProgressMessageTool(tracker)
 
+        turn_controller = (
+            self._get_turn_controller(session_key)
+            if self._get_turn_controller
+            else None
+        )
+        if turn_controller is not None:
+            turn_controller.begin_turn()
+
         tool_context = ToolContext(
             session_id=session_key,
             user_id=user_id,
             chat_id=chat_id,
             thread_id=thread_id,
             provider=self._provider.name,
-            metadata={"current_message_id": checkpoint_message_id},
+            metadata={
+                "current_message_id": checkpoint_message_id,
+                **(
+                    {"approval_grant": approval_grant}
+                    if approval_grant is not None
+                    else {}
+                ),
+                **(
+                    {"conversation_envelope": routing["conversation_envelope"]}
+                    if isinstance(routing.get("conversation_envelope"), dict)
+                    else {}
+                ),
+            },
+            session_manager=self._get_session_manager(chat_id, user_id, thread_id),
             tool_overrides={progress_tool.name: progress_tool},
+            turn_controller=turn_controller,
+            cancellation_event=(
+                turn_controller.cancel_event if turn_controller else None
+            ),
         )
 
         tool_use_id = f"callback_{uuid.uuid4().hex[:12]}"
@@ -632,6 +868,9 @@ class CheckpointHandler:
             result = await use_agent_tool.execute(tool_input, tool_context)
         except Exception as e:
             logger.exception("Error calling use_agent tool directly")
+            self._get_session_manager(
+                chat_id, user_id, thread_id
+            ).release_pending_checkpoint(claimed.checkpoint_id)
             if tracker.thinking_msg_id:
                 try:
                     await self._provider.delete(chat_id, tracker.thinking_msg_id)
@@ -675,6 +914,8 @@ class CheckpointHandler:
             original_message=original_message,
             store_checkpoint_fn=self.store_checkpoint,
         )
+        if CHECKPOINT_METADATA_KEY not in result.metadata:
+            session_manager.set_active_goal(None)
 
         if sent_message_id and result.content.strip():
             self._log_response(result.content)

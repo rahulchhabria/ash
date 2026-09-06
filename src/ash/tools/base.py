@@ -1,5 +1,6 @@
 """Abstract tool interface."""
 
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,6 +36,10 @@ class ToolContext:
     # Per-session tool overrides (e.g., progress message tool)
     # Checked before the global registry in ToolExecutor.execute()
     tool_overrides: dict[str, Any] = field(default_factory=dict)
+    turn_controller: Any = field(default=None, repr=False, compare=False)
+    cancellation_event: asyncio.Event | None = field(
+        default=None, repr=False, compare=False
+    )
 
     @classmethod
     def from_agent_context(
@@ -55,7 +60,15 @@ class ToolContext:
             env=env or {},
             session_manager=session_manager,
             tool_use_id=tool_use_id,
+            turn_controller=ctx.turn_controller,
+            cancellation_event=(
+                ctx.turn_controller.cancel_event if ctx.turn_controller else None
+            ),
         )
+
+    @property
+    def is_cancelled(self) -> bool:
+        return bool(self.cancellation_event and self.cancellation_event.is_set())
 
     @property
     def reply_to_message_id(self) -> str | None:

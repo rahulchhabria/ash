@@ -12,7 +12,6 @@ import hashlib
 import logging
 import re
 import secrets
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -21,7 +20,9 @@ from ash.chats import ChatStateManager, ThreadIndex
 from ash.config.models import ConversationConfig
 from ash.core import SessionState
 from ash.core.agent import CompactionInfo
+from ash.core.conversation import ConversationEnvelope, ConversationTurn
 from ash.core.prompt import format_gap_duration
+from ash.core.steering import TurnController
 from ash.core.tokens import estimate_tokens
 from ash.providers.base import IncomingMessage
 from ash.sessions import SessionManager
@@ -32,7 +33,6 @@ if TYPE_CHECKING:
     from ash.store.store import Store
 
 logger = logging.getLogger("telegram")
-_DM_ACTIVE_THREAD_TIMEOUT_MINUTES = 30
 _MUTATION_CONFIRMATION_TTL_HOURS = 24
 _NEW_TOPIC_PATTERN = re.compile(r"^\s*(new topic|new thread|start over)\b", re.I)
 _CONFIRM_PATTERN = re.compile(
@@ -40,28 +40,17 @@ _CONFIRM_PATTERN = re.compile(
 )
 
 
-@dataclass
-class SessionLock:
+class SessionLock(TurnController[IncomingMessage]):
     """Per-session state for message handling."""
 
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    pending_messages: list[IncomingMessage] = field(default_factory=list)
-    steered_messages: list[IncomingMessage] = field(default_factory=list)
-
     def add_pending(self, message: IncomingMessage) -> None:
-        self.pending_messages.append(message)
+        self.enqueue(message)
 
     def take_pending(self) -> list[IncomingMessage]:
-        messages = self.pending_messages
-        self.pending_messages = []
-        if messages:
-            self.steered_messages.extend(messages)
-        return messages
+        return self.take_for_next_turn()
 
     def take_steered(self) -> list[IncomingMessage]:
-        messages = self.steered_messages
-        self.steered_messages = []
-        return messages
+        return self.take_consumed_steering()
 
 
 class SessionHandler:
@@ -224,6 +213,7 @@ class SessionHandler:
             provider=self._provider_name,
             chat_id=message.chat_id,
             user_id=message.user_id,
+            session_manager=session_manager,
         )
 
         if message.username:
@@ -264,6 +254,47 @@ class SessionHandler:
         await self._update_chat_state(message, thread_id)
 
         return session
+
+    async def build_conversation_envelope(
+        self,
+        message: IncomingMessage,
+        session: SessionState,
+    ) -> ConversationEnvelope:
+        """Build the route-independent context capsule for an incoming message."""
+
+        thread_id = message.metadata.get("thread_id")
+        session_manager = self.get_session_manager(
+            message.chat_id, message.user_id, thread_id
+        )
+        session_manager.update_last_user_intent(message.text)
+        working_state = session_manager.load_conversation_state()
+        compaction = await session_manager.get_latest_compaction(
+            session.context.branch_id
+        )
+
+        turns: list[ConversationTurn] = []
+        message_ids = session._message_ids
+        for index, item in enumerate(session.messages):
+            text = item.get_text().strip()
+            if not text or text.startswith("[Previous conversation summary]"):
+                continue
+            message_id = message_ids[index] if index < len(message_ids) else None
+            turns.append(
+                ConversationTurn(
+                    role=item.role.value,
+                    content=text[:2000],
+                    message_id=message_id or None,
+                )
+            )
+
+        return ConversationEnvelope(
+            conversation_id=session_manager.session_key,
+            current_message=message.text,
+            current_external_id=message.id,
+            recent_turns=turns[-self._conversation_config.recency_window :],
+            durable_summary=compaction.summary if compaction else None,
+            working_state=working_state,
+        )
 
     async def _load_persistent_session(
         self,
@@ -428,7 +459,9 @@ class SessionHandler:
 
         thread_index = self.get_thread_index(message.chat_id)
         chat_type = (message.metadata.get("chat_type") or "").strip().lower()
-        if chat_type == "private":
+        # Missing chat_type is common in synthetic/provider-normalized messages.
+        # Treat it like a DM so follow-ups do not silently start a fresh thread.
+        if chat_type in {"", "private"}:
             state_manager = self._get_chat_state_manager(message.chat_id)
             state = state_manager.load()
 
@@ -450,7 +483,9 @@ class SessionHandler:
                 None
                 if forced_new_topic
                 else state.get_active_thread(
-                    max_age_minutes=_DM_ACTIVE_THREAD_TIMEOUT_MINUTES
+                    max_age_minutes=(
+                        self._conversation_config.active_thread_timeout_minutes
+                    )
                 )
             )
             if active_thread_id:
@@ -598,7 +633,8 @@ class SessionHandler:
                 summary=compaction.summary,
                 tokens_before=compaction.tokens_before,
                 tokens_after=compaction.tokens_after,
-                first_kept_entry_id="",
+                first_kept_entry_id=compaction.first_kept_entry_id,
+                branch_id=branch_id,
             )
             logger.info(
                 "compaction_recorded",
@@ -612,8 +648,10 @@ class SessionHandler:
         self,
         steered: list[IncomingMessage],
         thread_id: str | None = None,
+        branch_id: str | None = None,
     ) -> None:
         """Persist steered messages with metadata indicating they were queued."""
+        last_message_id: str | None = None
         for msg in steered:
             if not msg.text:
                 continue
@@ -636,7 +674,7 @@ class SessionHandler:
             if msg.reply_to_message_id:
                 metadata["reply_to_external_id"] = msg.reply_to_message_id
 
-            await session_manager.add_user_message(
+            last_message_id = await session_manager.add_user_message(
                 content=msg.text,
                 token_count=estimate_tokens(msg.text),
                 metadata=metadata,
@@ -650,6 +688,8 @@ class SessionHandler:
                 msg.id,
                 msg.username or msg.user_id,
             )
+        if branch_id and last_message_id:
+            session_manager.update_branch_head(branch_id, last_message_id)
 
     def clear_session(self, chat_id: str, user_id: str | None = None) -> None:
         """Clear session data for a chat (optionally for a specific user).

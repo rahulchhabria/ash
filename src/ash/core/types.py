@@ -100,6 +100,7 @@ class CompactionInfo:
     tokens_before: int
     tokens_after: int
     messages_removed: int
+    first_kept_entry_id: str
 
 
 @dataclass
@@ -111,6 +112,11 @@ class AgentResponse:
     iterations: int
     compaction: CompactionInfo | None = None
     checkpoint: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class StreamReset:
+    """Signals that already emitted text belongs to an abandoned draft."""
 
 
 @dataclass
