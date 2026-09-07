@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -19,6 +20,7 @@ from ash.integrations import (
     RuntimeRPCIntegration,
     SchedulingIntegration,
     TodoIntegration,
+    VapiCallsIntegration,
 )
 from ash.skills import SkillRegistry
 from ash.tools import ToolRegistry
@@ -70,6 +72,36 @@ def test_runtime_rpc_integration_registers_config_and_logs(monkeypatch) -> None:
     assert calls["config"][1] is context.config
     assert calls["config"][2] is context.components.skill_registry
     assert calls["logs"] == (server, Path("logs"))
+
+
+@pytest.mark.asyncio
+async def test_vapi_calls_integration_owns_tools_and_recovery(
+    monkeypatch, tmp_path
+) -> None:
+    context = _context()
+    context.sessions_path = tmp_path
+    integration = VapiCallsIntegration()
+
+    await integration.setup(context)
+
+    assert context.components.tool_registry.has("vapi_outbound_call")
+    assert context.components.tool_registry.has("vapi_call_status")
+    assert context.components.tool_registry.has("vapi_end_call")
+    assert integration.outbound_tool is not None
+
+    recover_pending_summaries = Mock(return_value=0)
+    shutdown = AsyncMock()
+    monkeypatch.setattr(
+        integration.outbound_tool,
+        "recover_pending_summaries",
+        recover_pending_summaries,
+    )
+    monkeypatch.setattr(integration.outbound_tool, "shutdown", shutdown)
+
+    await integration.on_startup(context)
+    recover_pending_summaries.assert_called_once_with(tmp_path)
+    await integration.on_shutdown(context)
+    shutdown.assert_awaited_once()
 
 
 @pytest.mark.asyncio

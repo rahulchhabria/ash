@@ -87,6 +87,25 @@ def test_register_log_methods_wiring_is_constrained() -> None:
     }
 
 
+def test_vapi_tool_wiring_is_integration_owned() -> None:
+    core_agent = (ROOT / "src/ash/core/agent.py").read_text(encoding="utf-8")
+    integration = (ROOT / "src/ash/integrations/vapi_calls.py").read_text(
+        encoding="utf-8"
+    )
+
+    for tool_name in (
+        "VapiOutboundCallTool",
+        "VapiCallStatusTool",
+        "VapiEndCallTool",
+    ):
+        assert tool_name not in core_agent
+        assert tool_name in integration
+
+    assert "recover_pending_summaries" in integration
+    assert "on_startup" in integration
+    assert "shutdown" in integration
+
+
 def test_rpc_method_registrar_imports_are_constrained() -> None:
     files = _python_files_under("src/ash")
     files.append(ROOT / "evals/harness.py")

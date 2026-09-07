@@ -2,6 +2,23 @@
 
 Integration contributors extend runtime behavior through deterministic hooks.
 
+## Durable background delivery
+
+Integrations that launch user-visible background work MUST persist a pending delivery
+record before starting an in-process task. Their `on_startup` hook MUST resume pending
+records in server mode, and successful delivery MUST durably mark the record complete
+before it is excluded from later recovery. Their `on_shutdown` hook may cancel runtime
+tasks, but cancellation MUST leave undelivered records pending.
+
+Vapi call summaries follow this contract through `VapiCallsIntegration`: tool
+registration is integration-owned, call operations persist the destination, objective,
+Telegram chat, business name, and summary-delivery status, and server startup recreates
+watchers only for records whose delivery status is `pending`. An accepted call is
+persisted before the call-creation HTTP client yields or closes. Summary delivery is
+marked `pending` only when both a Telegram token and destination are available;
+otherwise it is marked `disabled`. Transient Telegram delivery failures retry with
+bounded exponential backoff and remain durable until delivery succeeds.
+
 ## Contributor Template
 
 Use `IntegrationContributor` and implement only hooks your feature needs:

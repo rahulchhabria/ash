@@ -24,6 +24,7 @@ from ash.integrations.runtime import (
 from ash.integrations.runtime_rpc import RuntimeRPCIntegration
 from ash.integrations.scheduling import SchedulingIntegration
 from ash.integrations.todo import TodoIntegration
+from ash.integrations.vapi_calls import VapiCallsIntegration
 
 __all__ = [
     "MemoryIntegration",
@@ -36,6 +37,7 @@ __all__ = [
     "ReactiveWorkflowIntegration",
     "ImageIntegration",
     "TodoIntegration",
+    "VapiCallsIntegration",
     "RuntimeRPCIntegration",
     "SchedulingIntegration",
     "compose_integrations",

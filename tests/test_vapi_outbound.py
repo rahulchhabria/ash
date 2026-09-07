@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from pydantic import SecretStr
 
@@ -191,6 +192,7 @@ async def test_vapi_outbound_creates_call(monkeypatch, tmp_path) -> None:
             return self
 
         async def __aexit__(self, *args):
+            captured["operation_before_client_exit"] = manager.get_operation("call-123")
             return None
 
         async def get(self, url, *, headers, params):
@@ -218,8 +220,9 @@ async def test_vapi_outbound_creates_call(monkeypatch, tmp_path) -> None:
         "business_name": "Example Cafe",
         "allow_ivr_navigation": True,
     }
-    context, _, _ = _approved_call_context(tmp_path, input_data)
-    result = await VapiOutboundCallTool(config).execute(input_data, context)
+    context, manager, _ = _approved_call_context(tmp_path, input_data)
+    tool = VapiOutboundCallTool(config)
+    result = await tool.execute(input_data, context)
 
     assert not result.is_error
     assert "call-123" in result.content
@@ -242,7 +245,17 @@ async def test_vapi_outbound_creates_call(monkeypatch, tmp_path) -> None:
         == "routing-only"
     )
     assert captured["preflight"][0] == "https://api.vapi.ai/call"
+    assert captured["operation_before_client_exit"] is not None
     assert "key" not in result.content
+    operation = manager.get_operation("call-123")
+    assert operation is not None
+    assert operation.metadata == {
+        "business_name": "Example Cafe",
+        "summary_chat_id": "chat",
+        "summary_delivery": "disabled",
+    }
+    assert tool._summary_tasks == {}
+    assert tool.recover_pending_summaries(tmp_path) == 0
 
 
 @pytest.mark.asyncio
@@ -790,7 +803,8 @@ async def test_vapi_summary_watcher_waits_for_analysis(monkeypatch) -> None:
 
     config = VapiConfig(enabled=True, api_key=SecretStr("key"))
     tool = VapiOutboundCallTool(config, telegram_bot_token="telegram-key")
-    tool._send_telegram_summary = AsyncMock()
+    send_summary = AsyncMock()
+    monkeypatch.setattr(tool, "_send_telegram_summary", send_summary)
 
     await tool._watch_call(
         call_id="call-123",
@@ -801,11 +815,149 @@ async def test_vapi_summary_watcher_waits_for_analysis(monkeypatch) -> None:
     )
 
     assert calls == []
-    tool._send_telegram_summary.assert_awaited_once()
-    assert (
-        "Summary: The store is open."
-        in (tool._send_telegram_summary.await_args.args[1])
+    send_summary.assert_awaited_once()
+    assert send_summary.await_args is not None
+    assert "Summary: The store is open." in send_summary.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_vapi_summary_delivery_retries_transient_telegram_failure(
+    monkeypatch, tmp_path
+) -> None:
+    manager = SessionManager(
+        provider="telegram",
+        chat_id="chat",
+        user_id="user",
+        sessions_path=tmp_path,
     )
+    await manager.ensure_session()
+    manager.record_operation(
+        OperationState(
+            kind="vapi_call",
+            operation_id="call-retry-summary",
+            status="ended",
+            idempotency_key="summary-retry-key",
+            destination="+14155550100",
+            objective="Ask about seating",
+            metadata={"summary_delivery": "pending"},
+        )
+    )
+    tool = VapiOutboundCallTool(
+        VapiConfig(enabled=True, api_key=SecretStr("key")),
+        telegram_bot_token="telegram-key",
+    )
+    send_summary = AsyncMock(
+        side_effect=[httpx.ConnectError("temporary Telegram outage"), None]
+    )
+    monkeypatch.setattr(tool, "_send_telegram_summary", send_summary)
+    monkeypatch.setattr("ash.tools.builtin.vapi.TELEGRAM_RETRY_INITIAL_SECONDS", 0)
+
+    await tool._deliver_telegram_summary(
+        call_id="call-retry-summary",
+        chat_id="chat",
+        text="No wait for a party of 12.",
+        session_manager=manager,
+    )
+
+    assert send_summary.await_count == 2
+    operation = manager.get_operation("call-retry-summary")
+    assert operation is not None
+    assert operation.metadata["summary_delivery"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_vapi_summary_watcher_recovers_after_restart(
+    monkeypatch, tmp_path
+) -> None:
+    manager = SessionManager(
+        provider="telegram",
+        chat_id="chat",
+        user_id="user",
+        thread_id="thread",
+        sessions_path=tmp_path,
+    )
+    await manager.ensure_session()
+    manager.record_operation(
+        OperationState(
+            kind="vapi_call",
+            operation_id="call-restart",
+            status="in-progress",
+            idempotency_key="stable-key",
+            destination="+14155550100",
+            objective="Ask about seating",
+            metadata={
+                "business_name": "Example Cafe",
+                "summary_chat_id": "chat",
+                "summary_delivery": "pending",
+            },
+        )
+    )
+    config = VapiConfig(enabled=True, api_key=SecretStr("key"))
+
+    monkeypatch.setattr("ash.tools.builtin.vapi.POLL_INTERVAL_SECONDS", 3600)
+    before_restart = VapiOutboundCallTool(config, telegram_bot_token="telegram-key")
+    before_restart._start_summary_watcher(
+        call_id="call-restart",
+        chat_id="chat",
+        customer_number="+14155550100",
+        business_name="Example Cafe",
+        objective="Ask about seating",
+        session_manager=manager,
+    )
+    await asyncio.sleep(0)
+    await before_restart.shutdown()
+    pending = manager.get_operation("call-restart")
+    assert pending is not None
+    assert pending.metadata["summary_delivery"] == "pending"
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return {
+                "id": "call-restart",
+                "status": "ended",
+                "endedReason": "assistant-ended-call",
+                "analysis": {
+                    "summary": "A party of 12 can be seated with no wait.",
+                    "structuredData": {"actionItems": []},
+                },
+            }
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, *, headers):
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "ash.tools.builtin.vapi.httpx.AsyncClient",
+        lambda **kwargs: FakeClient(),
+    )
+    monkeypatch.setattr("ash.tools.builtin.vapi.POLL_INTERVAL_SECONDS", 0)
+
+    after_restart = VapiOutboundCallTool(config, telegram_bot_token="telegram-key")
+    send_summary = AsyncMock()
+    monkeypatch.setattr(after_restart, "_send_telegram_summary", send_summary)
+    recovered = after_restart.recover_pending_summaries(tmp_path)
+    tasks = list(after_restart._summary_tasks.values())
+    await asyncio.gather(*tasks)
+
+    assert recovered == 1
+    send_summary.assert_awaited_once()
+    assert send_summary.await_args is not None
+    assert "party of 12 can be seated with no wait" in send_summary.await_args.args[1]
+    restored = manager.get_operation("call-restart")
+    assert restored is not None
+    assert restored.status == "ended"
+    assert restored.metadata["summary_delivery"] == "delivered"
+    assert "summary_delivered_at" in restored.metadata
+    assert after_restart.recover_pending_summaries(tmp_path) == 0
 
 
 @pytest.mark.asyncio

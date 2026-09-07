@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
 import re
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 
 from ash.config.models import VapiConfig
-from ash.sessions.types import OperationState
+from ash.sessions import OperationState, PersistedSessionState, SessionManager
 from ash.tools.base import Tool, ToolContext, ToolResult
 
 E164_RE = re.compile(r"^\+[1-9][0-9]{7,14}$")
@@ -23,11 +25,15 @@ CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x18\x1a-\x1f\x7f]")
 POLL_INTERVAL_SECONDS = 5
 POLL_TIMEOUT_SECONDS = 15 * 60
 CALL_RETRY_GUARD_SECONDS = 60 * 60
+TELEGRAM_RETRY_INITIAL_SECONDS = 5
+TELEGRAM_RETRY_MAX_SECONDS = 60
 
 logger = logging.getLogger(__name__)
-_BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
 _CALL_CREATION_LOCK = asyncio.Lock()
 ACTIVE_CALL_STATUSES = {"queued", "ringing", "in-progress", "forwarding"}
+SUMMARY_PENDING = "pending"
+SUMMARY_DELIVERED = "delivered"
+SUMMARY_DISABLED = "disabled"
 
 
 def _canonical_call_request(
@@ -127,6 +133,7 @@ class VapiOutboundCallTool(Tool):
     ) -> None:
         self._config = config
         self._telegram_bot_token = telegram_bot_token
+        self._summary_tasks: dict[str, asyncio.Task[None]] = {}
 
     @property
     def name(self) -> str:
@@ -257,6 +264,10 @@ class VapiOutboundCallTool(Tool):
         checkpoint_id, raw_approval_request = approval
         session_manager = context.session_manager
         assert session_manager is not None
+        summary_chat_id = (
+            context.chat_id or session_manager.chat_id or self._config.telegram_chat_id
+        )
+        summary_delivery_enabled = bool(self._telegram_bot_token and summary_chat_id)
 
         idempotency_key = _call_idempotency_key(
             context.session_id or "", approval_request
@@ -384,7 +395,20 @@ class VapiOutboundCallTool(Tool):
                                     idempotency_key=idempotency_key,
                                     destination=number,
                                     objective=objective,
+                                    metadata=_summary_metadata(
+                                        chat_id=summary_chat_id,
+                                        business_name=business_name,
+                                        delivery_enabled=summary_delivery_enabled,
+                                    ),
                                 )
+                            )
+                            self._start_summary_watcher(
+                                call_id=active_call_id,
+                                chat_id=summary_chat_id,
+                                customer_number=number,
+                                business_name=business_name,
+                                objective=objective,
+                                session_manager=session_manager,
                             )
                             return ToolResult.success(
                                 json.dumps(
@@ -417,6 +441,33 @@ class VapiOutboundCallTool(Tool):
                     )
                     response.raise_for_status()
                     result = response.json()
+                    if not isinstance(result, dict):
+                        return ToolResult.error("Vapi returned an unexpected response")
+                    call_id = str(result.get("id") or "").strip()
+                    if call_id:
+                        session_manager.record_operation(
+                            OperationState(
+                                kind="vapi_call",
+                                operation_id=call_id,
+                                status=str(result.get("status") or "queued"),
+                                idempotency_key=idempotency_key,
+                                destination=number,
+                                objective=objective,
+                                metadata=_summary_metadata(
+                                    chat_id=summary_chat_id,
+                                    business_name=business_name,
+                                    delivery_enabled=summary_delivery_enabled,
+                                ),
+                            )
+                        )
+                        self._start_summary_watcher(
+                            call_id=call_id,
+                            chat_id=summary_chat_id,
+                            customer_number=number,
+                            business_name=variables["ash_business_name"],
+                            objective=objective,
+                            session_manager=session_manager,
+                        )
         except httpx.HTTPStatusError as exc:
             detail = exc.response.text[:500]
             return ToolResult.error(
@@ -424,30 +475,6 @@ class VapiOutboundCallTool(Tool):
             )
         except (httpx.HTTPError, ValueError) as exc:
             return ToolResult.error(f"Vapi call creation failed: {exc}")
-        if not isinstance(result, dict):
-            return ToolResult.error("Vapi returned an unexpected response")
-        call_id = str(result.get("id") or "").strip()
-        if call_id:
-            if session_manager is not None:
-                session_manager.record_operation(
-                    OperationState(
-                        kind="vapi_call",
-                        operation_id=call_id,
-                        status=str(result.get("status") or "queued"),
-                        idempotency_key=idempotency_key,
-                        destination=number,
-                        objective=objective,
-                        metadata={"business_name": business_name},
-                    )
-                )
-            self._start_summary_watcher(
-                call_id=call_id,
-                chat_id=context.chat_id or self._config.telegram_chat_id,
-                customer_number=number,
-                business_name=variables["ash_business_name"],
-                objective=objective,
-                session_manager=session_manager,
-            )
         summary = {
             "call_id": call_id or None,
             "status": result.get("status") or "queued",
@@ -455,9 +482,7 @@ class VapiOutboundCallTool(Tool):
             "ivr_navigation": allow_ivr_navigation,
             "summary_delivery": (
                 "telegram"
-                if call_id
-                and self._telegram_bot_token
-                and (context.chat_id or self._config.telegram_chat_id)
+                if call_id and self._telegram_bot_token and summary_chat_id
                 else None
             ),
         }
@@ -472,13 +497,16 @@ class VapiOutboundCallTool(Tool):
         business_name: str,
         objective: str,
         session_manager: Any = None,
-    ) -> None:
+    ) -> bool:
         if not self._telegram_bot_token or not chat_id:
             logger.warning(
                 "vapi_summary_delivery_disabled",
                 extra={"vapi.call_id": call_id},
             )
-            return
+            return False
+        existing = self._summary_tasks.get(call_id)
+        if existing is not None and not existing.done():
+            return False
         task = asyncio.create_task(
             self._watch_call(
                 call_id=call_id,
@@ -490,8 +518,91 @@ class VapiOutboundCallTool(Tool):
             ),
             name=f"vapi-summary:{call_id}",
         )
-        _BACKGROUND_TASKS.add(task)
-        task.add_done_callback(_BACKGROUND_TASKS.discard)
+        self._summary_tasks[call_id] = task
+        task.add_done_callback(
+            lambda completed, call_id=call_id: self._discard_summary_task(
+                call_id, completed
+            )
+        )
+        return True
+
+    def _discard_summary_task(
+        self, call_id: str, completed: asyncio.Task[None]
+    ) -> None:
+        if self._summary_tasks.get(call_id) is completed:
+            self._summary_tasks.pop(call_id, None)
+
+    def recover_pending_summaries(self, sessions_path: Path) -> int:
+        """Resume persisted Telegram summary deliveries after a process restart."""
+        if not self._config.enabled or not sessions_path.exists():
+            return 0
+
+        recovered = 0
+        for state_path in sorted(sessions_path.glob("*/state.json")):
+            try:
+                state = PersistedSessionState.model_validate_json(
+                    state_path.read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError):
+                logger.warning(
+                    "vapi_summary_recovery_state_failed",
+                    extra={"file.path": str(state_path)},
+                    exc_info=True,
+                )
+                continue
+            if state.provider != "telegram":
+                continue
+            manager = SessionManager(
+                provider=state.provider,
+                chat_id=state.chat_id,
+                user_id=state.user_id,
+                thread_id=state.thread_id,
+                sessions_path=sessions_path,
+            )
+            if manager.state_path != state_path:
+                logger.warning(
+                    "vapi_summary_recovery_session_mismatch",
+                    extra={"file.path": str(state_path)},
+                )
+                continue
+            for operation in state.conversation.operations:
+                metadata = operation.metadata
+                if (
+                    operation.kind != "vapi_call"
+                    or metadata.get("summary_delivery") != SUMMARY_PENDING
+                ):
+                    continue
+                chat_id = str(metadata.get("summary_chat_id") or state.chat_id or "")
+                customer_number = str(operation.destination or "")
+                if not chat_id or not customer_number:
+                    logger.warning(
+                        "vapi_summary_recovery_metadata_missing",
+                        extra={"vapi.call_id": operation.operation_id},
+                    )
+                    continue
+                started = self._start_summary_watcher(
+                    call_id=operation.operation_id,
+                    chat_id=chat_id,
+                    customer_number=customer_number,
+                    business_name=str(metadata.get("business_name") or ""),
+                    objective=str(operation.objective or ""),
+                    session_manager=manager,
+                )
+                if started:
+                    recovered += 1
+
+        logger.info("vapi_summary_recovery_complete", extra={"count": recovered})
+        return recovered
+
+    async def shutdown(self) -> None:
+        """Cancel runtime watchers while leaving their durable work pending."""
+        tasks = list(self._summary_tasks.values())
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._summary_tasks.clear()
 
     async def _watch_call(
         self,
@@ -511,6 +622,11 @@ class VapiOutboundCallTool(Tool):
         headers = {"Authorization": f"Bearer {api_key.get_secret_value()}"}
         call_url = f"{self._config.base_url.rstrip('/')}/call/{call_id}"
         analysis_waits = 0
+        summary_text = (
+            f"Call update: {business_name or customer_number}\n\n"
+            "I couldn't retrieve the final call summary within 15 minutes. "
+            f"Call ID: {call_id}"
+        )
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 while asyncio.get_running_loop().time() < deadline:
@@ -552,17 +668,14 @@ class VapiOutboundCallTool(Tool):
                     if not analysis_ready and analysis_waits < 6:
                         analysis_waits += 1
                         continue
-                    await self._send_telegram_summary(
-                        chat_id,
-                        _render_call_summary(
-                            call,
-                            call_id=call_id,
-                            customer_number=customer_number,
-                            business_name=business_name,
-                            objective=objective,
-                        ),
+                    summary_text = _render_call_summary(
+                        call,
+                        call_id=call_id,
+                        customer_number=customer_number,
+                        business_name=business_name,
+                        objective=objective,
                     )
-                    return
+                    break
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -571,12 +684,41 @@ class VapiOutboundCallTool(Tool):
             )
             return
 
-        await self._send_telegram_summary(
-            chat_id,
-            f"Call update: {business_name or customer_number}\n\n"
-            "I couldn't retrieve the final call summary within 15 minutes. "
-            f"Call ID: {call_id}",
+        await self._deliver_telegram_summary(
+            call_id=call_id,
+            chat_id=chat_id,
+            text=summary_text,
+            session_manager=session_manager,
         )
+
+    async def _deliver_telegram_summary(
+        self,
+        *,
+        call_id: str,
+        chat_id: str,
+        text: str,
+        session_manager: Any,
+    ) -> None:
+        retry_delay = TELEGRAM_RETRY_INITIAL_SECONDS
+        while True:
+            try:
+                await self._send_telegram_summary(chat_id, text)
+            except asyncio.CancelledError:
+                raise
+            except httpx.HTTPError:
+                logger.warning(
+                    "vapi_summary_delivery_failed",
+                    extra={
+                        "vapi.call_id": call_id,
+                        "retry.delay_seconds": retry_delay,
+                    },
+                    exc_info=True,
+                )
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, TELEGRAM_RETRY_MAX_SECONDS)
+                continue
+            _mark_summary_delivered(session_manager, call_id)
+            return
 
     async def _send_telegram_summary(self, chat_id: str, text: str) -> None:
         assert self._telegram_bot_token is not None
@@ -584,6 +726,32 @@ class VapiOutboundCallTool(Tool):
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(url, json={"chat_id": chat_id, "text": text})
             response.raise_for_status()
+
+
+def _summary_metadata(
+    *,
+    chat_id: str | None,
+    business_name: str,
+    delivery_enabled: bool,
+) -> dict[str, Any]:
+    return {
+        "business_name": business_name,
+        "summary_chat_id": chat_id or "",
+        "summary_delivery": SUMMARY_PENDING if delivery_enabled else SUMMARY_DISABLED,
+    }
+
+
+def _mark_summary_delivered(session_manager: Any, call_id: str) -> None:
+    if session_manager is None:
+        return
+    session_manager.update_operation_status(
+        call_id,
+        "ended",
+        metadata={
+            "summary_delivery": SUMMARY_DELIVERED,
+            "summary_delivered_at": datetime.now(UTC).isoformat(),
+        },
+    )
 
 
 class VapiCallStatusTool(Tool):

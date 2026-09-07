@@ -19,6 +19,7 @@ from ash.integrations.runtime import IntegrationMode
 from ash.integrations.runtime_rpc import RuntimeRPCIntegration
 from ash.integrations.scheduling import SchedulingIntegration
 from ash.integrations.todo import TodoIntegration
+from ash.integrations.vapi_calls import VapiCallsIntegration
 
 if TYPE_CHECKING:
     from ash.agents import AgentExecutor
@@ -48,6 +49,7 @@ def _create_chat_integrations(
     if include_browser:
         contributors.append(BrowserIntegration())
     contributors.append(CapabilitiesIntegration())
+    contributors.append(VapiCallsIntegration())
     contributors.append(ConduitIntegration())
     contributors.append(DeepAgentsIntegration())
     if include_todo:
@@ -75,6 +77,7 @@ def _create_eval_integrations(
     if include_browser:
         contributors.append(BrowserIntegration())
     contributors.append(CapabilitiesIntegration())
+    contributors.append(VapiCallsIntegration())
     contributors.append(ConduitIntegration())
     contributors.append(DeepAgentsIntegration())
     if include_todo:
@@ -119,6 +122,7 @@ def _create_serve_integrations(
     if include_browser:
         contributors.append(BrowserIntegration())
     contributors.append(CapabilitiesIntegration())
+    contributors.append(VapiCallsIntegration())
     contributors.append(ConduitIntegration())
     contributors.append(DeepAgentsIntegration())
     if include_todo:
