@@ -550,6 +550,7 @@ class SessionsConfig(BaseModel):
 class ParallelSearchConfig(BaseModel):
     """Configuration for Parallel Search API."""
 
+    enabled: bool = True
     api_key: SecretStr | None = None
 
 

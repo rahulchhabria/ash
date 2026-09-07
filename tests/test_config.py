@@ -13,6 +13,7 @@ from ash.config.models import (
     EmbeddingsConfig,
     MemoryConfig,
     ModelConfig,
+    ParallelSearchConfig,
     ProviderConfig,
     SandboxConfig,
     ServerConfig,
@@ -20,6 +21,14 @@ from ash.config.models import (
     TelegramConfig,
     TodoConfig,
 )
+
+
+class TestParallelSearchConfig:
+    def test_enabled_by_default(self):
+        assert ParallelSearchConfig().enabled is True
+
+    def test_can_be_disabled(self):
+        assert ParallelSearchConfig(enabled=False).enabled is False
 
 
 class TestTelegramConfig:

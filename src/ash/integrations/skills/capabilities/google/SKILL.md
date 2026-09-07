@@ -1,6 +1,6 @@
 ---
 name: google
-description: "Manage Gmail and Google Calendar with capability-backed auth and operations. Use when asked to check inbox, summarize emails, give a day at a glance, send an email, review calendar events, or schedule meetings."
+description: "Manage Gmail and Google Calendar with capability-backed auth and operations. Use when asked to check inbox, summarize emails, give a day at a glance, send an email, review calendar events, or schedule meetings. Never use for Google Search, public web lookups, restaurants, or reservation discovery."
 opt_in: true
 sensitive: true
 access:
@@ -23,6 +23,9 @@ input_schema:
 ---
 
 Manage Gmail and Google Calendar through host-managed capabilities.
+
+This skill is not a Google Search or general web-browsing tool. Do not invoke it
+for public web lookups, restaurant research, or reservation discovery.
 
 Use progressive disclosure:
 

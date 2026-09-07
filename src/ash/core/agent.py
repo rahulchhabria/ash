@@ -1554,7 +1554,11 @@ async def create_agent(
             WebFetchTool(executor=shared_executor, cache=fetch_cache)
         )
 
-    if config.parallel_search and config.parallel_search.api_key:
+    if (
+        config.parallel_search
+        and config.parallel_search.enabled
+        and config.parallel_search.api_key
+    ):
         search_cache = SearchCache(maxsize=100, ttl=900)
         tool_registry.register(
             WebSearchTool(
