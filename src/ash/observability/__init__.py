@@ -127,12 +127,14 @@ def _before_send_log(log: Any, _hint: Any) -> Any:
 
 try:
     import sentry_sdk
+    from sentry_sdk.integrations.anthropic import AnthropicIntegration
     from sentry_sdk.integrations.asyncio import (
         AsyncioIntegration,
     )
     from sentry_sdk.integrations.logging import (
         LoggingIntegration,
     )
+    from sentry_sdk.integrations.openai import OpenAIIntegration
 
     SENTRY_AVAILABLE = True
 except ImportError:
@@ -155,6 +157,11 @@ def init_sentry(config: "SentryConfig", server_mode: bool = False) -> bool:
 
     integrations: list[Any] = [
         AsyncioIntegration(),
+        # Ash calls the provider SDKs directly, but the optional LangChain
+        # integration auto-disables these integrations to avoid duplicates.
+        # Explicit registration keeps primary-agent LLM calls instrumented.
+        AnthropicIntegration(),
+        OpenAIIntegration(),
         LoggingIntegration(
             level=logging.INFO,  # Capture INFO+ as breadcrumbs
             event_level=logging.ERROR,  # Create events for ERROR+

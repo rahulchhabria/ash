@@ -19,12 +19,22 @@ def test_init_sentry_enables_sentry_logs(monkeypatch) -> None:
     class FakeAsyncioIntegration:
         pass
 
+    class FakeAnthropicIntegration:
+        pass
+
+    class FakeOpenAIIntegration:
+        pass
+
     def fake_init(**kwargs) -> None:  # noqa: ANN001
         calls["init"] = kwargs
 
     monkeypatch.setattr(observability, "SENTRY_AVAILABLE", True)
     monkeypatch.setattr(observability, "LoggingIntegration", FakeLoggingIntegration)
     monkeypatch.setattr(observability, "AsyncioIntegration", FakeAsyncioIntegration)
+    monkeypatch.setattr(
+        observability, "AnthropicIntegration", FakeAnthropicIntegration
+    )
+    monkeypatch.setattr(observability, "OpenAIIntegration", FakeOpenAIIntegration)
     monkeypatch.setattr(observability.sentry_sdk, "init", fake_init)
 
     initialized = observability.init_sentry(
@@ -40,6 +50,9 @@ def test_init_sentry_enables_sentry_logs(monkeypatch) -> None:
         "event_level": logging.ERROR,
         "sentry_logs_level": logging.INFO,
     }
+    integrations = calls["init"]["integrations"]
+    assert any(isinstance(item, FakeAnthropicIntegration) for item in integrations)
+    assert any(isinstance(item, FakeOpenAIIntegration) for item in integrations)
     assert calls["init"]["enable_logs"] is True
     assert calls["init"]["stream_gen_ai_spans"] is True
     assert calls["init"]["before_send"] is observability._before_send
