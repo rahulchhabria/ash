@@ -25,3 +25,8 @@ class PioneerProvider(OpenAIProvider):
             default_headers=headers,
             provider_name=provider_name,
         )
+
+    @property
+    def supports_hosted_openai_tools(self) -> bool:
+        """Pioneer is OpenAI-compatible but does not expose OpenAI hosted tools."""
+        return False

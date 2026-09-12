@@ -215,6 +215,11 @@ class Agent:
         self._message_postprocess_hooks = tuple(message_postprocess_hooks or [])
         self._tool_output_trust_policy = self._config.tool_output_trust_policy
 
+    @property
+    def supports_hosted_openai_tools(self) -> bool:
+        """Whether the active LLM accepts OpenAI Responses hosted tools."""
+        return self._llm.supports_hosted_openai_tools
+
     def install_integration_hooks(
         self,
         *,
@@ -1483,12 +1488,9 @@ async def create_agent(
         RememberTool,
         RepoTool,
         SearchMemoriesTool,
-        WebFetchTool,
-        WebSearchTool,
     )
     from ash.tools.builtin.agents import UseAgentTool
     from ash.tools.builtin.files import ReadFileTool, WriteFileTool
-    from ash.tools.builtin.search_cache import SearchCache
     from ash.tools.builtin.skills import UseSkillTool
     from ash.tools.trust import ToolOutputTrustPolicy
 
@@ -1532,38 +1534,11 @@ async def create_agent(
     tool_registry.register(AshTriageDeepAgentsTool())
     tool_registry.register(
         HostedOpenAITool(
-            "openai_web_search",
-            "Use OpenAI hosted web search when the active provider supports it.",
-            {"type": "web_search_preview", "search_context_size": "medium"},
-        )
-    )
-    tool_registry.register(
-        HostedOpenAITool(
             "openai_file_search",
             "Use OpenAI hosted file search when vector stores are configured.",
             {"type": "file_search", "vector_store_ids": []},
         )
     )
-
-    if config.sandbox.network_mode != "none":
-        fetch_cache = SearchCache(maxsize=50, ttl=1800)
-        tool_registry.register(
-            WebFetchTool(executor=shared_executor, cache=fetch_cache)
-        )
-
-    if (
-        config.parallel_search
-        and config.parallel_search.enabled
-        and config.parallel_search.api_key
-    ):
-        search_cache = SearchCache(maxsize=100, ttl=900)
-        tool_registry.register(
-            WebSearchTool(
-                api_key=config.parallel_search.api_key.get_secret_value(),
-                executor=shared_executor,
-                cache=search_cache,
-            )
-        )
 
     # Memory subsystem boundary: delegate store/extractor wiring to memory runtime.
     memory_runtime = await initialize_memory_runtime(
@@ -1605,7 +1580,7 @@ async def create_agent(
     logger.info("tools_registered", extra={"count": len(tool_registry)})
 
     agent_registry = AgentRegistry()
-    register_builtin_agents(agent_registry, config=config)
+    register_builtin_agents(agent_registry, config=config, tool_executor=tool_executor)
     logger.info("agents_registered", extra={"count": len(agent_registry)})
 
     runtime = RuntimeInfo.from_environment(

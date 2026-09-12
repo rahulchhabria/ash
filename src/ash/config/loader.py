@@ -16,15 +16,21 @@ ENV_VAR_MAPPINGS = {
     "pioneer": ("api_key", "PIONEER_API_KEY"),
     "telegram": ("bot_token", "TELEGRAM_BOT_TOKEN"),
     "parallel_search": ("api_key", "PARALLEL_API_KEY"),
+    "exa_search": ("api_key", "EXA_API_KEY"),
+    "google_places": ("api_key", "GOOGLE_MAPS_API_KEY"),
     "sentry": ("dsn", "SENTRY_DSN"),
     "browser.kernel": ("api_key", "KERNEL_API_KEY"),
     "vapi": ("webhook_secret", "VAPI_WEBHOOK_SECRET"),
     "event_router": ("bearer_token", "ASH_EVENT_ROUTER_TOKEN"),
 }
+ENV_AUTO_SECTIONS = {"parallel_search", "google_places"}
 
 
 def _resolve_env_secrets(config: dict[str, Any]) -> dict[str, Any]:
     for section_name, (key, env_var) in ENV_VAR_MAPPINGS.items():
+        value = os.environ.get(env_var)
+        if value and section_name in ENV_AUTO_SECTIONS:
+            config.setdefault(section_name, {})
         section: dict[str, Any] | None = config
         for part in section_name.split("."):
             if not isinstance(section, dict):
@@ -32,7 +38,7 @@ def _resolve_env_secrets(config: dict[str, Any]) -> dict[str, Any]:
                 break
             section = section.get(part)
         if section is not None and isinstance(section, dict):
-            if section.get(key) is None and (value := os.environ.get(env_var)):
+            if section.get(key) is None and value:
                 section[key] = SecretStr(value)
 
     vapi = config.get("vapi")

@@ -8,7 +8,14 @@ from urllib.parse import urlparse
 
 from ash.tools.base import ToolResult
 
-_WEB_SOURCE_TOOLS = {"web_search", "web_fetch", "browser"}
+_WEB_SOURCE_TOOLS = {
+    "openai_web_search",
+    "web_search",
+    "exa_search",
+    "google_places",
+    "web_fetch",
+    "browser",
+}
 
 
 def _normalize_domain(value: str) -> str | None:
@@ -99,7 +106,7 @@ def extract_domains(
     tool_input: dict[str, object],
     result: ToolResult,
 ) -> list[str]:
-    if tool_name == "web_search":
+    if tool_name in {"web_search", "exa_search", "google_places"}:
         return _domains_from_web_search(result)
     if tool_name == "web_fetch":
         return _domains_from_web_fetch(result, tool_input)

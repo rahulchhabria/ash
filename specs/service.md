@@ -14,7 +14,8 @@ Files: src/ash/service/manager.py, src/ash/service/backends/generic.py, src/ash/
 - Support launchd user agents on macOS (~/Library/LaunchAgents/)
 - Provide fallback daemonization for unsupported systems
 - Handle SIGTERM for graceful shutdown
-- Store PID file in $ASH_HOME/run/ash.pid
+- Store PID and process start time on separate lines in $ASH_HOME/run/ash.pid
+- Health diagnostics MUST recognize the service PID-file format and probe the PID
 - Write logs to $ASH_HOME/logs/service.log (non-journald backends)
 - Auto-detect the best backend for the current system
 

@@ -995,14 +995,17 @@ class TestSystemPromptBuilder:
 
         prompt = prompt_builder.build(PromptContext(), mode=PromptMode.FULL)
         assert "Core Principles" in prompt
+        assert "After a delegated agent or skill fails, recover" in prompt
         assert "Available Tools" in prompt
         assert "Tool Call Style" in prompt
         assert "Sandbox" in prompt
         assert "Web/Search Routing" in prompt
-        assert "`web_search` (Parallel) first" in prompt
+        assert "first available backend" in prompt
+        assert "use `google_places` first when configured" in prompt
         assert "including DNS, timeout, quota, billing, HTTP 402/429" in prompt
         assert (
-            "Do not open a browser merely because one search backend failed" in prompt
+            "Use `browser` only for interactive, authenticated, or highly dynamic pages"
+            in prompt
         )
         assert "kernel HTTP fails with an access/payment error" in prompt
         assert "test assistant" in prompt.lower()

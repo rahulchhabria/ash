@@ -230,6 +230,9 @@ async def test_browser_integration_owns_manager_tool_and_warmup(monkeypatch) -> 
         async def shutdown(self) -> None:
             self.shutdown_calls += 1
 
+        async def reap_stale_sessions(self) -> None:
+            return None
+
     fake_manager = _FakeManager()
     monkeypatch.setattr(
         "ash.browser.create_browser_manager",
@@ -245,6 +248,28 @@ async def test_browser_integration_owns_manager_tool_and_warmup(monkeypatch) -> 
     assert fake_manager.warmup_calls == 1
     await integration.on_shutdown(context)
     assert fake_manager.shutdown_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_browser_retention_sweeper_recovers_after_failure() -> None:
+    completed = asyncio.Event()
+
+    class _FakeManager:
+        calls = 0
+
+        async def reap_stale_sessions(self) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("temporary failure")
+            completed.set()
+
+    task = asyncio.create_task(
+        BrowserIntegration._run_retention_sweeper(_FakeManager(), 0)
+    )
+    await asyncio.wait_for(completed.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 @pytest.mark.asyncio

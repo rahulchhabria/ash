@@ -102,6 +102,8 @@ model = "gpt-5.6"
 | `ANTHROPIC_API_KEY` | Anthropic API key |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token |
 | `PARALLEL_API_KEY` | Parallel Search API key |
+| `EXA_API_KEY` | Exa Search API key |
+| `GOOGLE_MAPS_API_KEY` | Google Places API key |
 | `KERNEL_API_KEY` | Kernel API key (when `[browser].provider = "kernel"`) |
 | `SENTRY_DSN` | Sentry DSN |
 
@@ -123,7 +125,7 @@ model = "gpt-5.6"
 | `[agents.*]` | Per-agent overrides |
 | `[skills]` / `[[skills.sources]]` / `[skills.<name>]` | Skill source and per-skill settings |
 | `[env]` | Environment variables injected into runtime |
-| `[parallel_search]`, `[sentry]`, `[server]` | Optional subsystem config |
+| `[parallel_search]`, `[exa_search]`, `[google_places]`, `[sentry]`, `[server]` | Optional subsystem config |
 
 <Aside type="tip">
   Keep at least one working model alias in `[models.default]` and run `uv run ash config validate` after edits.

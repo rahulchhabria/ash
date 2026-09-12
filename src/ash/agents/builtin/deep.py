@@ -9,15 +9,19 @@ from ash.config.paths import get_workspace_path
 from ash.deepagents.runtime import (
     AshDeepAgentsUnavailable,
     DeepAgentsRunner,
+    build_deepagents_toolset,
     build_workspace_system_prompt,
 )
+from ash.tools.base import ToolContext
+from ash.tools.trust import ToolOutputTrustPolicy
 
 
 class DeepAgent(Agent):
     """Passthrough agent that runs a LangChain DeepAgents harness."""
 
-    def __init__(self, config: object | None = None) -> None:
+    def __init__(self, config: object | None = None, tool_executor=None) -> None:
         self._ash_config = config
+        self._tool_executor = tool_executor
 
     @property
     def config(self) -> AgentConfig:
@@ -58,8 +62,34 @@ class DeepAgent(Agent):
         )
         if context.voice:
             base = f"{base}\n\n## Pigeon voice for final user-facing prose\n{context.voice}"
+        allowed_tools = list(
+            getattr(
+                deep_config,
+                "allowed_tools",
+                [
+                    "openai_web_search",
+                    "web_search",
+                    "exa_search",
+                    "google_places",
+                    "web_fetch",
+                    "read_file",
+                    "ash_triage_guidance",
+                ],
+            )
+        )
+        tool_context = ToolContext.from_agent_context(context)
+        tools = build_deepagents_toolset(
+            executor=self._tool_executor,
+            context=tool_context,
+            allowed_tools=allowed_tools,
+            model=str(requested_model),
+            trust_policy=ToolOutputTrustPolicy.from_config(
+                getattr(self._ash_config, "tool_output_trust", object())
+            ),
+        )
         runner = DeepAgentsRunner(
             model=str(requested_model),
+            tools=tools,
             system_prompt=build_workspace_system_prompt(base),
             workspace_path=get_workspace_path(),
             filesystem_mode=getattr(deep_config, "filesystem_mode", "read_only"),

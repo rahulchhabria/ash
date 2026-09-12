@@ -1,8 +1,9 @@
 # Web Search
 
-> Search the web via Parallel Search API with caching, retry, and structured output
+> Search the web through hosted OpenAI search with optional Exa and Parallel fallbacks
 
-Files: src/ash/tools/builtin/web_search.py, src/ash/tools/builtin/search_types.py,
+Files: src/ash/integrations/search.py, src/ash/tools/builtin/web_search.py,
+       src/ash/tools/builtin/exa_search.py, src/ash/tools/builtin/search_types.py,
        src/ash/tools/builtin/search_cache.py, src/ash/tools/retry.py
 
 ## Requirements
@@ -22,8 +23,19 @@ Files: src/ash/tools/builtin/web_search.py, src/ash/tools/builtin/search_types.p
 - Handle HTTP errors gracefully
 - Handle timeout (30s default)
 - Respect sandbox proxy settings when configured
-- Direct agents to hosted `openai_web_search` when Parallel is unavailable for any
-  reason, including DNS, timeout, quota, billing, and provider failures
+- Register and prefer hosted `openai_web_search` only when the active provider
+  supports OpenAI Responses hosted tools; otherwise start with the first configured
+  non-hosted fallback
+- Register search and fetch tools through `SearchIntegration`, not the core harness
+- Prefer hosted `openai_web_search` for ordinary public lookups
+- Prefer Parallel `web_search` before experimental `exa_search` when both optional
+  fallbacks are configured
+- Prevent the Gmail/Calendar `google` skill from accepting public-search tasks
+- Give DeepAgents executable discovery tools from the configured allowlist and
+  sanitize non-hosted tool output before returning it to the DeepAgents model
+- Preserve hosted OpenAI URL citations in complete and streaming responses
+- Use dedicated bridge-network executors for Exa, Parallel, Places, and web fetch;
+  never reuse the general no-network sandbox executor
 
 ### SHOULD
 
@@ -96,9 +108,18 @@ class WebSearchTool(Tool):
 ```toml
 [parallel_search]
 api_key = "..."  # or PARALLEL_API_KEY env var
+
+[exa_search]
+enabled = true
+api_key = "..."  # or EXA_API_KEY env var
 ```
 
 The general sandbox may remain at `network_mode = "none"`.
+
+Provider comparisons use `scripts/benchmark_search_providers.py` with the fixed
+query set in `benchmarks/search_queries.json`. A comparison records success rate,
+expected-domain recall, result count, and median latency; provider changes MUST be
+based on this repeatable benchmark rather than a single anecdotal query.
 
 ## Behaviors
 | Input | Output | Notes |
@@ -122,9 +143,10 @@ The general sandbox may remain at `network_mode = "none"`.
 | Timeout after retries | ToolResult.error("Search request timed out after 3 attempts") |
 | No results | ToolResult.success with result_count: 0 |
 
-Search-provider errors preserve the actual failure and include a hosted-search
-fallback hint. A browser is not the immediate fallback for ordinary public
-lookups; agents should try `openai_web_search` first.
+Search-provider errors preserve the actual failure. A browser is not the immediate
+fallback for ordinary public lookups; agents should try another configured search
+backend first. Hosted OpenAI search results are processed by the OpenAI Responses
+service; Ash's trust envelope applies to non-hosted callable search results.
 
 ## Verification
 

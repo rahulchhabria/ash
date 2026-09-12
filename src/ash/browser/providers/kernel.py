@@ -44,6 +44,9 @@ class KernelBrowserProvider:
         api_key: str | None,
         base_url: str,
         project_id: str | None,
+        headless: bool = True,
+        stealth: bool = True,
+        session_timeout_seconds: int = 300,
     ) -> None:
         self._api_key = (api_key or "").strip()
         normalized_base_url = base_url.rstrip("/")
@@ -59,6 +62,9 @@ class KernelBrowserProvider:
             raise ValueError("kernel_base_url_must_be_https_or_loopback")
         self._base_url = normalized_base_url
         self._project_id = project_id
+        self._headless = headless
+        self._stealth = stealth
+        self._session_timeout_seconds = session_timeout_seconds
         self._runtimes: dict[str, _KernelRuntime] = {}
         self._runtime_lock = asyncio.Lock()
 
@@ -154,9 +160,9 @@ class KernelBrowserProvider:
     ) -> ProviderStartResult:
         _ = (session_id, scope_key)
         payload: dict[str, Any] = {
-            "headless": False,
-            "stealth": True,
-            "timeout_seconds": 900,
+            "headless": self._headless,
+            "stealth": self._stealth,
+            "timeout_seconds": self._session_timeout_seconds,
         }
         if profile_name:
             payload["profile"] = {"name": profile_name, "save_changes": True}
@@ -189,6 +195,8 @@ class KernelBrowserProvider:
             metadata={
                 "engine": "playwright",
                 "remote": True,
+                "headless": self._headless,
+                "timeout_seconds": self._session_timeout_seconds,
                 "live_view_available": bool(created.get("browser_live_view_url")),
             },
         )
@@ -208,8 +216,10 @@ class KernelBrowserProvider:
                 "DELETE",
                 f"/browsers/{provider_session_id}",
             )
-        except Exception:
-            return
+        except ValueError as exc:
+            if str(exc).startswith("kernel_http_404:"):
+                return
+            raise
 
     async def shutdown(self) -> None:
         for session_id in list(self._runtimes):

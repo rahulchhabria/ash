@@ -21,7 +21,9 @@ from ash.tools.builtin.deepagents import (
     DeepAgentsStatusTool,
     DeepResearchTool,
 )
+from ash.tools.builtin.exa_search import ExaSearchTool
 from ash.tools.builtin.files import ReadFileTool, WriteFileTool
+from ash.tools.builtin.google_places import GooglePlacesTool
 from ash.tools.builtin.memory import (
     ForgetMemoryTool,
     ListMemoriesTool,
@@ -44,11 +46,13 @@ __all__ = [
     "CodingJobTool",
     "DeepAgentsStatusTool",
     "DeepResearchTool",
+    "ExaSearchTool",
     "VapiCallStatusTool",
     "VapiEndCallTool",
     "VapiOutboundCallTool",
     "ForgetMemoryTool",
     "HostedOpenAITool",
+    "GooglePlacesTool",
     "ListMemoriesTool",
     "ReadFileTool",
     "RememberTool",

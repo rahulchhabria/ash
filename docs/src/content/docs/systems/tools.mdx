@@ -26,11 +26,16 @@ Every tool has three parts:
 
 ## Quick Start
 
-Enable web search, then run a prompt that requires tools:
+Hosted OpenAI search is the default when the active model supports it. Configure
+optional provider fallbacks or local-business lookup as needed:
 
 ```toml title="~/.ash/config.toml"
 [parallel_search]
-api_key = "..."  # Required for web_search
+enabled = true
+api_key = "..."
+
+[google_places]
+api_key = "..."
 ```
 
 ```bash
@@ -38,7 +43,8 @@ api_key = "..."  # Required for web_search
 uv run ash chat "Find the latest release notes for Python 3.13 and summarize key changes"
 ```
 
-If tool usage is healthy, Ash will call `web_search` and/or `web_fetch` before replying.
+If tool usage is healthy, Ash will call `openai_web_search`, a configured fallback,
+`google_places`, and/or `web_fetch` before replying.
 
 ## Core Toolset
 
@@ -54,15 +60,22 @@ Use for:
 
 See [Sandbox](/systems/sandbox/) for isolation and security controls.
 
-### Web Search (`web_search`)
+### Web Search (`openai_web_search`, `exa_search`, `web_search`)
 
-Searches the web via Parallel Search.
+Uses hosted OpenAI search first when the active provider supports it, then Parallel
+and optional Exa as configured fallbacks. DeepAgents receives the same allowed
+discovery tools; non-hosted results cross Ash's untrusted-output boundary.
 
 Use for:
 
 - finding current facts
 - finding official docs or release notes
 - gathering source links before answering
+
+### Local Search (`google_places`)
+
+Uses Google Places for named businesses, exact branches, phone numbers, Maps URLs,
+and current opening hours.
 
 ### Web Fetch (`web_fetch`)
 
@@ -123,8 +136,17 @@ Most tool behavior is controlled by subsystem config.
 # Workspace path used by file tools
 workspace = "~/.ash/workspace"
 
-# Enable web search tool
+# Optional non-hosted search fallbacks
 [parallel_search]
+enabled = true
+api_key = "..."
+
+[exa_search]
+enabled = false
+api_key = "..."
+
+# Authoritative local-business and opening-hours lookup
+[google_places]
 api_key = "..."
 
 # Browser tool is available when browser subsystem is enabled
@@ -148,17 +170,19 @@ uv run ash chat "Read README.md and list setup steps"
 
 If Ash can answer from existing context, it may skip tools. Ask for source-backed or file-backed output to force tool use.
 
-### `web_search` fails
+### Search fails
 
 ```bash
-# Confirm Parallel key exists in config
+# Confirm optional provider keys and enabled flags
 uv run ash config show
 
 # Run environment diagnostics
 uv run ash doctor
 ```
 
-Common fix: add a valid `[parallel_search].api_key`.
+Hosted OpenAI search requires an OpenAI model/provider. For fallback providers, add
+a valid `[exa_search].api_key` or `[parallel_search].api_key`. For local businesses,
+configure `[google_places].api_key`.
 
 ### `bash` or file tools fail
 

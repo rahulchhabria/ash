@@ -18,6 +18,15 @@ class CacheStats:
     maxsize: int
 
 
+@dataclass(frozen=True)
+class SearchCacheRecord:
+    """Formatted provider result plus metadata needed on cache hits."""
+
+    content: str
+    domains: tuple[str, ...] = ()
+    result_count: int = 0
+
+
 class SearchCache:
     """Thread-safe LRU cache with TTL for search results.
 
@@ -48,7 +57,7 @@ class SearchCache:
         """
         return re.sub(r"\s+", " ", key.strip().lower())
 
-    def get(self, key: str) -> SearchResponse | str | None:
+    def get(self, key: str) -> SearchResponse | SearchCacheRecord | str | None:
         """Get cached response.
 
         Args:
@@ -68,7 +77,7 @@ class SearchCache:
             self._misses += 1
         return result
 
-    def set(self, key: str, value: SearchResponse | str) -> None:
+    def set(self, key: str, value: SearchResponse | SearchCacheRecord | str) -> None:
         """Cache a response.
 
         Args:

@@ -18,6 +18,7 @@ from ash.integrations.reactive_workflows import ReactiveWorkflowIntegration
 from ash.integrations.runtime import IntegrationMode
 from ash.integrations.runtime_rpc import RuntimeRPCIntegration
 from ash.integrations.scheduling import SchedulingIntegration
+from ash.integrations.search import SearchIntegration
 from ash.integrations.todo import TodoIntegration
 from ash.integrations.vapi_calls import VapiCallsIntegration
 
@@ -44,6 +45,7 @@ def _create_chat_integrations(
     graph_dir: Path,
 ) -> DefaultIntegrations:
     contributors: list[IntegrationContributor] = []
+    contributors.append(SearchIntegration())
     if include_image:
         contributors.append(ImageIntegration())
     if include_browser:
@@ -72,6 +74,7 @@ def _create_eval_integrations(
 ) -> DefaultIntegrations:
     scheduling = SchedulingIntegration(graph_dir)
     contributors: list[IntegrationContributor] = [scheduling]
+    contributors.append(SearchIntegration())
     if include_image:
         contributors.append(ImageIntegration())
     if include_browser:
@@ -117,6 +120,7 @@ def _create_serve_integrations(
     )
 
     contributors: list[IntegrationContributor] = [RuntimeRPCIntegration(logs_path)]
+    contributors.append(SearchIntegration())
     if include_image:
         contributors.append(ImageIntegration())
     if include_browser:

@@ -14,13 +14,14 @@ from typing import Any
 from ash.config.paths import get_workspace_path
 from ash.deepagents.runtime import (
     AshDeepAgentsUnavailable,
-    AshToolCallableFactory,
     DeepAgentsCodeHelper,
     DeepAgentsRunner,
     LangSmithTraceHelper,
+    build_deepagents_toolset,
     build_workspace_system_prompt,
 )
 from ash.tools.base import Tool, ToolContext, ToolResult
+from ash.tools.trust import ToolOutputTrustPolicy
 
 
 class DeepResearchTool(Tool):
@@ -91,19 +92,30 @@ class DeepResearchTool(Tool):
         if extra:
             base_prompt = f"{base_prompt}\n\n## Run-specific instructions\n{extra}"
 
-        tools: list[Any] = []
         allowed_tools = list(
             getattr(
                 deep_config,
                 "allowed_tools",
-                ["web_search", "web_fetch", "read_file", "ash_triage_guidance"],
+                [
+                    "openai_web_search",
+                    "web_search",
+                    "exa_search",
+                    "google_places",
+                    "web_fetch",
+                    "read_file",
+                    "ash_triage_guidance",
+                ],
             )
         )
-        if self._tool_executor is not None:
-            factory = AshToolCallableFactory(self._tool_executor, context)
-            for tool_name in allowed_tools:
-                if tool_name in self._tool_executor.available_tools:
-                    tools.append(factory.make_async_callable(tool_name))
+        tools = build_deepagents_toolset(
+            executor=self._tool_executor,
+            context=context,
+            allowed_tools=allowed_tools,
+            model=model,
+            trust_policy=ToolOutputTrustPolicy.from_config(
+                getattr(self._config, "tool_output_trust", object())
+            ),
+        )
 
         runner = DeepAgentsRunner(
             model=model,

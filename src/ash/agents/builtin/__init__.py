@@ -16,7 +16,7 @@ __all__ = [
 ]
 
 
-def register_builtin_agents(registry, config=None) -> None:
+def register_builtin_agents(registry, config=None, tool_executor=None) -> None:
     """Register all built-in agents."""
     registry.register(TaskAgent())
     coding_model = getattr(getattr(config, "coding", None), "model", None)
@@ -24,5 +24,5 @@ def register_builtin_agents(registry, config=None) -> None:
         coding_model = None
     registry.register(CodingAgent(model_alias=coding_model))
     registry.register(ConduitAgent())
-    registry.register(DeepAgent(config=config))
+    registry.register(DeepAgent(config=config, tool_executor=tool_executor))
     registry.register(ResearchAgent(ResearchService(config=config)))

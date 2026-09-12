@@ -5,6 +5,7 @@ import logging
 import time
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 import openai
 
@@ -40,6 +41,35 @@ def _supports_custom_temperature(model: str) -> bool:
     return not model.startswith("gpt-5")
 
 
+def _annotation_value(annotation: Any, key: str) -> Any:
+    if isinstance(annotation, dict):
+        return annotation.get(key)
+    return getattr(annotation, key, None)
+
+
+def _citation_suffix(annotations: list[Any]) -> str:
+    """Render deduplicated hosted-search URL citations as Markdown sources."""
+    sources: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for annotation in annotations:
+        if _annotation_value(annotation, "type") != "url_citation":
+            continue
+        url = str(_annotation_value(annotation, "url") or "").strip()
+        if any(ord(character) < 32 or ord(character) == 127 for character in url):
+            continue
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or url in seen:
+            continue
+        title = " ".join(str(_annotation_value(annotation, "title") or url).split())
+        safe_title = title.replace("\\", "\\\\").replace("]", "\\]")
+        safe_url = url.replace("(", "%28").replace(")", "%29").replace(" ", "%20")
+        sources.append((safe_title, safe_url))
+        seen.add(url)
+    if not sources:
+        return ""
+    return "\n\nSources:\n" + "\n".join(f"- [{title}]({url})" for title, url in sources)
+
+
 class OpenAIProvider(LLMProvider):
     """OpenAI provider using the Responses API."""
 
@@ -52,6 +82,7 @@ class OpenAIProvider(LLMProvider):
         provider_name: str = "openai",
     ):
         self._provider_name = provider_name
+        self._base_url = base_url
         self._client = openai.AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
@@ -65,6 +96,13 @@ class OpenAIProvider(LLMProvider):
     @property
     def default_model(self) -> str:
         return DEFAULT_MODEL
+
+    @property
+    def supports_hosted_openai_tools(self) -> bool:
+        official_base = not self._base_url or self._base_url.rstrip("/") == (
+            "https://api.openai.com/v1"
+        )
+        return self._provider_name in {"openai", "openai-oauth"} and official_base
 
     def _convert_input(
         self, messages: list[Message]
@@ -205,21 +243,33 @@ class OpenAIProvider(LLMProvider):
         return kwargs
 
     def _parse_response(self, response: Any) -> CompletionResponse:
-        content: list[ContentBlock] = []
+        tool_content: list[ContentBlock] = []
+        text_parts: list[str] = []
+        annotations: list[Any] = []
 
         for item in response.output:
             if item.type == "message":
                 for part in item.content:
                     if part.type == "output_text":
-                        content.append(TextContent(text=part.text))
+                        text_parts.append(part.text)
+                        annotations.extend(
+                            list(getattr(part, "annotations", None) or [])
+                        )
             elif item.type == "function_call":
-                content.append(
+                tool_content.append(
                     ToolUse(
                         id=item.call_id,
                         name=item.name,
                         input=json.loads(item.arguments),
                     )
                 )
+
+        content: list[ContentBlock] = []
+        if text_parts:
+            content.append(
+                TextContent(text="".join(text_parts) + _citation_suffix(annotations))
+            )
+        content.extend(tool_content)
 
         usage = None
         if response.usage:
@@ -315,6 +365,7 @@ class OpenAIProvider(LLMProvider):
 
         current_tool_args: dict[str, str] = {}  # call_id -> accumulated arguments
         item_to_call: dict[str, str] = {}  # item_id -> call_id
+        citations: list[Any] = []
         response_stream = await self._client.responses.create(**kwargs)
 
         yield StreamChunk(type=StreamEventType.MESSAGE_START)
@@ -324,6 +375,11 @@ class OpenAIProvider(LLMProvider):
 
             if event_type == "response.output_text.delta":
                 yield StreamChunk(type=StreamEventType.TEXT_DELTA, content=event.delta)
+
+            elif event_type == "response.output_text.annotation.added":
+                annotation = getattr(event, "annotation", None)
+                if annotation is not None:
+                    citations.append(annotation)
 
             elif event_type == "response.output_item.added":
                 if event.item.type == "function_call":
@@ -356,6 +412,12 @@ class OpenAIProvider(LLMProvider):
                     )
 
             elif event_type == "response.completed":
+                suffix = _citation_suffix(citations)
+                if suffix:
+                    yield StreamChunk(
+                        type=StreamEventType.TEXT_DELTA,
+                        content=suffix,
+                    )
                 yield StreamChunk(type=StreamEventType.MESSAGE_END)
 
     async def embed(

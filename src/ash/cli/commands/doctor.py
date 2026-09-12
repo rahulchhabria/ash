@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
+import shutil
 import stat
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -22,6 +22,12 @@ from ash.config.paths import (
     get_run_path,
     get_sessions_path,
 )
+from ash.host import (
+    ASH_RUNTIME_COMMANDS,
+    OMARCHY_DESKTOP_COMMANDS,
+    HostEnvironment,
+    detect_host_environment,
+)
 from ash.images.service import _resolve_image_model
 from ash.service.runtime import read_runtime_state
 
@@ -35,15 +41,24 @@ def register(app: typer.Typer) -> None:
     """Register the top-level doctor command."""
 
     @app.command()
-    def doctor() -> None:
+    def doctor(
+        target: str | None = typer.Option(
+            None,
+            "--target",
+            help="Add destination-specific readiness checks (supported: omarchy).",
+        ),
+    ) -> None:
         """Run read-only operational health checks."""
-        result = run_doctor_checks()
+        normalized_target = target.strip().lower() if target else None
+        if normalized_target not in {None, "omarchy"}:
+            raise typer.BadParameter("supported target: omarchy", param_hint="--target")
+        result = run_doctor_checks(target=normalized_target)
         _render_doctor_report(result)
         if result.has_errors:
             raise typer.Exit(1)
 
 
-def run_doctor_checks() -> DoctorResult:
+def run_doctor_checks(target: str | None = None) -> DoctorResult:
     """Run all read-only doctor checks."""
     findings: list[DoctorFinding] = []
 
@@ -53,8 +68,273 @@ def run_doctor_checks() -> DoctorResult:
     findings.extend(_check_sessions_jsonl())
     findings.extend(_check_graph_state())
     findings.extend(_check_logs_dir())
+    if target == "omarchy":
+        findings.extend(_check_omarchy_target())
 
     return DoctorResult(findings=findings)
+
+
+def _check_omarchy_target(
+    host: HostEnvironment | None = None,
+) -> list[DoctorFinding]:
+    """Check destination prerequisites without changing the host."""
+    host = host or detect_host_environment()
+    findings: list[DoctorFinding] = []
+
+    if host.platform == "linux":
+        findings.append(DoctorFinding("ok", "omarchy.platform", "Linux host detected"))
+    else:
+        findings.append(
+            DoctorFinding(
+                "warning",
+                "omarchy.platform",
+                f"current platform is {host.platform}, not Linux",
+                "Run this check again after booting the Omarchy destination",
+            )
+        )
+
+    distro = host.distro_id or "unknown"
+    if host.is_omarchy:
+        detail = f"Omarchy host detected (distribution={distro})"
+        findings.append(DoctorFinding("ok", "omarchy.distribution", detail))
+    elif host.is_arch_family:
+        findings.append(
+            DoctorFinding(
+                "warning",
+                "omarchy.distribution",
+                f"Arch-family host detected but Omarchy was not confirmed ({distro})",
+                "Install/finish Omarchy, then rerun this check",
+            )
+        )
+    else:
+        findings.append(
+            DoctorFinding(
+                "warning",
+                "omarchy.distribution",
+                f"Omarchy/Arch not detected (distribution={distro})",
+                "Run this check again on the Omarchy destination",
+            )
+        )
+
+    repairs = {
+        "python3": "Install Python 3.12+ on the destination",
+        "uv": "Install uv on the destination",
+        "git": "Install Git with `sudo pacman -S git`",
+        "docker": "Install and start Docker, then grant the user Docker access",
+        "systemctl": "Verify systemd and the user service manager are available",
+    }
+    for command in ASH_RUNTIME_COMMANDS:
+        if host.has_command(command):
+            findings.append(
+                DoctorFinding(
+                    "ok",
+                    f"omarchy.command.{command}",
+                    f"required command available: {command}",
+                )
+            )
+        else:
+            findings.append(
+                DoctorFinding(
+                    "error",
+                    f"omarchy.command.{command}",
+                    f"required command missing: {command}",
+                    repairs[command],
+                )
+            )
+
+    if host.has_command("python3") and host.python_version is not None:
+        version = ".".join(str(value) for value in host.python_version)
+        if host.python_version < (3, 12, 0):
+            findings.append(
+                DoctorFinding(
+                    "error",
+                    "omarchy.runtime.python_version",
+                    f"Python {version} is too old; Ash requires Python 3.12+",
+                    repairs["python3"],
+                )
+            )
+        else:
+            findings.append(
+                DoctorFinding(
+                    "ok",
+                    "omarchy.runtime.python_version",
+                    f"Python runtime is compatible: {version}",
+                )
+            )
+    for command, ready, detail, repair in (
+        (
+            "docker",
+            host.docker_ready,
+            "Docker daemon is reachable by the current user",
+            repairs["docker"],
+        ),
+        (
+            "systemctl",
+            host.systemd_user_ready,
+            "systemd user manager is reachable",
+            repairs["systemctl"],
+        ),
+    ):
+        if host.has_command(command) and ready is not None:
+            findings.append(
+                DoctorFinding(
+                    "ok" if ready else "error",
+                    f"omarchy.runtime.{command}",
+                    detail if ready else f"{detail} check failed",
+                    None if ready else repair,
+                )
+            )
+
+    wayland_active = host.session_type == "wayland" and bool(host.wayland_display)
+    if wayland_active:
+        findings.append(
+            DoctorFinding(
+                "ok", "omarchy.desktop.wayland", "Wayland session environment detected"
+            )
+        )
+    else:
+        findings.append(
+            DoctorFinding(
+                "warning",
+                "omarchy.desktop.wayland",
+                "Wayland session environment not detected",
+                "Rerun from an Omarchy desktop terminal; import the graphical environment into the systemd user manager before enabling desktop capabilities",
+            )
+        )
+
+    desktop = (host.desktop or "").lower()
+    if host.has_command("hyprctl") and "hyprland" in desktop:
+        findings.append(
+            DoctorFinding("ok", "omarchy.desktop.hyprland", "Hyprland session detected")
+        )
+    else:
+        findings.append(
+            DoctorFinding(
+                "warning",
+                "omarchy.desktop.hyprland",
+                "Hyprland session was not confirmed",
+                "Rerun inside the Omarchy Hyprland session",
+            )
+        )
+
+    helper_repairs = {
+        "hyprctl": "Install/repair Hyprland before adding desktop control",
+        "wl-copy": "Install wl-clipboard for future clipboard capabilities",
+        "notify-send": "Install libnotify for future desktop notifications",
+        "grim": "Install grim for future Wayland screenshots",
+        "slurp": "Install slurp for future bounded screen-region selection",
+    }
+    for command in OMARCHY_DESKTOP_COMMANDS:
+        level = "ok" if host.has_command(command) else "warning"
+        detail = (
+            f"optional desktop helper available: {command}"
+            if level == "ok"
+            else f"optional desktop helper missing: {command}"
+        )
+        findings.append(
+            DoctorFinding(
+                level,
+                f"omarchy.desktop.command.{command}",
+                detail,
+                None if level == "ok" else helper_repairs[command],
+            )
+        )
+
+    findings.extend(_check_migration_state())
+    return findings
+
+
+def _check_migration_state() -> list[DoctorFinding]:
+    """Validate portable state boundaries and links without reading secrets."""
+    home = get_ash_home()
+    if not home.exists():
+        return []
+
+    findings = [
+        DoctorFinding(
+            "ok",
+            "omarchy.migration.ash_home",
+            f"portable state root: {home}",
+            "Stop Ash and copy this directory to the destination with permissions preserved",
+        )
+    ]
+    for name in ("config.toml", "vault"):
+        path = home / name
+        if not path.exists():
+            continue
+        try:
+            mode = stat.S_IMODE(path.stat().st_mode)
+        except OSError as exc:
+            findings.append(
+                DoctorFinding(
+                    "warning",
+                    f"omarchy.migration.permissions.{name}",
+                    f"could not inspect {name} permissions: {exc}",
+                    f"Verify owner-only permissions for {path} before copying",
+                )
+            )
+            continue
+        exposed = bool(mode & 0o077)
+        findings.append(
+            DoctorFinding(
+                "warning" if exposed else "ok",
+                f"omarchy.migration.permissions.{name}",
+                f"{name} permissions are {mode:03o}",
+                f"Restrict {path} to owner-only access before copying"
+                if exposed
+                else None,
+            )
+        )
+
+    local_skills = home / "skills.installed" / "local"
+    if local_skills.is_symlink() and not local_skills.exists():
+        findings.append(
+            DoctorFinding(
+                "warning",
+                "omarchy.migration.local_skill_links",
+                "broken local installed-skill root link: local",
+                "Reinstall or relink the local skills directory on the destination",
+            )
+        )
+        return findings
+    try:
+        broken_links = (
+            [
+                path.name
+                for path in local_skills.iterdir()
+                if path.is_symlink() and not path.exists()
+            ]
+            if local_skills.is_dir()
+            else []
+        )
+    except OSError as exc:
+        findings.append(
+            DoctorFinding(
+                "warning",
+                "omarchy.migration.local_skill_links",
+                f"could not inspect local installed-skill links: {exc}",
+                f"Verify access to {local_skills} before migrating",
+            )
+        )
+        return findings
+    if broken_links:
+        findings.append(
+            DoctorFinding(
+                "warning",
+                "omarchy.migration.local_skill_links",
+                "broken local skill links: " + ", ".join(sorted(broken_links)),
+                "Reinstall or relink these skills on the destination",
+            )
+        )
+    else:
+        findings.append(
+            DoctorFinding(
+                "ok",
+                "omarchy.migration.local_skill_links",
+                "no broken local installed-skill links",
+            )
+        )
+    return findings
 
 
 def _render_doctor_report(result: DoctorResult) -> None:
@@ -166,7 +446,9 @@ def _check_runtime_artifacts() -> list[DoctorFinding]:
         )
     else:
         try:
-            pid = int(pid_path.read_text().strip())
+            # The service PID file contains the PID followed by its start time.
+            # Doctor only needs the first line to probe the process.
+            pid = int(pid_path.read_text().splitlines()[0].strip())
             os.kill(pid, 0)
             findings.append(
                 DoctorFinding(
@@ -184,7 +466,7 @@ def _check_runtime_artifacts() -> list[DoctorFinding]:
                     repair=f"Remove {pid_path}",
                 )
             )
-        except (PermissionError, ValueError, OSError):
+        except (IndexError, PermissionError, ValueError, OSError):
             findings.append(
                 DoctorFinding(
                     level="warning",
@@ -367,53 +649,23 @@ def _check_browser_config(config: AshConfig) -> list[DoctorFinding]:
             )
 
     if browser_cfg.provider == "sandbox":
-        in_sandbox = Path("/.dockerenv").exists() or (
-            os.environ.get("ASH_BROWSER_SANDBOX_RUNTIME", "").strip().lower()
-            in {"1", "true", "yes", "on"}
-        )
-        if not in_sandbox:
+        # Browser spec: specs/browser.md. The host orchestrates a dedicated
+        # container; it should not itself be running in that container.
+        if shutil.which("docker") is None:
             findings.append(
                 DoctorFinding(
                     level="warning",
-                    check="config.browser.sandbox.runtime",
-                    detail=(
-                        "sandbox provider selected but runtime is not detected as "
-                        "sandbox/container"
-                    ),
-                    repair="Run Ash in sandbox/container runtime",
+                    check="config.browser.sandbox.container_runtime",
+                    detail="sandbox browser selected but Docker CLI is missing",
+                    repair="Install Docker and build the Ash sandbox image",
                 )
             )
-        if in_sandbox:
-            if importlib.util.find_spec("playwright") is None:
-                findings.append(
-                    DoctorFinding(
-                        level="warning",
-                        check="config.browser.sandbox.playwright",
-                        detail="sandbox browser provider requires playwright package",
-                        repair=(
-                            "Install playwright/chromium in the runtime image "
-                            "(e.g. `uv sync --all-groups` + "
-                            "`uv run playwright install chromium` during image build)"
-                        ),
-                    )
-                )
-            else:
-                findings.append(
-                    DoctorFinding(
-                        level="ok",
-                        check="config.browser.sandbox.playwright",
-                        detail="playwright package is available",
-                    )
-                )
         else:
             findings.append(
                 DoctorFinding(
                     level="ok",
-                    check="config.browser.sandbox.playwright",
-                    detail=(
-                        "host playwright check skipped; verify playwright/chromium "
-                        "are installed in sandbox image runtime"
-                    ),
+                    check="config.browser.sandbox.container_runtime",
+                    detail="Docker CLI available for dedicated browser containers",
                 )
             )
 

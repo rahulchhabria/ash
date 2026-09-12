@@ -11,6 +11,8 @@ from ash.config.models import (
     CapabilityProviderConfig,
     ConfigError,
     EmbeddingsConfig,
+    ExaSearchConfig,
+    GooglePlacesConfig,
     MemoryConfig,
     ModelConfig,
     ParallelSearchConfig,
@@ -29,6 +31,16 @@ class TestParallelSearchConfig:
 
     def test_can_be_disabled(self):
         assert ParallelSearchConfig(enabled=False).enabled is False
+
+
+class TestAlternativeSearchConfig:
+    def test_exa_is_opt_in(self):
+        assert ExaSearchConfig().enabled is False
+
+    def test_google_places_defaults(self):
+        config = GooglePlacesConfig()
+        assert config.enabled is True
+        assert config.max_results == 5
 
 
 class TestTelegramConfig:
@@ -536,6 +548,37 @@ class TestResolveEnvSecrets:
         }
         result = _resolve_env_secrets(config)
         assert result["parallel_search"]["api_key"].get_secret_value() == "parallel-key"
+
+    @pytest.mark.parametrize(
+        ("section", "variable"),
+        [
+            ("parallel_search", "PARALLEL_API_KEY"),
+            ("google_places", "GOOGLE_MAPS_API_KEY"),
+        ],
+    )
+    def test_env_key_materializes_enabled_search_section(
+        self, monkeypatch, section, variable
+    ):
+        monkeypatch.setenv(variable, "key")
+        result = _resolve_env_secrets({})
+        assert result[section]["api_key"].get_secret_value() == "key"
+
+    def test_exa_env_key_remains_opt_in(self, monkeypatch):
+        monkeypatch.setenv("EXA_API_KEY", "key")
+        result = _resolve_env_secrets({})
+        assert "exa_search" not in result
+
+    @pytest.mark.parametrize(
+        ("section", "variable", "value"),
+        [
+            ("exa_search", "EXA_API_KEY", "exa-key"),
+            ("google_places", "GOOGLE_MAPS_API_KEY", "maps-key"),
+        ],
+    )
+    def test_resolves_search_provider_keys(self, monkeypatch, section, variable, value):
+        monkeypatch.setenv(variable, value)
+        result = _resolve_env_secrets({section: {}})
+        assert result[section]["api_key"].get_secret_value() == value
 
     def test_does_not_override_existing_value(self, monkeypatch):
         from pydantic import SecretStr

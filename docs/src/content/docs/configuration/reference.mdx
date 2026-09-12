@@ -187,6 +187,7 @@ enabled = true
 provider = "sandbox"
 timeout_seconds = 30.0
 max_session_minutes = 20
+retention_sweep_seconds = 60
 artifacts_retention_days = 7
 state_dir = null
 default_viewport_width = 1280
@@ -201,6 +202,9 @@ runtime_required = true
 api_key = null
 base_url = "https://api.onkernel.com"
 project_id = null
+headless = true
+stealth = true
+session_timeout_seconds = 300
 ```
 
 | Key | Type | Default |
@@ -209,6 +213,7 @@ project_id = null
 | `provider` | `sandbox` \| `kernel` | `sandbox` |
 | `timeout_seconds` | float | `30.0` |
 | `max_session_minutes` | int | `20` |
+| `retention_sweep_seconds` | int | `60` |
 | `artifacts_retention_days` | int | `7` |
 | `state_dir` | path \| null | `null` |
 | `default_viewport_width` | int | `1280` |
@@ -219,12 +224,17 @@ project_id = null
 | `browser.kernel.api_key` | secret \| null | `null` |
 | `browser.kernel.base_url` | string | `https://api.onkernel.com` |
 | `browser.kernel.project_id` | string \| null | `null` |
+| `browser.kernel.headless` | bool | `true` |
+| `browser.kernel.stealth` | bool | `true` |
+| `browser.kernel.session_timeout_seconds` | int | `300` |
 
 For `provider = "sandbox"`, browser execution is expected in sandbox/container runtime.
 Set `browser.sandbox.runtime_required = false` only for local development/testing.
 
 For Kernel, set `provider = "kernel"` and provide `KERNEL_API_KEY`. Ash creates a
 remote browser session, connects over CDP, and deletes the session when it closes.
+Kernel sessions default to the lower-cost headless tier and a five-minute
+server-side timeout. Raise these values only for workflows that need them.
 
 Install Playwright Chromium:
 
@@ -369,7 +379,17 @@ response_allowed_chats = []
 response_blocked_chats = []
 
 [parallel_search]
+enabled = true
 api_key = "..."
+
+[exa_search]
+enabled = false
+api_key = "..."
+
+[google_places]
+enabled = true
+api_key = "..."
+max_results = 5
 
 [sentry]
 dsn = "https://..."

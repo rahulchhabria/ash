@@ -17,6 +17,7 @@ class TestOpenAIOAuthProvider:
             account_id="acct_123",
         )
         assert provider.name == "openai-oauth"
+        assert provider.supports_hosted_openai_tools
 
     def test_client_configuration(self):
         provider = OpenAIOAuthProvider(

@@ -119,7 +119,42 @@ async def test_kernel_provider_uses_current_browser_endpoint(monkeypatch) -> Non
 
     assert result.provider_session_id == "kernel-1"
     assert calls[0][0:2] == ("POST", "/browsers")
+    assert calls[0][2]["headless"] is True
     assert calls[0][2]["stealth"] is True
+    assert calls[0][2]["timeout_seconds"] == 300
+    assert result.metadata["headless"] is True
+
+
+@pytest.mark.asyncio
+async def test_kernel_provider_propagates_remote_close_failures(monkeypatch) -> None:
+    provider = KernelBrowserProvider(
+        api_key="key", base_url="https://api.onkernel.com", project_id=None
+    )
+
+    def fake_request(method, path, payload=None):
+        _ = (method, path, payload)
+        raise ValueError("kernel_http_500:failed")
+
+    monkeypatch.setattr(provider, "_blocking_request", fake_request)
+
+    with pytest.raises(ValueError, match="kernel_http_500"):
+        await provider.close_session(provider_session_id="kernel-1")
+
+
+@pytest.mark.asyncio
+async def test_kernel_provider_treats_missing_remote_session_as_closed(
+    monkeypatch,
+) -> None:
+    provider = KernelBrowserProvider(
+        api_key="key", base_url="https://api.onkernel.com", project_id=None
+    )
+
+    def fake_request(method, path, payload=None):
+        _ = (method, path, payload)
+        raise ValueError("kernel_http_404:missing")
+
+    monkeypatch.setattr(provider, "_blocking_request", fake_request)
+    await provider.close_session(provider_session_id="kernel-1")
 
 
 def test_kernel_provider_does_not_follow_authenticated_redirects() -> None:

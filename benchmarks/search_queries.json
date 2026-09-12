@@ -1,0 +1,22 @@
+[
+  {
+    "query": "Sports Basement Bryant Street San Francisco store hours",
+    "expected_domains": ["sportsbasement.com"]
+  },
+  {
+    "query": "California DMV official REAL ID requirements",
+    "expected_domains": ["dmv.ca.gov"]
+  },
+  {
+    "query": "Python asyncio TaskGroup official documentation",
+    "expected_domains": ["docs.python.org"]
+  },
+  {
+    "query": "OpenAI Responses API web search official documentation",
+    "expected_domains": ["platform.openai.com"]
+  },
+  {
+    "query": "San Francisco Recreation and Parks tennis court reservations",
+    "expected_domains": ["sfrecpark.org"]
+  }
+]

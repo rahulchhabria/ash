@@ -95,6 +95,7 @@ class AnthropicProvider(LLMProvider):
                 "input_schema": tool.input_schema,
             }
             for tool in tools
+            if tool.kind != "hosted"
         ]
 
     def _build_request_kwargs(

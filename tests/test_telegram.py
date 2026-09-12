@@ -637,6 +637,16 @@ class TestProvenanceState:
         )
         assert state.render_inline() is None
 
+    def test_collects_exa_and_places_domains(self):
+        state = ProvenanceState()
+        state.add_from_tool(
+            "exa_search", {}, ToolResult.success("ok", domains=["exa.example"])
+        )
+        state.add_from_tool(
+            "google_places", {}, ToolResult.success("ok", domains=["place.example"])
+        )
+        assert state.domains == ["exa.example", "place.example"]
+
 
 class TestTrackerProvenance:
     async def test_tracker_builds_provenance_clause(self):

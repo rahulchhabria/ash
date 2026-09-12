@@ -45,6 +45,7 @@ class BrowserManager:
         self._config = config
         self._store = store
         self._providers = providers
+        self._session_lock = asyncio.Lock()
 
     @property
     def store(self) -> BrowserStore:
@@ -151,6 +152,29 @@ class BrowserManager:
             ) from e
 
     async def execute_action(
+        self,
+        *,
+        action: str,
+        effective_user_id: str,
+        provider_name: str | None = None,
+        session_id: str | None = None,
+        session_name: str | None = None,
+        profile_name: str | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> BrowserActionResult:
+        """Serialize actions with retention so active sessions cannot be reaped."""
+        async with self._session_lock:
+            return await self._execute_action_locked(
+                action=action,
+                effective_user_id=effective_user_id,
+                provider_name=provider_name,
+                session_id=session_id,
+                session_name=session_name,
+                profile_name=profile_name,
+                params=params,
+            )
+
+    async def _execute_action_locked(
         self,
         *,
         action: str,
@@ -585,6 +609,7 @@ class BrowserManager:
             session_id=session_id,
             session_name=session_name,
             provider_name=provider_name,
+            active_only=True,
         )
         if session is None:
             return BrowserActionResult(
@@ -659,6 +684,7 @@ class BrowserManager:
             session_id=session_id,
             session_name=session_name,
             provider_name=provider_name,
+            active_only=True,
         )
         if session is None:
             return BrowserActionResult(
@@ -679,6 +705,7 @@ class BrowserManager:
                 max_chars=max(1, max_chars),
             ),
         )
+        self._touch_session(session)
 
         logger.info(
             "browser_action_succeeded",
@@ -713,6 +740,7 @@ class BrowserManager:
             session_id=session_id,
             session_name=session_name,
             provider_name=provider_name,
+            active_only=True,
         )
         if session is None:
             return BrowserActionResult(
@@ -766,6 +794,8 @@ class BrowserManager:
                 ),
             )
 
+        self._touch_session(session)
+
         logger.info(
             "browser_action_succeeded",
             extra={
@@ -796,6 +826,7 @@ class BrowserManager:
             session_id=session_id,
             session_name=session_name,
             provider_name=provider_name,
+            active_only=True,
         )
         if session is None:
             return BrowserActionResult(
@@ -813,6 +844,7 @@ class BrowserManager:
         path = self._write_artifact(
             session_id=session.id, suffix=ext, content=shot.image_bytes
         )
+        self._touch_session(session)
 
         logger.info(
             "browser_action_succeeded",
@@ -839,22 +871,28 @@ class BrowserManager:
         session_name: str | None,
         provider_name: str,
         include_archived: bool = False,
+        active_only: bool = False,
     ) -> BrowserSession | None:
         if session_id:
             session = self._store.get_session(session_id)
             if session and session.effective_user_id == effective_user_id:
                 if session.provider != provider_name:
                     return None
-                if include_archived or session.status != "archived":
+                if (include_archived or session.status != "archived") and (
+                    not active_only or session.status == "active"
+                ):
                     return session
             return None
         if session_name:
-            return self._store.get_session_by_name(
+            session = self._store.get_session_by_name(
                 name=session_name,
                 effective_user_id=effective_user_id,
                 provider=provider_name,
                 include_archived=include_archived,
             )
+            if active_only and session is not None and session.status != "active":
+                return None
+            return session
         sessions = self._store.list_sessions(
             effective_user_id=effective_user_id,
             include_archived=include_archived,
@@ -862,6 +900,8 @@ class BrowserManager:
         if not sessions:
             return None
         provider_sessions = [s for s in sessions if s.provider == provider_name]
+        if active_only:
+            provider_sessions = [s for s in provider_sessions if s.status == "active"]
         return provider_sessions[0] if provider_sessions else None
 
     async def _apply_retention_policies(self, *, effective_user_id: str) -> None:
@@ -869,7 +909,13 @@ class BrowserManager:
         await self._expire_stale_sessions(effective_user_id=effective_user_id)
         self._prune_artifacts()
 
-    async def _expire_stale_sessions(self, *, effective_user_id: str) -> None:
+    async def reap_stale_sessions(self) -> None:
+        """Sweep stale sessions across all users and prune expired artifacts."""
+        async with self._session_lock:
+            await self._expire_stale_sessions(effective_user_id=None)
+            self._prune_artifacts()
+
+    async def _expire_stale_sessions(self, *, effective_user_id: str | None) -> None:
         max_age_minutes = self._config.browser.max_session_minutes
         if max_age_minutes <= 0:
             return
@@ -885,23 +931,33 @@ class BrowserManager:
             if session.updated_at >= cutoff:
                 continue
             provider = self._providers.get(session.provider)
-            if provider is not None:
-                try:
-                    await self._await_provider_call(
-                        "session.close",
-                        provider.close_session(
-                            provider_session_id=session.provider_session_id
-                        ),
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "browser_session_close_failed",
-                        extra={
-                            "browser.session_id": session.id,
-                            "browser.provider": session.provider,
-                            "error.message": str(e),
-                        },
-                    )
+            if provider is None:
+                logger.warning(
+                    "browser_session_close_failed",
+                    extra={
+                        "browser.session_id": session.id,
+                        "browser.provider": session.provider,
+                        "error.message": "browser_provider_unavailable",
+                    },
+                )
+                continue
+            try:
+                await self._await_provider_call(
+                    "session.close",
+                    provider.close_session(
+                        provider_session_id=session.provider_session_id
+                    ),
+                )
+            except Exception as e:
+                logger.warning(
+                    "browser_session_close_failed",
+                    extra={
+                        "browser.session_id": session.id,
+                        "browser.provider": session.provider,
+                        "error.message": str(e),
+                    },
+                )
+                continue
             expired = replace(
                 session,
                 status="closed",
@@ -917,6 +973,9 @@ class BrowserManager:
                     "browser.provider": session.provider,
                 },
             )
+
+    def _touch_session(self, session: BrowserSession) -> None:
+        self._store.append_session(replace(session, updated_at=datetime.now(UTC)))
 
     def _prune_artifacts(self) -> None:
         retention_days = self._config.browser.artifacts_retention_days
@@ -1034,6 +1093,9 @@ def create_browser_manager(
             project_id=config.browser.kernel.project_id
             if config.browser.kernel
             else None,
+            headless=config.browser.kernel.headless,
+            stealth=config.browser.kernel.stealth,
+            session_timeout_seconds=config.browser.kernel.session_timeout_seconds,
         )
     return BrowserManager(config=config, store=store, providers=providers)
 

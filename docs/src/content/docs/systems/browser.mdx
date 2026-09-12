@@ -60,9 +60,12 @@ provider = "kernel"
 api_key = "${KERNEL_API_KEY}"
 base_url = "https://api.kernel.sh"
 project_id = "your-project-id"
+headless = true
+session_timeout_seconds = 300
 ```
 
-Use sandbox unless you specifically need remote execution.
+Use sandbox unless you specifically need remote execution. Kernel is configured
+headless with a bounded lease by default to limit accidental remote-browser spend.
 
 ## Operational Notes
 

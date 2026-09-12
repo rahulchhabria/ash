@@ -67,6 +67,10 @@ class OpenAIOAuthProvider(OpenAIProvider):
     def name(self) -> str:
         return "openai-oauth"
 
+    @property
+    def supports_hosted_openai_tools(self) -> bool:
+        return True
+
     # Parameters the Codex Responses API accepts.
     _CODEX_ALLOWED_PARAMS = {
         "model",

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from typing import Any
 
 from ash.core.prompt import PromptContext
@@ -17,6 +18,8 @@ from ash.core.prompt_keys import (
 from ash.core.session import SessionState
 from ash.integrations.runtime import IntegrationContext, IntegrationContributor
 
+logger = logging.getLogger(__name__)
+
 
 class BrowserIntegration(IntegrationContributor):
     """Registers browser RPC surface when browser manager is available."""
@@ -26,6 +29,7 @@ class BrowserIntegration(IntegrationContributor):
 
     def __init__(self) -> None:
         self._warmup_task: asyncio.Task[None] | None = None
+        self._retention_task: asyncio.Task[None] | None = None
 
     async def setup(self, context: IntegrationContext) -> None:
         from ash.browser import create_browser_manager
@@ -53,16 +57,22 @@ class BrowserIntegration(IntegrationContributor):
         manager = getattr(context.components, "browser_manager", None)
         if manager is None:
             return
-        if not context.config.browser.sandbox.runtime_warmup_on_start:
-            return
-        if self._warmup_task is not None and not self._warmup_task.done():
-            return
-        # Spec contract: specs/subsystems.md (Integration Hooks)
-        # Warm browser runtime asynchronously to keep startup non-blocking.
-        self._warmup_task = asyncio.create_task(
-            manager.warmup_default_provider(),
-            name="browser-warmup-default-provider",
-        )
+        if context.config.browser.sandbox.runtime_warmup_on_start:
+            if self._warmup_task is None or self._warmup_task.done():
+                # Spec contract: specs/subsystems.md (Integration Hooks)
+                # Warm browser runtime asynchronously to keep startup non-blocking.
+                self._warmup_task = asyncio.create_task(
+                    manager.warmup_default_provider(),
+                    name="browser-warmup-default-provider",
+                )
+        if self._retention_task is None or self._retention_task.done():
+            self._retention_task = asyncio.create_task(
+                self._run_retention_sweeper(
+                    manager,
+                    context.config.browser.retention_sweep_seconds,
+                ),
+                name="browser-retention-sweeper",
+            )
 
     async def on_shutdown(self, context: IntegrationContext) -> None:
         if self._warmup_task is None:
@@ -74,12 +84,29 @@ class BrowserIntegration(IntegrationContributor):
                     await self._warmup_task
             self._warmup_task = None
 
+        if self._retention_task is not None:
+            self._retention_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._retention_task
+            self._retention_task = None
+
         manager = getattr(context.components, "browser_manager", None)
         if manager is None:
             return
         shutdown = getattr(manager, "shutdown", None)
         if callable(shutdown):
             await shutdown()
+
+    @staticmethod
+    async def _run_retention_sweeper(manager: Any, interval_seconds: int) -> None:
+        while True:
+            try:
+                await manager.reap_stale_sessions()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("browser_retention_sweep_failed", exc_info=True)
+            await asyncio.sleep(interval_seconds)
 
     def augment_prompt_context(
         self,

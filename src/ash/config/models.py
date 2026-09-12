@@ -383,7 +383,10 @@ class DeepAgentsConfig(BaseModel):
     builtin_subagents: bool = True
     allowed_tools: list[str] = Field(
         default_factory=lambda: [
+            "openai_web_search",
             "web_search",
+            "exa_search",
+            "google_places",
             "web_fetch",
             "read_file",
             "ash_triage_guidance",
@@ -490,6 +493,9 @@ class BrowserKernelConfig(BaseModel):
     api_key: SecretStr | None = None
     base_url: str = "https://api.onkernel.com"
     project_id: str | None = None
+    headless: bool = True
+    stealth: bool = True
+    session_timeout_seconds: int = Field(default=300, ge=60, le=3600)
 
 
 class BrowserConfig(BaseModel):
@@ -499,6 +505,7 @@ class BrowserConfig(BaseModel):
     provider: Literal["sandbox", "kernel"] = "sandbox"
     timeout_seconds: float = 20.0
     max_session_minutes: int = 20
+    retention_sweep_seconds: int = Field(default=60, ge=10, le=300)
     artifacts_retention_days: int = 7
     state_dir: Path | None = None
     default_viewport_width: int = 1280
@@ -527,7 +534,6 @@ class CodingConfig(BaseModel):
         ]
     )
     telegram_commands_enabled: bool = True
-    hosted_openai_tools_enabled: bool = True
 
 
 class ConversationConfig(BaseModel):
@@ -552,6 +558,21 @@ class ParallelSearchConfig(BaseModel):
 
     enabled: bool = True
     api_key: SecretStr | None = None
+
+
+class ExaSearchConfig(BaseModel):
+    """Configuration for the Exa Search API."""
+
+    enabled: bool = False
+    api_key: SecretStr | None = None
+
+
+class GooglePlacesConfig(BaseModel):
+    """Configuration for Google Places local-business lookups."""
+
+    enabled: bool = True
+    api_key: SecretStr | None = None
+    max_results: int = Field(default=5, ge=1, le=20)
 
 
 class SentryConfig(BaseModel):
@@ -744,6 +765,8 @@ class AshConfig(BaseModel):
     sessions: SessionsConfig = Field(default_factory=SessionsConfig)
     embeddings: EmbeddingsConfig | None = None
     parallel_search: ParallelSearchConfig | None = None
+    exa_search: ExaSearchConfig | None = None
+    google_places: GooglePlacesConfig | None = None
     sentry: SentryConfig | None = None
     # Environment variables from [env] section
     # Loaded into session environment for skills and bash commands

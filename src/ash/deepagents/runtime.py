@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from ash.store.store import Store
     from ash.tools.base import ToolContext
     from ash.tools.executor import ToolExecutor
+    from ash.tools.trust import ToolOutputTrustPolicy
 
 
 class _AshToDeepAgentBackendAdapter:
@@ -665,15 +666,25 @@ class AshToolCallableFactory:
 
     executor: ToolExecutor
     context: ToolContext = field(default_factory=_default_tool_context)
+    trust_policy: ToolOutputTrustPolicy | None = None
 
     def make_async_callable(
         self, tool_name: str
     ) -> Callable[..., Coroutine[Any, Any, str]]:
         async def _async_tool(**kwargs: Any) -> str:
             result = await self.executor.execute(tool_name, kwargs, self.context)
-            if result.is_error:
-                return f"ERROR: {result.content}"
-            return result.content
+            from ash.tools.trust import (
+                ToolOutputTrustPolicy,
+                sanitize_tool_result_for_model,
+            )
+
+            policy = self.trust_policy or ToolOutputTrustPolicy.defaults()
+            model_content = sanitize_tool_result_for_model(
+                tool_name=tool_name,
+                result=result,
+                policy=policy,
+            ).model_content
+            return f"ERROR: {model_content}" if result.is_error else model_content
 
         _async_tool.__name__ = f"ash_{tool_name}"
         _async_tool.__doc__ = f"Invoke Ash tool '{tool_name}' with keyword arguments."
@@ -695,6 +706,50 @@ class AshToolCallableFactory:
         _tool.__name__ = f"ash_{tool_name}"
         _tool.__doc__ = f"Invoke Ash tool '{tool_name}' with keyword arguments."
         return _tool
+
+    def make_structured_tool(self, tool_name: str) -> Any:
+        """Expose an Ash tool with its real JSON schema to LangChain."""
+        from langchain_core.tools import StructuredTool
+
+        ash_tool = self.executor.get_tool(tool_name)
+        return StructuredTool.from_function(
+            coroutine=self.make_async_callable(tool_name),
+            name=tool_name,
+            description=ash_tool.description,
+            args_schema=ash_tool.input_schema,
+            infer_schema=False,
+        )
+
+
+def build_deepagents_toolset(
+    *,
+    executor: ToolExecutor | None,
+    context: ToolContext,
+    allowed_tools: Iterable[str],
+    model: str,
+    trust_policy: ToolOutputTrustPolicy | None = None,
+) -> list[Any]:
+    """Build executable discovery tools for a DeepAgents run."""
+    if executor is None:
+        return []
+
+    tools: list[Any] = []
+    allowed = tuple(allowed_tools)
+    normalized_model = DeepAgentsRunner._normalize_model(model)
+    if (
+        normalized_model.startswith("openai:")
+        and "openai_web_search" in allowed
+        and "openai_web_search" in executor.available_tools
+    ):
+        tools.append({"type": "web_search"})
+
+    factory = AshToolCallableFactory(executor, context, trust_policy)
+    for tool_name in allowed:
+        if tool_name == "openai_web_search":
+            continue
+        if tool_name in executor.available_tools:
+            tools.append(factory.make_structured_tool(tool_name))
+    return tools
 
 
 @dataclass(slots=True)

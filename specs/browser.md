@@ -19,6 +19,9 @@ It does not own:
 - `sandbox`: Browser automation MUST execute inside the sandbox/container runtime.
 - `kernel`: Remote provider adapter.
 
+The local `sandbox` provider is the cost-free default. Remote providers are an
+explicit fallback and MUST use bounded, cost-conscious session defaults.
+
 ### Sandbox Runtime Controls
 
 `[browser.sandbox]` supports:
@@ -49,6 +52,13 @@ It does not own:
 12. Dedicated runtime command execution MUST traverse an authenticated loopback bridge using short-lived signed tokens with scope/target claims (not static bearer secrets).
 13. Long-lived dedicated runtimes MUST mint bridge tokens per request (or equivalent bounded rotation) so token expiry does not break healthy sessions.
 14. Integration shutdown MUST perform best-effort browser runtime teardown so service restarts do not leave dangling dedicated browser containers.
+15. Successful page actions MUST refresh session activity timestamps.
+16. Retention MUST be swept periodically while the integration is running, not only when another browser action arrives.
+    Sweeps MUST survive individual failures and MUST be serialized with browser
+    actions so an in-flight session cannot be closed or resurrected from stale state.
+17. Kernel sessions MUST default to headless mode and a bounded server-side timeout.
+18. A failed remote close MUST remain visible and retryable; it MUST NOT be recorded as a successfully closed session.
+19. Doctor checks for the sandbox provider MUST validate the host container-runtime dependency; they MUST NOT require the Ash host process itself to run inside a container or require Playwright in the host environment.
 
 ## Integration Contract
 

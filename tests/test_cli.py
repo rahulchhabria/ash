@@ -1,6 +1,7 @@
 """Tests for CLI commands."""
 
 import json
+import os
 from datetime import UTC, datetime
 
 from ash.cli.app import app
@@ -732,6 +733,24 @@ class TestDoctorCommand:
         assert "stale pid file" in result.stdout
         assert "Doctor found non-blocking issues" in result.stdout
 
+    def test_doctor_accepts_service_pid_file_format(self, monkeypatch, tmp_path):
+        ash_home = tmp_path / ".ash"
+        run_dir = ash_home / "run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "ash.pid").write_text(f"{os.getpid()}\n123.4\n")
+
+        monkeypatch.setenv(ENV_VAR, str(ash_home))
+        get_ash_home.cache_clear()
+        try:
+            result = run_doctor_checks()
+        finally:
+            monkeypatch.delenv(ENV_VAR, raising=False)
+            get_ash_home.cache_clear()
+
+        finding = next(item for item in result.findings if item.check == "run.pid")
+        assert finding.level == "ok"
+        assert finding.detail == f"pid file references running process: {os.getpid()}"
+
     def test_doctor_reports_degraded_integrations_from_runtime_state(
         self, monkeypatch, tmp_path
     ):
@@ -921,7 +940,7 @@ class TestDoctorCommand:
             for finding in result.findings
         )
 
-    def test_doctor_skips_host_playwright_check_when_sandbox_runtime_required(
+    def test_doctor_accepts_host_managed_sandbox_browser_runtime(
         self, monkeypatch, tmp_path
     ):
         ash_home = tmp_path / ".ash"
@@ -944,8 +963,7 @@ class TestDoctorCommand:
         )
 
         monkeypatch.setattr(
-            "ash.cli.commands.doctor.importlib.util.find_spec",
-            lambda _name: None,
+            "ash.cli.commands.doctor.shutil.which", lambda _name: "/usr/bin/docker"
         )
         monkeypatch.setenv(ENV_VAR, str(ash_home))
         get_ash_home.cache_clear()
@@ -956,18 +974,12 @@ class TestDoctorCommand:
             get_ash_home.cache_clear()
 
         assert any(
-            finding.check == "config.browser.sandbox.runtime"
-            and finding.level == "warning"
-            for finding in result.findings
-        )
-        assert any(
-            finding.check == "config.browser.sandbox.playwright"
+            finding.check == "config.browser.sandbox.container_runtime"
             and finding.level == "ok"
-            and "host playwright check skipped" in finding.detail
             for finding in result.findings
         )
 
-    def test_doctor_warns_when_playwright_missing_and_runtime_not_required(
+    def test_doctor_warns_when_sandbox_browser_docker_cli_is_missing(
         self, monkeypatch, tmp_path
     ):
         ash_home = tmp_path / ".ash"
@@ -992,10 +1004,7 @@ class TestDoctorCommand:
             + "\n"
         )
 
-        monkeypatch.setattr(
-            "ash.cli.commands.doctor.importlib.util.find_spec",
-            lambda _name: None,
-        )
+        monkeypatch.setattr("ash.cli.commands.doctor.shutil.which", lambda _name: None)
         monkeypatch.setenv(ENV_VAR, str(ash_home))
         get_ash_home.cache_clear()
         try:
@@ -1005,9 +1014,9 @@ class TestDoctorCommand:
             get_ash_home.cache_clear()
 
         assert any(
-            finding.check == "config.browser.sandbox.playwright"
-            and finding.level == "ok"
-            and "host playwright check skipped" in finding.detail
+            finding.check == "config.browser.sandbox.container_runtime"
+            and finding.level == "warning"
+            and "Docker CLI is missing" in finding.detail
             for finding in result.findings
         )
 

@@ -34,6 +34,20 @@ GOOGLE_EMAIL_MODEL_KEYWORDS = (
     "inbox",
     "mail",
 )
+GOOGLE_WORKSPACE_EXPLICIT_PATTERN = re.compile(
+    r"\b(?:email|gmail|inbox|calendar)\b", re.IGNORECASE
+)
+GOOGLE_WORKSPACE_ACTION_PATTERN = re.compile(
+    r"\b(?:create|add|schedule|reschedule|cancel|list|show|check|send|reply|forward)"
+    r"\s+(?:an?\s+|my\s+)?(?:events?|meetings?|appointments?|invites?|agenda|mail)\b"
+    r"|\bwhat(?:'s| is)\s+on\s+my\s+agenda\b"
+    r"|\bdo\s+i\s+have\s+(?:any\s+)?(?:events?|meetings?|appointments?)\b",
+    re.IGNORECASE,
+)
+GOOGLE_PUBLIC_LOOKUP_PATTERN = re.compile(
+    r"\b(?:near me|map|maps|business|restaurant|store|shop|address|hours|website|phone|place|pricing|features|documentation|docs)\b",
+    re.IGNORECASE,
+)
 
 # Wrapper guidance prepended to all skill system prompts
 SKILL_AGENT_WRAPPER = """You are a skill executor. Your job is to run the skill instructions below and report results.
@@ -551,6 +565,37 @@ class UseSkillTool(Tool):
 
         message = str(message)
         user_context = str(user_context)
+
+        if skill_name == "google":
+            raw_candidate = ""
+            if context is not None:
+                raw = context.metadata.get("current_user_message")
+                if isinstance(raw, str):
+                    raw_candidate = raw
+            intent_candidate = raw_candidate or message
+            explicit_workspace_intent = bool(
+                GOOGLE_WORKSPACE_EXPLICIT_PATTERN.search(intent_candidate)
+            )
+            action_workspace_intent = bool(
+                GOOGLE_WORKSPACE_ACTION_PATTERN.search(intent_candidate)
+            )
+            public_lookup_intent = bool(
+                GOOGLE_PUBLIC_LOOKUP_PATTERN.search(intent_candidate)
+            )
+            workspace_intent = (
+                explicit_workspace_intent or action_workspace_intent
+            ) and not public_lookup_intent
+            callback_candidate = raw_candidate or message
+            auth_continuation = bool(
+                _OAUTH_CALLBACK_URL_PATTERN.search(callback_candidate)
+                or _OAUTH_CODE_ONLY_PATTERN.match(callback_candidate)
+            )
+            if not workspace_intent and not auth_continuation:
+                return ToolResult.error(
+                    "The google skill only supports Gmail and Google Calendar. "
+                    "For public information use openai_web_search; for businesses, "
+                    "maps, or opening hours use google_places when available."
+                )
 
         if not self._registry.has(skill_name):
             self._registry.reload_all(self._config.workspace)

@@ -1174,9 +1174,10 @@ def test_conduit_agent_instructs_place_resolution_before_calls() -> None:
 
     prompt = ConduitAgent().config.system_prompt
 
-    assert "If the user names a business/place without a phone number" in prompt
-    assert "Parallel first, then hosted OpenAI search" in prompt
-    assert "Use browser only if both search backends" in prompt
+    assert "If the user names a business/place" in prompt
+    assert "use google_places first" in prompt
+    assert "Otherwise follow the configured general-search order" in prompt
+    assert "Use browser only if search and web_fetch" in prompt
     assert "phone number in E.164 format" in prompt
     assert "ordinary routing-only IVR navigation" in prompt
     assert "Set allow_ivr_navigation=true only" in prompt

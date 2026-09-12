@@ -1,0 +1,50 @@
+---
+title: Move Ash to Omarchy
+description: Prepare and verify an Ash installation on Omarchy
+sidebar:
+  order: 3
+---
+
+Omarchy is an Arch-based system built around Hyprland and Wayland. Ash runs as a
+systemd user service there; browser automation remains sandboxed unless you select
+the remote Kernel provider. See the [official Omarchy manual](https://github.com/omacom/omarchy/tree/master/manual)
+for current OS installation guidance.
+
+## Before the move
+
+Keep source code and personal state separate:
+
+- Source checkout: your Ash Git repository
+- Personal state and secrets: `$ASH_HOME` (normally `~/.ash`)
+
+Stop Ash before copying `$ASH_HOME` so JSONL and graph state are consistent. Preserve
+file modes, and never commit `config.toml`, `auth.json`, or `vault/` to Git.
+
+## Destination setup
+
+1. Install Python 3.12+, uv, Git, Docker, and a working systemd user session.
+2. Clone Ash and run `uv sync --all-groups --extra deepagents` so deep mode is
+   executable on the destination rather than merely configured.
+3. Copy `$ASH_HOME` into place with owner-only permissions preserved.
+4. Rebuild the sandbox with `uv run ash upgrade`.
+5. Recreate the service with `uv run ash service install`; do not copy the old unit,
+   because its `ExecStart` path belongs to the previous machine.
+6. Run the target readiness report:
+
+```bash
+uv run ash doctor --target omarchy
+```
+
+7. Verify browser automation:
+
+```bash
+uv run ash browser smoke https://example.com
+```
+
+## Desktop expansion boundary
+
+The target check reports `hyprctl`, `wl-copy`, `notify-send`, `grim`, and `slurp` as
+optional helpers. Their presence does not give Ash desktop access. Add future
+clipboard, notification, screenshot, or input behavior as separately permissioned
+host capabilities with explicit read/write scopes and audit logs. Do not expose an
+unrestricted host shell or compositor socket to the agent.

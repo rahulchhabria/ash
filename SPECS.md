@@ -105,7 +105,9 @@ Specs MUST be updated when:
 | [skills](specs/skills.md) | Workspace-defined behaviors with model preferences |
 | [telegram](specs/telegram.md) | Telegram bot integration |
 | [web_fetch](specs/web_fetch.md) | Fetch and extract content from URLs |
-| [web_search](specs/web_search.md) | Web search via Brave API with caching and retry |
+| [web_search](specs/web_search.md) | Hosted OpenAI search with optional Exa/Parallel fallbacks |
+| [local_search](specs/local_search.md) | Local businesses and hours via Google Places |
+| [omarchy](specs/omarchy.md) | Host readiness and migration checks for Omarchy |
 | [research](specs/research.md) | Built-in agent for web research with synthesis |
 | [rpc](specs/rpc.md) | Unix domain socket RPC for sandbox-to-host communication |
 | [sessions](specs/sessions.md) | JSONL-based session persistence for conversation history |

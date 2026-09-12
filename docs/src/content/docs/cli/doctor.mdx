@@ -13,10 +13,18 @@ Run diagnostics for local Ash setup and runtime dependencies.
 uv run ash doctor
 ```
 
+For an Omarchy destination, include host and desktop-readiness checks:
+
+```bash
+uv run ash doctor --target omarchy
+```
+
 ## What It Checks
 
 - Ash home/config presence
-- Docker availability
+- Docker CLI availability for dedicated sandbox/browser containers
 - Environment/runtime readiness
+- Omarchy/Arch, systemd, Docker, Wayland, Hyprland, and optional desktop helpers when `--target omarchy` is selected
+- Migration-sensitive permissions and broken local-skill links
 
 `ash doctor` is read-only and does not mutate state.

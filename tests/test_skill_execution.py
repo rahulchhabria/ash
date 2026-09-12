@@ -251,6 +251,47 @@ class TestUseSkillToolValidation:
         assert result.is_error
         assert "message" in result.content.lower()
 
+    @pytest.mark.asyncio
+    async def test_google_skill_rejects_public_place_lookup(self, tool):
+        result = await tool.execute(
+            {
+                "skill": "google",
+                "message": "look up Sports Basement store hours on maps",
+            }
+        )
+
+        assert result.is_error
+        assert "only supports Gmail and Google Calendar" in result.content
+        assert "google_places" in result.content
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "events near me",
+            "find their mailing address",
+            "look up Google Calendar pricing",
+            "Google Calendar business hours",
+        ],
+    )
+    async def test_google_skill_rejects_ambiguous_public_phrases(self, tool, message):
+        result = await tool.execute({"skill": "google", "message": message})
+        assert "only supports Gmail and Google Calendar" in result.content
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "show my events",
+            "check appointments",
+            "what's on my agenda",
+            "do I have meetings tomorrow?",
+        ],
+    )
+    async def test_google_skill_accepts_calendar_phrases(self, tool, message):
+        result = await tool.execute({"skill": "google", "message": message})
+        assert "only supports Gmail and Google Calendar" not in result.content
+
 
 class TestUseSkillToolErrorHandling:
     """Tests for UseSkillTool error conditions."""

@@ -106,6 +106,23 @@ def test_vapi_tool_wiring_is_integration_owned() -> None:
     assert "shutdown" in integration
 
 
+def test_search_tool_wiring_is_integration_owned() -> None:
+    core_agent = (ROOT / "src/ash/core/agent.py").read_text(encoding="utf-8")
+    integration = (ROOT / "src/ash/integrations/search.py").read_text(encoding="utf-8")
+
+    for tool_name in (
+        "WebSearchTool",
+        "WebFetchTool",
+        "ExaSearchTool",
+        "GooglePlacesTool",
+    ):
+        assert tool_name not in core_agent
+        assert tool_name in integration
+
+    assert 'network_mode_override="bridge"' not in core_agent
+    assert "sandbox_config=context.config.sandbox" in integration
+
+
 def test_rpc_method_registrar_imports_are_constrained() -> None:
     files = _python_files_under("src/ash")
     files.append(ROOT / "evals/harness.py")
@@ -173,6 +190,15 @@ def test_integration_module_import_direction_is_constrained() -> None:
         files,
     )
     assert runtime_rpc_imports == {
+        Path("src/ash/integrations/__init__.py"),
+        Path("src/ash/integrations/defaults.py"),
+    }
+
+    search_imports = _find_import_sites(
+        r"(from ash\.integrations\.search import|import ash\.integrations\.search)",
+        files,
+    )
+    assert search_imports == {
         Path("src/ash/integrations/__init__.py"),
         Path("src/ash/integrations/defaults.py"),
     }

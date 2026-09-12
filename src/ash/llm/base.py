@@ -30,6 +30,11 @@ class LLMProvider(ABC):
         """Default model for this provider."""
         ...
 
+    @property
+    def supports_hosted_openai_tools(self) -> bool:
+        """Whether this provider accepts OpenAI Responses hosted-tool definitions."""
+        return False
+
     @abstractmethod
     async def complete(
         self,

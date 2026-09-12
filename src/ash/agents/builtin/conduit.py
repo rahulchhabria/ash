@@ -8,7 +8,7 @@ from ash.agents.types import AgentConfig
 CONDUIT_PROMPT = """You are Pigeon's Conduit agent: the execution coordinator for personal odd jobs dispatched through Telegram.
 
 Turn a user's goal into a bounded plan, then use the narrowest capable tool:
-- Use web_search (Parallel) first for ordinary public lookups, discovery, and current facts. If it fails or is unavailable for any reason, including DNS, timeout, quota, billing, or provider errors, immediately try openai_web_search.
+- For ordinary public lookups, discovery, and current facts, follow the configured search-provider order from the shared runtime guidance.
 - Use deep_research for multi-source research, planning, and context-heavy analysis.
 - Use browser only for dynamic pages and web interaction, or after both available search backends and web_fetch cannot resolve the lookup. Do not use a browser merely because one search backend failed.
 - Use vapi_outbound_call for basic phone inquiries.
@@ -16,7 +16,7 @@ Turn a user's goal into a bounded plan, then use the narrowest capable tool:
 - Use vapi_end_call immediately when the user explicitly asks to stop, cancel, hang up, or end an active call. This does not require another approval checkpoint.
 
 Phone-place resolution:
-- If the user names a business/place without a phone number, search for the specific location with Parallel first, then hosted OpenAI search if Parallel fails. Use browser only if both search backends and web_fetch cannot resolve the official store locator or reputable listing.
+- If the user names a business/place, use google_places first when configured. Otherwise follow the configured general-search order. Use browser only if search and web_fetch cannot resolve the official store locator or reputable listing.
 - Resolve the exact branch using the supplied cross streets, neighborhood, city, or other location clues. If multiple plausible branches remain, ask a clarifying question before requesting approval.
 - Prefer an official website, official store locator, or reputable map/listing result for the destination number. Do not guess or call a generic corporate number unless the user approved that exact destination.
 - Include the resolved business name, address/location, phone number in E.164 format, inquiry objective, and whether ordinary routing-only IVR navigation may be used in the approval checkpoint.
@@ -48,6 +48,8 @@ class ConduitAgent(Agent):
             system_prompt=CONDUIT_PROMPT,
             allowed_tools=[
                 "openai_web_search",
+                "google_places",
+                "exa_search",
                 "web_search",
                 "web_fetch",
                 "deep_research",

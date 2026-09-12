@@ -67,6 +67,22 @@ class ToolOutputTrustPolicy:
             ),
         )
 
+    @classmethod
+    def from_config(cls, config: object) -> ToolOutputTrustPolicy:
+        """Combine operator settings with Ash's default detection rules."""
+        defaults = cls.defaults()
+        return cls(
+            mode=getattr(config, "mode", defaults.mode),
+            max_chars=getattr(config, "max_chars", defaults.max_chars),
+            include_provenance_header=getattr(
+                config,
+                "include_provenance_header",
+                defaults.include_provenance_header,
+            ),
+            injection_patterns=defaults.injection_patterns,
+            redact_patterns=defaults.redact_patterns,
+        )
+
 
 @dataclass(frozen=True)
 class ToolOutputRiskSignal:
