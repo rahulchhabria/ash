@@ -1071,6 +1071,39 @@ class TestDMThreading:
         assert thread2 == thread1
 
     @pytest.mark.asyncio
+    async def test_dm_restores_history_after_idle_and_restart(self, handler):
+        from datetime import UTC, datetime, timedelta
+
+        from ash.chats import ChatStateManager
+        from ash.config.models import ConversationConfig
+        from ash.providers.telegram.handlers.session_handler import SessionHandler
+
+        first = self._make_message("100")
+        thread = await handler.resolve_reply_chain_thread(first)
+        manager = handler.get_session_manager(first.chat_id, first.user_id, thread)
+        await manager.add_user_message("Remember the October 17 Fall Fest.")
+        await manager.add_assistant_message("Fall Fest is October 17, 11am–2pm.")
+        state_manager = ChatStateManager("telegram", first.chat_id)
+        state_manager.load().set_active_thread(
+            thread, reason="test", now=datetime.now(UTC) - timedelta(days=2)
+        )
+        state_manager.save()
+
+        restarted = SessionHandler("telegram", None, ConversationConfig())
+        followup = self._make_message("101")
+        followup.text = "what are the dates i should care about"
+        followup.metadata["thread_id"] = await restarted.resolve_reply_chain_thread(
+            followup
+        )
+        restored = await restarted.get_or_create_session(followup)
+
+        assert followup.metadata["thread_id"] == thread
+        assert any("October 17" in str(msg.content) for msg in restored.messages)
+        saved = ChatStateManager("telegram", first.chat_id).load()
+        assert saved.thread_index["100"] == thread
+        assert saved.thread_index["101"] == thread
+
+    @pytest.mark.asyncio
     async def test_dm_reply_joins_parent_thread(self, handler):
         """A DM reply to a known message joins the parent's thread."""
         # First message establishes a thread

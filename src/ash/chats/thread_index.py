@@ -32,6 +32,13 @@ class ThreadIndex:
 
     def _ensure_loaded(self) -> dict[str, str]:
         """Ensure state is loaded and return the thread_index dict."""
+        # External senders and session routing also update chat state. Never
+        # overwrite their persisted changes with a cached snapshot.
+        from ash.chats.manager import ChatStateManager
+
+        self._manager = ChatStateManager(
+            self._manager.provider, self._manager.chat_id, self._manager.thread_id
+        )
         state = self._manager.load()
         return state.thread_index
 

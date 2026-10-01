@@ -20,6 +20,25 @@ from ash.config.paths import get_chat_dir
 logger = logging.getLogger(__name__)
 
 
+def find_chat_history_message(
+    provider: str, chat_id: str, external_id: str
+) -> HistoryEntry | None:
+    """Find a delivered message in this chat, including older source messages."""
+    history_file = get_chat_dir(provider, chat_id) / "history.jsonl"
+    if not history_file.exists():
+        return None
+    found = None
+    with history_file.open() as stream:
+        for line in stream:
+            try:
+                entry = HistoryEntry.model_validate_json(line)
+            except ValueError:
+                continue
+            if str((entry.metadata or {}).get("external_id", "")) == external_id:
+                found = entry
+    return found
+
+
 class HistoryEntry(BaseModel):
     """Validated schema for history.jsonl entries.
 

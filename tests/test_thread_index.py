@@ -102,3 +102,19 @@ class TestThreadIndex:
         assert thread_index.get_thread_id("102") == "100"
         assert thread_index.get_thread_id("200") == "200"
         assert thread_index.get_thread_id("201") == "200"
+
+
+def test_cached_index_observes_external_delivery_without_erasing_state():
+    index = ThreadIndex(ChatStateManager("telegram", "chat"))
+    index.register_message("100", "100")
+    external = ChatStateManager("telegram", "chat")
+    state = external.load()
+    state.thread_index["200"] = "200"
+    state.set_active_thread("200", reason="external_focus")
+    external.save()
+
+    assert index.resolve_thread_id("201", "200") == "200"
+    index.register_message("201", "200")
+    saved = ChatStateManager("telegram", "chat").load()
+    assert saved.active_thread_id == "200"
+    assert saved.thread_index == {"100": "100", "200": "200", "201": "200"}

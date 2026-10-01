@@ -127,11 +127,15 @@ class ChatState(BaseModel):
     def get_active_thread(
         self,
         *,
-        max_age_minutes: int,
+        max_age_minutes: int | None = None,
         now: datetime | None = None,
     ) -> str | None:
-        """Return active thread_id if it is still within the freshness window."""
-        if not self.active_thread_id or not self.active_thread_updated_at:
+        """Return the active thread, optionally enforcing a freshness window."""
+        if not self.active_thread_id:
+            return None
+        if max_age_minutes is None:
+            return self.active_thread_id
+        if not self.active_thread_updated_at:
             return None
         ts = now or datetime.now(UTC)
         max_age = max(1, int(max_age_minutes))

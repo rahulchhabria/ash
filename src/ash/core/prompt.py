@@ -986,6 +986,12 @@ class SystemPromptBuilder:
             "## Session",
             "",
             f"Chat history (all messages, all threads): `{chat_history_path}`",
+            "Resolve follow-ups against the reply target and current conversation first. "
+            "For references such as 'that', 'those dates', or 'the previous message', "
+            "use the relevant messages and their source context before general memories. "
+            "If the reference is missing, read recent chat history and search older history "
+            "before answering or claiming you cannot remember. If several sources remain "
+            "plausible, ask a focused clarification rather than guessing.",
             "",
             "**When to use what:**",
             "- Questions about people's opinions, preferences, facts about them:",

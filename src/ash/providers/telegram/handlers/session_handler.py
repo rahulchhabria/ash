@@ -475,11 +475,13 @@ class SessionHandler:
                     reply_to_external_id=reply_to_external_id,
                 )
                 thread_index.register_message(message.id, thread_id)
-                state.set_active_thread(thread_id, reason="reply_chain")
-                state_manager.save()
+                self.mark_active_thread(
+                    message.chat_id, thread_id, reason="reply_chain"
+                )
                 return thread_id
 
             active_thread_id = (
+                # Spec: specs/sessions.md — DM context persists by default.
                 None
                 if forced_new_topic
                 else state.get_active_thread(
@@ -491,8 +493,9 @@ class SessionHandler:
             if active_thread_id:
                 thread_id = str(active_thread_id)
                 thread_index.register_message(message.id, thread_id)
-                state.set_active_thread(thread_id, reason="auto_continue")
-                state_manager.save()
+                self.mark_active_thread(
+                    message.chat_id, thread_id, reason="auto_continue"
+                )
                 return thread_id
 
             thread_id = thread_index.resolve_thread_id(
@@ -500,11 +503,11 @@ class SessionHandler:
                 reply_to_external_id=None,
             )
             thread_index.register_message(message.id, thread_id)
-            state.set_active_thread(
+            self.mark_active_thread(
+                message.chat_id,
                 thread_id,
-                reason="new_topic" if forced_new_topic else "timeout_rollover",
+                reason="new_topic" if forced_new_topic else "new_session",
             )
-            state_manager.save()
             return thread_id
 
         thread_id = thread_index.resolve_thread_id(

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ash.chats import ChatStateManager
+from ash.chats.history import ChatHistoryWriter, find_chat_history_message
 from ash.context_firewall import check_context_injection
 from ash.integrations.runtime import IntegrationContext, IntegrationContributor
 
@@ -87,6 +88,14 @@ class EmailForwardSummaryIntegration(IntegrationContributor):
         if not self._enabled or self._db_path is None:
             return message
 
+        # Spec: specs/email_forward_summary.md. Recover pre-fix deliveries using
+        # chat-scoped provenance, never by searching another chat's email IDs.
+        self._recover_delivered_history(message.chat_id)
+        if re.match(
+            r"^\s*(new topic|new thread|start over)\b", message.text or "", re.I
+        ):
+            return message
+
         row: dict[str, Any] | None = None
         source = "reply"
         header = CONTEXT_HEADER
@@ -109,7 +118,13 @@ class EmailForwardSummaryIntegration(IntegrationContributor):
                     },
                 )
                 return message
-        else:
+        if row is None:
+            row = self._lookup_thread_source(message)
+            if row is not None:
+                source = "thread"
+                header = "Email-forward-summary context (conversation source)"
+
+        if row is None and not reply_to:
             focus = self._select_active_email_focus(message)
             if focus is None:
                 return message
@@ -163,6 +178,54 @@ class EmailForwardSummaryIntegration(IntegrationContributor):
             },
         )
         return message
+
+    def _recover_delivered_history(self, chat_id: str) -> None:
+        """Backfill retained legacy focus summaries once, with original timestamps."""
+        state = ChatStateManager(provider="telegram", chat_id=chat_id).load()
+        writer = ChatHistoryWriter(provider="telegram", chat_id=chat_id)
+        for focus in state.active_focus:
+            if focus.kind != "email" or not focus.telegram_message_id:
+                continue
+            if find_chat_history_message(
+                "telegram", chat_id, focus.telegram_message_id
+            ):
+                continue
+            writer.record_bot_message(
+                content=focus.summary or focus.title,
+                created_at=focus.created_at,
+                metadata={
+                    "external_id": focus.telegram_message_id,
+                    "thread_id": focus.thread_id or focus.telegram_message_id,
+                    "source_id": focus.source_id,
+                    "source": self.name,
+                    "recovered_summary": True,
+                },
+            )
+
+    def _lookup_thread_source(self, message: IncomingMessage) -> dict[str, Any] | None:
+        """Recover the source of the resolved conversation without lexical guessing."""
+        state = ChatStateManager(provider="telegram", chat_id=message.chat_id).load()
+        thread_id = message.metadata.get("thread_id")
+        if not thread_id and message.reply_to_message_id:
+            thread_id = state.thread_index.get(message.reply_to_message_id)
+        if not thread_id and not message.reply_to_message_id:
+            thread_id = state.get_active_thread()
+        if not thread_id:
+            return None
+        entry = find_chat_history_message("telegram", message.chat_id, str(thread_id))
+        metadata = entry.metadata if entry else None
+        if not metadata or metadata.get("source") != self.name:
+            return None
+        email_id = self._email_id_from_source_id(str(metadata.get("source_id", "")))
+        if email_id is None:
+            return None
+        try:
+            return self._lookup_email_by_id(email_id)
+        except sqlite3.Error as exc:
+            logger.warning(
+                "email_forward_summary_lookup_failed", extra={"error.message": str(exc)}
+            )
+            return None
 
     def _lookup_email(self, telegram_message_id: int) -> dict[str, Any] | None:
         assert self._db_path is not None
@@ -218,7 +281,7 @@ class EmailForwardSummaryIntegration(IntegrationContributor):
             if _focus_matches_text(focus, text):
                 matches.append(focus)
 
-        if not matches:
+        if len(matches) != 1:
             return None
 
         manager.save()

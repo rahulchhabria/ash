@@ -22,40 +22,26 @@ max_body_chars = 4000
 
 ## Behavior
 
-When ash receives an `IncomingMessage` from any provider:
-
-1. If the integration is disabled, the SQLite path is unset, or the file
-   does not exist, return the message unchanged.
-2. If the message has no `reply_to_message_id`, return unchanged.
-3. Coerce `reply_to_message_id` to `int`; on failure, return unchanged.
-4. Query the email pipeline DB in read-only mode:
-
-   ```sql
-   SELECT id, subject, sender, received_at, cleaned_body,
-          structured_parse_json, processing_status
-   FROM emails
-   WHERE telegram_message_id = ?
-   ORDER BY id DESC LIMIT 1
-   ```
-
-5. If no row matches, return unchanged.
-6. Otherwise prepend a structured context block to `message.text`:
-
-   ```
-   --- Email-forward-summary context (reply target) ---
-   email_id: <id>
-   subject: <subject>
-   from: <sender>
-   received_at: <received_at>
-   structured_summary:
-   <slim JSON of selected parse fields>
-   body:
-   <cleaned_body, truncated to max_body_chars>
-   --- End email-forward-summary context ---
-   ```
-
-7. Set `message.metadata["email_forward_summary.email_id"]` and
-   `message.metadata["email_forward_summary.subject"]`.
+- Delivered email summaries MUST be appended to chat history with the exact sent text,
+  delivery timestamp, external message ID, thread ID, and `source_id: email:<id>`.
+- Delivery registration MUST be idempotent by external message ID.
+- Retained legacy focus summaries MUST be recovered into chat history once, preserving
+  their original timestamp and marking them as recovered summaries (not exact sent text).
+- Explicit replies resolve their email source first. Replies to subsequent assistant
+  messages and non-reply continuations resolve the conversation thread's source from
+  that chat's history, including after focus expiry or a restart.
+- Thread source resolution MUST NOT require the follow-up to repeat the email subject
+  or contain a pronoun. For example, “what are the dates i should care about” continues
+  the current email conversation.
+- A new-topic request MUST NOT inject the previous email source.
+- If there is no thread source, keyword focus fallback may select only one unambiguous,
+  unexpired candidate. Multiple matching candidates MUST NOT silently choose one.
+- Source recovery MUST be scoped to the current chat's persisted delivery record.
+- Context policy checks apply before context injection; disabled integrations do not
+  recover or inject context.
+- Resolved context includes subject, sender, received timestamp, structured calendar
+  and action fields, and body truncated to `max_body_chars`. The incoming message retains
+  `email_forward_summary.email_id`, `.subject`, and `.source` metadata.
 
 ## Isolation
 
@@ -79,6 +65,10 @@ When ash receives an `IncomingMessage` from any provider:
 - Context injection on matched reply
 - Disabled when `enabled = false`
 - Disabled when DB path missing / file absent
-- No-op when no `reply_to_message_id`
-- No-op when `reply_to_message_id` does not match any email
+- Pronoun-free follow-up resolves the current thread's email
+- Thread source survives focus expiry and process restart
+- Legacy summary recovery is idempotent and preserves timestamps
+- Unrelated chats and explicit new topics do not inherit source context
+- Ambiguous keyword matches do not pick an arbitrary email
+- No-op when neither reply nor conversation has a known source
 - Body truncation honors `max_body_chars`

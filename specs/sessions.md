@@ -15,8 +15,8 @@ Ash uses **per-user sessions scoped to thread** for group chats:
 For DMs, Ash uses **hybrid active-thread routing**:
 
 - Replies follow parent thread via `ThreadIndex`.
-- Non-reply messages continue on the active DM thread when it is fresh.
-- A new thread is created when no active thread is available (or after explicit new-topic intent/timeout rollover).
+- Non-reply messages continue on the active DM thread across idle periods and restarts.
+- A new thread is created when no active thread is available or after explicit new-topic intent. Idle time alone never resets a DM by default; `conversation.active_thread_timeout_minutes` optionally enables expiry with a positive timeout.
 - Session key for DM turns remains thread-scoped when a thread_id exists: `telegram_{chat_id}_{user_id}_{thread_id}`.
 
 ## File Structure
@@ -42,6 +42,8 @@ For DMs, Ash uses **hybrid active-thread routing**:
 - Maintain state.json with session metadata (provider, chat_id, user_id, thread_id)
 - Maintain two files per session: context.jsonl (full LLM context) and history.jsonl (human-readable)
 - Maintain chat-level history.jsonl with all user + bot messages across all threads
+- Persist outbound integration summaries with delivered text, external message ID, thread ID, and source ID so subsequent turns can recover their context.
+- Refresh thread-index state before reads and writes so external deliveries and active-thread updates survive subsequent routing.
 - Support entry types: session header, message, tool_use, tool_result, compaction, agent_session
 - Track message metadata including external_id for deduplication
 - Support loading recent messages for LLM context window

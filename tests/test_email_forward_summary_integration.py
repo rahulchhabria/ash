@@ -297,3 +297,87 @@ async def test_noop_when_active_email_focus_is_expired(tmp_path, monkeypatch) ->
 
     assert updated.text == "where is practice?"
     assert "email_forward_summary.email_id" not in updated.metadata
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply_to", [None, "1014"])
+async def test_thread_source_survives_expiry_restart_and_pronoun_free_followup(
+    tmp_path, reply_to
+) -> None:
+    from ash.chats.history import find_chat_history_message, read_recent_chat_history
+
+    db = tmp_path / "school.sqlite3"
+    _seed_db(db, telegram_message_id=1013)
+    manager = ChatStateManager("telegram", "c-1")
+    state = manager.load()
+    state.add_active_focus(
+        kind="email",
+        source_id="email:1",
+        title="Fall Fest 2026",
+        summary="Fall Fest is October 17, 11am–2pm.",
+        telegram_message_id="1013",
+        thread_id="1013",
+        now=datetime.now(UTC) - timedelta(days=2),
+        ttl_minutes=60,
+    )
+    state.set_active_thread("1013", reason="external_focus")
+    state.thread_index["1014"] = "1013"
+    manager.save()
+    context = _context(_config(db_path=db))
+
+    # First turn repairs retained legacy delivery history.
+    integration = EmailForwardSummaryIntegration()
+    await integration.setup(context)
+    message = _message(text="what are the dates i should care about", reply_to=reply_to)
+    updated = await integration.preprocess_incoming_message(message, context)
+    assert updated.metadata["email_forward_summary.email_id"] == 1
+    assert updated.metadata["email_forward_summary.source"] == "thread"
+    assert "Professional Community Updates" in updated.text
+    recovered = find_chat_history_message("telegram", "c-1", "1013")
+    assert recovered is not None
+    assert recovered.created_at < datetime.now(UTC) - timedelta(days=1)
+    assert recovered.metadata is not None
+    assert recovered.metadata["recovered_summary"] is True
+
+    # Removing ephemeral focus and recreating the integration simulates restart.
+    manager = ChatStateManager("telegram", "c-1")
+    manager.load().active_focus = []
+    manager.save()
+    restarted = EmailForwardSummaryIntegration()
+    await restarted.setup(context)
+    updated = await restarted.preprocess_incoming_message(
+        _message(text="what are the dates i should care about", reply_to=reply_to),
+        context,
+    )
+    assert updated.metadata["email_forward_summary.email_id"] == 1
+    assert len(read_recent_chat_history("telegram", "c-1")) == 1
+
+    other_chat = _message(text="what are the dates i should care about", reply_to=None)
+    other_chat.chat_id = "other-chat"
+    updated = await restarted.preprocess_incoming_message(other_chat, context)
+    assert "email_forward_summary.email_id" not in updated.metadata
+
+    new_topic = _message(
+        text="new topic: what are the dates i should care about", reply_to=None
+    )
+    updated = await restarted.preprocess_incoming_message(new_topic, context)
+    assert "email_forward_summary.email_id" not in updated.metadata
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_focus_does_not_choose_arbitrary_email(tmp_path) -> None:
+    db = tmp_path / "school.sqlite3"
+    _seed_db(db)
+    manager = ChatStateManager("telegram", "c-1")
+    for email_id in (1, 2):
+        manager.load().add_active_focus(
+            kind="email", source_id=f"email:{email_id}", title="Practice update"
+        )
+    manager.save()
+    integration = EmailForwardSummaryIntegration()
+    context = _context(_config(db_path=db))
+    await integration.setup(context)
+    updated = await integration.preprocess_incoming_message(
+        _message(text="where is practice?", reply_to=None), context
+    )
+    assert "email_forward_summary.email_id" not in updated.metadata
