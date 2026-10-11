@@ -1204,7 +1204,7 @@ class TelegramMessageHandler:
                 ctx.add_pending(message)
                 await self._provider.set_reaction(message.chat_id, message.id, "👀")
                 logger.info(
-                    "message_queued_for_steering",
+                    "message_queued",
                     extra={
                         "username": message.username or message.user_id,
                         "session_id": session_key,
@@ -1231,22 +1231,22 @@ class TelegramMessageHandler:
         """Process a message and any pending messages that arrive."""
         message: IncomingMessage | None = initial_message
 
-        while message:
-            async with self._concurrency_semaphore:
-                async with ctx.lock:
-                    ctx.begin_turn()
+        # Keep queue ownership while waiting for global capacity and draining turns.
+        async with ctx.lock:
+            while message:
+                ctx.begin_message(message)
+                async with self._concurrency_semaphore:
                     await self._process_single_message(message, ctx)
-                    pending = ctx.take_for_next_turn()
-                    if pending:
-                        message = pending[0]
-                        for msg in pending[1:]:
-                            ctx.add_pending(msg)
-                        logger.debug(
-                            "Processing queued message (remaining: %d)",
-                            len(pending) - 1,
-                        )
-                    else:
-                        message = None
+                pending = ctx.take_for_next_turn()
+                if pending:
+                    message = pending[0]
+                    for msg in pending[1:]:
+                        ctx.add_pending(msg)
+                    logger.debug(
+                        "Processing queued message (remaining: %d)", len(pending) - 1
+                    )
+                else:
+                    message = None
 
     async def _process_single_message(
         self, message: IncomingMessage, ctx: SessionLock

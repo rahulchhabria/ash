@@ -13,6 +13,7 @@ Files: src/ash/tools/builtin/web_fetch.py
 - Support HTTP and HTTPS URLs
 - Extract readable text content from HTML pages
 - Remove script, style, and other non-content elements
+- Surface sandbox execution errors instead of reporting an empty response
 - Handle HTTP redirects (up to 5 hops)
 - Report final URL after redirects
 - Reject embedded URL credentials and non-global IP targets

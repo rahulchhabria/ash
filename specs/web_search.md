@@ -1,6 +1,6 @@
 # Web Search
 
-> Search the web through hosted OpenAI search with optional Exa and Parallel fallbacks
+> Search the web through Exa with hosted OpenAI and optional Parallel fallbacks
 
 Files: src/ash/integrations/search.py, src/ash/tools/builtin/web_search.py,
        src/ash/tools/builtin/exa_search.py, src/ash/tools/builtin/search_types.py,
@@ -23,13 +23,10 @@ Files: src/ash/integrations/search.py, src/ash/tools/builtin/web_search.py,
 - Handle HTTP errors gracefully
 - Handle timeout (30s default)
 - Respect sandbox proxy settings when configured
-- Register and prefer hosted `openai_web_search` only when the active provider
-  supports OpenAI Responses hosted tools; otherwise start with the first configured
-  non-hosted fallback
+- Register hosted `openai_web_search` only when the active provider supports OpenAI Responses hosted tools
 - Register search and fetch tools through `SearchIntegration`, not the core harness
-- Prefer hosted `openai_web_search` for ordinary public lookups
-- Prefer Parallel `web_search` before experimental `exa_search` when both optional
-  fallbacks are configured
+- Prefer configured `exa_search` for ordinary public lookups; use hosted
+  `openai_web_search` as a fallback, then optional Parallel `web_search`
 - Prevent the Gmail/Calendar `google` skill from accepting public-search tasks
 - Give DeepAgents executable discovery tools from the configured allowlist and
   sanitize non-hosted tool output before returning it to the DeepAgents model

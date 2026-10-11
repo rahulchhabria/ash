@@ -450,8 +450,9 @@ async def test_invoke_requires_explicit_account_when_multiple_are_linked() -> No
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("deferred_registration", [False, True])
 async def test_create_capability_manager_restores_gog_accounts_from_state(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path, monkeypatch: pytest.MonkeyPatch, deferred_registration: bool
 ) -> None:
     monkeypatch.setenv("ASH_HOME", str(tmp_path))
     get_ash_home.cache_clear()
@@ -478,7 +479,11 @@ async def test_create_capability_manager_restores_gog_accounts_from_state(
     provider = _RecordingProvider(namespace="gog")
 
     try:
-        manager = await create_capability_manager(providers=[provider])
+        manager = await create_capability_manager(
+            providers=[] if deferred_registration else [provider]
+        )
+        if deferred_registration:
+            await manager.register_provider(provider)
         result = await manager.invoke(
             capability_id="gog.email",
             operation="list_messages",

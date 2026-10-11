@@ -27,3 +27,11 @@ Planner output has two parts:
 - `lookup_queries` (supplemental contextual lookups)
 
 Both are executed for retrieval, deduplicated by memory ID, and merged before final pruning.
+
+The primary retrieval query MUST preserve the current user message. Planner
+rewrites may supplement it to resolve references, but must never replace it with
+an earlier task. Source documents are excluded from the current user message.
+Both rewrites and supplemental lookups must be grounded in meaningful terms from
+the current question before retrieval. Reference-only follow-ups may resolve against
+the immediately preceding turn; local questions may request narrowly scoped location
+context. Ungrounded expansions are discarded, never merged into prompt memories.

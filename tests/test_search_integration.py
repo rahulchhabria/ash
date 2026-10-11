@@ -109,12 +109,10 @@ async def test_search_integration_registers_configured_providers_with_bridge_net
         context,
     )
     rules = "\n".join(prompt.extra_context["tool_routing_rules"])
-    assert "openai_web_search` first" in rules
+    assert "exa_search` first" in rules
     assert "`google_places` before general web search" in rules
     assert "Never invoke the `google`" in rules
-    assert rules.index("`web_search`, `exa_search`") > rules.index(
-        "openai_web_search` first"
-    )
+    assert rules.index("`exa_search`, `web_search`") > rules.index("exa_search` first")
 
 
 @pytest.mark.asyncio

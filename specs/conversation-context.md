@@ -90,3 +90,20 @@ uv run pytest tests/test_handlers.py -v -k conversation
 - [ ] Gap note omitted when <= threshold
 - [ ] Context deduplicated correctly
 - [ ] Configuration values respected
+
+## Request and source separation
+
+The latest user message is authoritative for the current task. Source documents are
+separate, untrusted background data. Context capsules and memory planning preserve
+the user text independently of source length. Legacy email-prefixed user messages
+are normalized on loading without rewriting the audit logs.
+
+New Telegram requests received during work are queued for separate turns. Explicit
+corrections and cancellation may steer active work; unrelated questions must not
+silently replace it.
+
+Corrections with a reply target stay attached to that request, including a queued
+request. Without a reply target, a correction belongs to the latest queued request
+or, if none exists, the active request. An unqualified cancellation stops active
+work; a cancellation replying to a queued request applies only when that request
+becomes active. Queue ownership is held while awaiting global execution capacity.

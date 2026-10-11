@@ -488,3 +488,13 @@ See `specs/browser.md` for runtime bridge invariants.
 - Sandbox CLI tests for `ash-sb capability` command contracts.
 - Integration tests for multi-user isolation (same skill, different users).
 - Integration tests for sensitive capability DM-only default behavior.
+
+## Google deployment contract
+
+The service-account Calendar provider composes the bundled OAuth Gmail provider
+under the same `gog` namespace, preserving identity verification and mutation
+confirmation. Restore persisted account links after registering definitions so
+authentication survives integration-based startup. Calendar list_events accepts
+query, an explicit timezone-qualified time_min/time_max range, and page_token; it
+returns next_page_token and the effective range. Historical queries must not
+silently become upcoming-event queries.

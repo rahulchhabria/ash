@@ -289,3 +289,16 @@ async def test_reuse_container_retries_once_when_exec_hits_stale_container(
 
     assert result.success is True
     assert manager.created == ["c1"]
+
+
+async def test_missing_image_reports_recovery_command(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    executor = SandboxExecutor()
+    monkeypatch.setattr(
+        executor._manager, "ensure_image", AsyncMock(return_value=False)
+    )
+    result = await executor.execute("echo hi")
+    assert not result.success
+    assert "ash-sandbox:latest" in result.stderr
+    assert "ash sandbox build" in result.stderr

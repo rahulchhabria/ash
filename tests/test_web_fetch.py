@@ -479,3 +479,16 @@ class TestWebFetchEdgeCases:
         )
 
         assert not result.is_error
+
+
+@pytest.mark.asyncio
+async def test_fetch_surfaces_sandbox_failure():
+    executor = AsyncMock()
+    executor.execute.return_value = ExecutionResult(
+        exit_code=-1, stdout="", stderr="Sandbox not initialized"
+    )
+    result = await WebFetchTool(executor=executor).execute(
+        {"url": "https://example.com"}, ToolContext()
+    )
+    assert result.is_error
+    assert "Sandbox not initialized" in result.content

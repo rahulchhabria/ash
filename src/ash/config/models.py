@@ -346,7 +346,9 @@ class ContextFirewallConfig(BaseModel):
     """Policy for integration-supplied context injection."""
 
     enabled: bool = True
-    allowed_triggers: list[str] = Field(default_factory=lambda: ["reply", "explicit"])
+    allowed_triggers: list[str] = Field(
+        default_factory=lambda: ["reply", "explicit", "source_followup"]
+    )
     allowed_integrations: list[str] = Field(default_factory=list)
     blocked_integrations: list[str] = Field(default_factory=list)
 

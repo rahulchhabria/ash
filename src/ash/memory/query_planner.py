@@ -82,7 +82,8 @@ class LLMQueryPlanner(MemoryQueryPlanner):
                 "Return ONLY JSON with this shape: "
                 '{"query": string, "lookup_queries": string[]}. '
                 "Rules: "
-                "1) query should capture the user's direct request. "
+                "1) query must capture the latest message, never substitute an older request. "
+                "A self-contained new question takes precedence over recent_messages. "
                 "2) lookup_queries should be additional memory lookups for missing background "
                 "facts needed to answer well. "
                 "3) Use recent_messages to resolve pronouns/references before choosing lookups. "
@@ -102,17 +103,68 @@ class LLMQueryPlanner(MemoryQueryPlanner):
         query = raw_query.strip() if isinstance(raw_query, str) else ""
         if not query:
             query = user_message
+        # Spec: specs/memory/retrieval.md. Reject topic drift before retrieval.
+        primary_query = user_message.strip() or query
+        lookups = payload.get("lookup_queries")
+        candidates = [query, *(lookups if isinstance(lookups, list) else [])]
         supplemental_queries = _parse_lookup_queries(
-            payload.get("lookup_queries"),
-            primary_query=query,
+            [
+                candidate
+                for candidate in candidates
+                if isinstance(candidate, str)
+                and _lookup_is_grounded(candidate, primary_query, recent_messages)
+            ],
+            primary_query=primary_query,
             limit=self._max_lookup_queries,
         )
-
         return PlannedMemoryQuery(
-            query=query,
+            query=primary_query,
             max_results=self._retrieval_limit,
             supplemental_queries=supplemental_queries,
         )
+
+
+_QUERY_STOPWORDS = frozenset(
+    "a an and are as at be by can check could did do does for from get give had has "
+    "have how i in is like me my of on or please s show some tell than the to user "
+    "was were what when where which who why will with would you your now today "
+    "yesterday tomorrow last next first latest current about it its that this these "
+    "those they them their there he she his her".split()
+)
+_REFERENCE_WORDS = frozenset(
+    "it its that this these those they them their there he she his her".split()
+)
+_LOCATION_TERMS = frozenset(
+    "location home city live lives local area neighborhood timezone context".split()
+)
+_LOCAL_REQUEST_TERMS = frozenset(
+    "weather forecast nearby restaurant restaurants dinner lunch breakfast commute".split()
+)
+
+
+def _query_terms(text: str) -> set[str]:
+    return set(re.findall(r"\w+", text.casefold())) - _QUERY_STOPWORDS
+
+
+def _lookup_is_grounded(
+    candidate: str, current: str, recent_messages: tuple[str, ...]
+) -> bool:
+    """Conservatively expand the current topic, not arbitrary historical topics.
+
+    Reference-only follow-ups can use the immediately preceding turn. Location
+    lookups remain available for underspecified local questions such as weather.
+    Rejected expansions still retain the full current question as primary search.
+    """
+    terms = _query_terms(candidate)
+    anchors = _query_terms(current)
+    if terms & anchors:
+        return True
+    if anchors & _LOCAL_REQUEST_TERMS and terms and terms <= _LOCATION_TERMS:
+        return True
+    words = set(re.findall(r"\w+", current.casefold()))
+    if not anchors and words & _REFERENCE_WORDS and recent_messages:
+        return bool(terms & _query_terms(recent_messages[-1]))
+    return False
 
 
 def _parse_json_object(text: str) -> dict[str, object]:

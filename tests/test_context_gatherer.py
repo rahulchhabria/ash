@@ -3,6 +3,7 @@
 Tests the context gathering logic extracted from Agent.
 """
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -10,6 +11,60 @@ import pytest
 from ash.core.context import ContextGatherer, GatheredContext
 from ash.memory.query_planner import PlannedMemoryQuery
 from ash.store.types import PersonEntry, RetrievedContext, SearchResult
+
+
+@pytest.mark.asyncio
+async def test_stale_planner_queries_cannot_displace_current_topic_memories() -> None:
+    from ash.llm.types import CompletionResponse, Message, Role
+    from ash.memory.query_planner import LLMQueryPlanner
+
+    llm = MagicMock()
+    llm.complete = AsyncMock(
+        return_value=CompletionResponse(
+            message=Message(
+                role=Role.ASSISTANT,
+                content='{"query":"last eye appointment","lookup_queries":["eye clinic"]}',
+            )
+        )
+    )
+    planner = LLMQueryPlanner(llm=llm, model="test", retrieval_limit=10)
+    store = MagicMock()
+    store._embeddings.embed_batch = AsyncMock(
+        side_effect=lambda texts: [[1.0] for _ in texts]
+    )
+
+    async def retrieve(**kwargs: Any) -> RetrievedContext:
+        stale = "eye" in kwargs["user_message"]
+        return RetrievedContext(
+            memories=[
+                SearchResult(
+                    id="eye" if stale else "toronto",
+                    content="Eye appointment" if stale else "Toronto companies",
+                    similarity=0.99 if stale else 0.75,
+                )
+            ]
+        )
+
+    store.get_context_for_message = AsyncMock(side_effect=retrieve)
+    gatherer = ContextGatherer(store, query_planner=planner, max_total_memories=1)
+    plan = await gatherer._build_query_plan(
+        user_message="What companies are headquartered in Toronto?",
+        provider="telegram",
+        chat_id="c",
+        chat_type="private",
+        sender_username="u",
+        recent_messages=("user: When was my last eye appointment?",),
+    )
+    result = await gatherer._retrieve_for_query(
+        user_id="u",
+        chat_id="c",
+        chat_type="private",
+        participant_person_ids=None,
+        query_plan=plan,
+    )
+    assert result is not None
+    assert [memory.id for memory in result.memories] == ["toronto"]
+    assert store.get_context_for_message.await_count == 1
 
 
 class TestContextGatherer:

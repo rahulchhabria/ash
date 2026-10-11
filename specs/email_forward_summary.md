@@ -30,6 +30,10 @@ max_body_chars = 4000
 - Explicit replies resolve their email source first. Replies to subsequent assistant
   messages and non-reply continuations resolve the conversation thread's source from
   that chat's history, including after focus expiry or a restart.
+- Implicit continuations MUST be relevant to the source or clearly refer back to it.
+  An unrelated standalone question MUST NOT inherit the thread source.
+- Source documents MUST be carried as structured background context, never prepended
+  to user text, persisted as user intent, or used as the retrieval query.
 - Thread source resolution MUST NOT require the follow-up to repeat the email subject
   or contain a pronoun. For example, “what are the dates i should care about” continues
   the current email conversation.
@@ -72,3 +76,6 @@ max_body_chars = 4000
 - Ambiguous keyword matches do not pick an arbitrary email
 - No-op when neither reply nor conversation has a known source
 - Body truncation honors `max_body_chars`
+
+Implicit source continuations use the `source_followup` policy trigger, never
+`explicit`. Operators can disable these while continuing to allow direct replies.

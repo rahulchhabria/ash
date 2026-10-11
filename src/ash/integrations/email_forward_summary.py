@@ -124,6 +124,13 @@ class EmailForwardSummaryIntegration(IntegrationContributor):
                 source = "thread"
                 header = "Email-forward-summary context (conversation source)"
 
+        if (
+            row is not None
+            and source == "thread"
+            and not _source_matches_request(row, message.text)
+        ):
+            return message
+
         if row is None and not reply_to:
             focus = self._select_active_email_focus(message)
             if focus is None:
@@ -152,7 +159,7 @@ class EmailForwardSummaryIntegration(IntegrationContributor):
         decision = check_context_injection(
             context.config,
             integration=self.name,
-            trigger="reply" if source == "reply" else "explicit",
+            trigger="reply" if source == "reply" else "source_followup",
             message=message,
         )
         if not decision.allowed:
@@ -162,8 +169,15 @@ class EmailForwardSummaryIntegration(IntegrationContributor):
         if not context_block:
             return message
 
-        prefixed = f"{context_block}\n\n{message.text}".strip()
-        message.text = prefixed
+        # Spec: specs/email_forward_summary.md — source data is never user intent.
+        message.source_context = {
+            **message.source_context,
+            self.name: {
+                "content": context_block,
+                "source": source,
+                "email_id": row["id"],
+            },
+        }
         message.metadata = {
             **message.metadata,
             "email_forward_summary.email_id": row["id"],
@@ -435,3 +449,24 @@ def _content_words(text: str) -> list[str]:
         for word in _WORD_RE.findall(text or "")
         if len(word) > 1 and word.lower() not in _STOPWORDS
     ]
+
+
+def _source_matches_request(row: dict[str, Any], text: str) -> bool:
+    """Conservatively resolve implicit source follow-ups without capturing new topics."""
+    words = set(_content_words(text))
+    # Match document content, never schema keys such as `email_type`.
+    source_words = set(
+        _content_words(f"{row.get('subject', '')} {row.get('cleaned_body', '')}")
+    )
+    # Pronoun-free references to the current document are useful after idle gaps.
+    if re.search(
+        r"(?:\b(?:that|this|the) (?:email|newsletter|summary)\b|"
+        r"\bdates? i should care about\b|^summari[sz]e(?: (?:it|this|that))?[.!?]?$)",
+        text,
+        re.I,
+    ):
+        return True
+    if words & (source_words - {"can", "new", "some", "about", "time", "last", "most"}):
+        return True
+    # Short deictic follow-ups such as "where is it?" have no independent subject.
+    return bool(_CONTEXTUAL_PRONOUN_RE.search(text)) and len(words) <= 2

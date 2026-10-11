@@ -494,7 +494,8 @@ class WebFetchTool(Tool):
 
             output = result.stdout.strip() if result.stdout else ""
             if not output:
-                return ToolResult.error("Fetch error: Empty response from fetch")
+                detail = result.stderr.strip() or "Empty response from fetch"
+                return ToolResult.error(f"Fetch error: {detail}")
 
             data = json.loads(output)
             if "error" in data:

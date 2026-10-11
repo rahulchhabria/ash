@@ -85,8 +85,21 @@ def _dispatch(request: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(params, dict):
         raise BridgeError("capability_invalid_input", "params must be an object")
 
+    # Spec: specs/capabilities.md. Compose the existing OAuth Gmail bridge with
+    # service-account Calendar under one namespace, preserving scoped auth.
+    from ash.skills.bundled.gog.scripts import gogcli_bridge
+
+    capability_id = params.get("capability_id")
     if method == "definitions":
         result = _definitions()
+        result["definitions"].extend(gogcli_bridge._handle_definitions()["definitions"])
+    elif capability_id == "gog.email" or (
+        method.startswith("auth_") and capability_id != CAPABILITY_ID
+    ):
+        try:
+            result = gogcli_bridge._dispatch(method, params)
+        except gogcli_bridge.BridgeError as exc:
+            raise BridgeError(exc.code, str(exc)) from None
     elif method == "auth_begin":
         result = _auth_not_required()
     elif method == "auth_complete":
@@ -123,7 +136,7 @@ def _definitions() -> dict[str, Any]:
                 "operations": [
                     {
                         "name": "list_events",
-                        "description": "List upcoming calendar events",
+                        "description": "List or search events using query, time_min/time_max (RFC3339), date, page_token, and limit",
                         "requires_auth": False,
                         "mutating": False,
                     },
@@ -314,6 +327,38 @@ def _list_events(input_data: dict[str, Any], *, access_token: str) -> dict[str, 
         tz_name=tz_name,
         limit=limit,
     )
+    start_override = _optional_text(input_data.get("time_min")) or _optional_text(
+        input_data.get("timeMin")
+    )
+    end_override = _optional_text(input_data.get("time_max")) or _optional_text(
+        input_data.get("timeMax")
+    )
+    if start_override or end_override:
+        if requested_date:
+            raise BridgeError(
+                "capability_invalid_input", "Use date or time_min/time_max, not both"
+            )
+        if not start_override or not end_override:
+            raise BridgeError(
+                "capability_invalid_input", "time_min and time_max are both required"
+            )
+        lower, upper = _parse_timestamp(start_override), _parse_timestamp(end_override)
+        if lower >= upper:
+            raise BridgeError(
+                "capability_invalid_input", "time_min must be before time_max"
+            )
+        params = [
+            (key, value) for key, value in params if key not in {"timeMin", "timeMax"}
+        ]
+        params.extend([("timeMin", start_override), ("timeMax", end_override)])
+    query = _optional_text(input_data.get("query")) or _optional_text(
+        input_data.get("q")
+    )
+    if query:
+        params.append(("q", query))
+    page_token = _optional_text(input_data.get("page_token"))
+    if page_token:
+        params.append(("pageToken", page_token))
     raw = _google_request(
         "GET",
         f"{_calendar_base()}/calendar/v3/calendars/{quote(calendar_id, safe='')}/events",
@@ -331,10 +376,27 @@ def _list_events(input_data: dict[str, Any], *, access_token: str) -> dict[str, 
         "count": len(events),
         "calendar": calendar_id,
         "timezone": tz_name,
+        "time_min": dict(params)["timeMin"],
+        "time_max": dict(params)["timeMax"],
+        "query": query,
+        "next_page_token": raw.get("nextPageToken"),
     }
     if requested_date:
         output["date"] = requested_date
     return output
+
+
+def _parse_timestamp(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("missing timezone")
+        return parsed
+    except ValueError:
+        raise BridgeError(
+            "capability_invalid_input",
+            "Date range must use RFC3339 timestamps with timezone",
+        ) from None
 
 
 def _list_event_params(

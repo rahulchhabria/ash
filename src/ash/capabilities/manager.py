@@ -112,6 +112,9 @@ class CapabilityManager:
                     self._capability_provider_names.pop(capability_id, None)
             raise
 
+        # Restore links after definitions exist, including integration registration.
+        _restore_persisted_gog_accounts(self)
+
     async def _register(
         self,
         *,

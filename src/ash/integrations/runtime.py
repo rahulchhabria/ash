@@ -5,8 +5,9 @@ Spec contract: specs/subsystems.md (Integration Hooks), specs/integrations.md.
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeVar
@@ -134,12 +135,28 @@ class IntegrationRuntime:
     """Deterministic integration pipeline runtime."""
 
     def __init__(self, contributors: list[IntegrationContributor] | None = None):
+        self._health_probes: dict[str, Callable[[], Awaitable[bool]]] = {}
         self._contributors = tuple(
             sorted(contributors or [], key=lambda c: (c.priority, c.name))
         )
         self._active_contributors = self._contributors
         self._failed_setup: dict[str, int] = {}
         self._hook_failure_counts: dict[str, int] = {}
+
+    def register_health_probe(
+        self, name: str, probe: Callable[[], Awaitable[bool]]
+    ) -> None:
+        """Register an integration-owned dependency check (specs/integrations.md)."""
+        self._health_probes[name] = probe
+
+    async def check_health(self) -> dict[str, bool]:
+        checks = {"integrations": not self.health_snapshot().is_degraded}
+        for name, probe in self._health_probes.items():
+            try:
+                checks[name] = await asyncio.wait_for(probe(), timeout=15)
+            except Exception:
+                checks[name] = False
+        return checks
 
     @property
     def contributors(self) -> tuple[IntegrationContributor, ...]:

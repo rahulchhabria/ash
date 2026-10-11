@@ -12,7 +12,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("context_firewall")
 
-Trigger = Literal["reply", "explicit", "classifier", "recent", "ambient"]
+Trigger = Literal[
+    "reply", "explicit", "source_followup", "classifier", "recent", "ambient"
+]
 
 
 @dataclass(frozen=True, slots=True)

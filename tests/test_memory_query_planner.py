@@ -36,9 +36,9 @@ async def test_llm_query_planner_rewrites_single_query() -> None:
         sender_username="dcramer",
     )
 
-    assert query.query == "location home city weather context"
+    assert query.query == "check weather"
     assert query.max_results == 25
-    assert query.supplemental_queries == ()
+    assert query.supplemental_queries == ("location home city weather context",)
 
 
 @pytest.mark.asyncio
@@ -59,8 +59,8 @@ async def test_llm_query_planner_includes_lookup_queries() -> None:
         sender_username="dcramer",
     )
 
-    assert query.query == "weather now"
-    assert query.supplemental_queries == ("where user lives", "user city")
+    assert query.query == "what's the weather like"
+    assert query.supplemental_queries == ("weather now", "where user lives")
 
 
 @pytest.mark.asyncio
@@ -167,3 +167,61 @@ def test_resolve_query_planner_runtime_unknown_alias_raises() -> None:
             requested_alias="openai:gpt-5-mini",
             default_alias="default",
         )
+
+
+@pytest.mark.asyncio
+async def test_stale_planner_output_never_replaces_latest_request() -> None:
+    llm = _FakeLLM('{"query":"last eye appointment","lookup_queries":[]}')
+    planner = LLMQueryPlanner(
+        llm=cast(LLMProvider, llm), model="test", retrieval_limit=10
+    )
+    question = "What companies are headquartered in Toronto?"
+    result = await planner.plan(
+        user_message=question,
+        chat_type="private",
+        sender_username="user",
+        recent_messages=("user: when was my last eye appointment?",),
+    )
+    assert result.query == question
+    assert result.supplemental_queries == ()
+
+
+@pytest.mark.asyncio
+async def test_unrelated_lookup_is_rejected_even_with_a_valid_rewrite() -> None:
+    planner = LLMQueryPlanner(
+        llm=cast(
+            LLMProvider,
+            _FakeLLM(
+                '{"query":"Toronto headquarters","lookup_queries":["last eye appointment"]}'
+            ),
+        ),
+        model="test",
+        retrieval_limit=10,
+    )
+    plan = await planner.plan(
+        user_message="What companies are headquartered in Toronto?",
+        chat_type="private",
+        sender_username="user",
+    )
+    assert plan.supplemental_queries == ("Toronto headquarters",)
+
+
+@pytest.mark.asyncio
+async def test_reference_only_followup_uses_immediate_context() -> None:
+    planner = LLMQueryPlanner(
+        llm=cast(
+            LLMProvider,
+            _FakeLLM(
+                '{"query":"Toronto headquarters","lookup_queries":["eye appointment"]}'
+            ),
+        ),
+        model="test",
+        retrieval_limit=10,
+    )
+    plan = await planner.plan(
+        user_message="What about those?",
+        chat_type="private",
+        sender_username="user",
+        recent_messages=("user: eye appointment", "assistant: Toronto companies"),
+    )
+    assert plan.supplemental_queries == ("Toronto headquarters",)

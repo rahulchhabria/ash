@@ -49,7 +49,8 @@ On every invocation, follow these steps in order:
 ash-sb capability list
 ```
 
-- If a needed capability is missing, tell the user to enable `[skills.google]` and stop.
+- Check only the capability needed for this task. Missing Gmail must not block Calendar.
+- If a needed capability is missing, report that specific capability; do not claim all Google access is unavailable.
 - If a needed capability has `requires_auth: false`, treat it as host-configured and continue to operations (step 3), even if `authenticated` is shown as false by older hosts.
 - If a needed capability has `requires_auth: true` and is not authenticated, run auth (step 2).
 - If already authenticated, continue to operations (step 3).
@@ -132,6 +133,16 @@ If the user asks a broad question and does not provide scope, use these defaults
 - Email summaries: `search_messages` with `{"query":"is:unread newer_than:1d","limit":20}`
 - Day-at-a-glance: `list_events` with `{"calendar":"primary","window":"1d"}` on account `default` plus unread/recent email query when Gmail is available
 - Message deep read: run `get_message` for each item you summarize
+
+### Historical calendar searches
+
+For "last appointment" or other past-event questions, use `list_events` with
+`query`, `time_min`, and `time_max` (RFC3339 timestamps with timezone). Start with
+the past year ending now, and expand the range if necessary. Try separate search
+terms such as "eye", "optometrist", and the clinic name when known. Do not use
+the default upcoming window for a historical question. Follow `next_page_token`
+using `page_token` until exhausted before selecting the latest matching event.
+Report the searched range if no match exists; do not claim there was no appointment.
 
 ### Account and calendar defaults
 

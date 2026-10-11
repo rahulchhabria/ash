@@ -107,9 +107,12 @@ async def test_injects_context_when_reply_matches_known_email(tmp_path) -> None:
     message = _message(text="who is the new principal?", reply_to="1013")
     updated = await integration.preprocess_incoming_message(message, context)
 
-    assert CONTEXT_HEADER in updated.text
-    assert CONTEXT_FOOTER in updated.text
-    assert "Professional Community Updates" in updated.text
+    assert CONTEXT_HEADER in updated.source_context["email_forward_summary"]["content"]
+    assert CONTEXT_FOOTER in updated.source_context["email_forward_summary"]["content"]
+    assert (
+        "Professional Community Updates"
+        in updated.source_context["email_forward_summary"]["content"]
+    )
     assert "who is the new principal?" in updated.text
     assert updated.metadata["email_forward_summary.email_id"] == 1
 
@@ -194,7 +197,7 @@ async def test_truncates_long_body(tmp_path) -> None:
     message = _message(text="explain", reply_to="7")
     updated = await integration.preprocess_incoming_message(message, context)
 
-    assert "\u2026" in updated.text
+    assert "\u2026" in updated.source_context["email_forward_summary"]["content"]
 
 
 @pytest.mark.asyncio
@@ -227,8 +230,14 @@ async def test_injects_context_from_active_email_focus_for_followup(
     message = _message(text="where is practice?", reply_to=None)
     updated = await integration.preprocess_incoming_message(message, context)
 
-    assert "Email-forward-summary context (active focus)" in updated.text
-    assert "Professional Community Updates" in updated.text
+    assert (
+        "Email-forward-summary context (active focus)"
+        in updated.source_context["email_forward_summary"]["content"]
+    )
+    assert (
+        "Professional Community Updates"
+        in updated.source_context["email_forward_summary"]["content"]
+    )
     assert "where is practice?" in updated.text
     assert updated.metadata["email_forward_summary.email_id"] == 1
     assert updated.metadata["email_forward_summary.source"] == "active_focus"
@@ -332,7 +341,10 @@ async def test_thread_source_survives_expiry_restart_and_pronoun_free_followup(
     updated = await integration.preprocess_incoming_message(message, context)
     assert updated.metadata["email_forward_summary.email_id"] == 1
     assert updated.metadata["email_forward_summary.source"] == "thread"
-    assert "Professional Community Updates" in updated.text
+    assert (
+        "Professional Community Updates"
+        in updated.source_context["email_forward_summary"]["content"]
+    )
     recovered = find_chat_history_message("telegram", "c-1", "1013")
     assert recovered is not None
     assert recovered.created_at < datetime.now(UTC) - timedelta(days=1)
@@ -381,3 +393,58 @@ async def test_ambiguous_focus_does_not_choose_arbitrary_email(tmp_path) -> None
         _message(text="where is practice?", reply_to=None), context
     )
     assert "email_forward_summary.email_id" not in updated.metadata
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "question",
+    [
+        "What are some popular tech companies headquartered in Toronto, Canada?",
+        "What is 2 + 2?",
+        "Summarize my inbox",
+        "Email my eye doctor",
+        "When was my last eye doctor appointment?",
+    ],
+)
+async def test_unrelated_question_in_email_thread_is_not_contaminated(
+    tmp_path, question
+):
+    from ash.chats.history import ChatHistoryWriter
+
+    db = tmp_path / "email.sqlite3"
+    _seed_db(db, telegram_message_id=1013)
+    manager = ChatStateManager("telegram", "c-1")
+    manager.load().set_active_thread("1013", reason="external_focus")
+    manager.save()
+    ChatHistoryWriter("telegram", "c-1").record_bot_message(
+        content="School newsletter",
+        metadata={
+            "external_id": "1013",
+            "source": "email_forward_summary",
+            "source_id": "email:1",
+        },
+    )
+    integration = EmailForwardSummaryIntegration()
+    context = _context(_config(db_path=db))
+    await integration.setup(context)
+    message = _message(text=question, reply_to=None)
+    updated = await integration.preprocess_incoming_message(message, context)
+    assert updated.text == question
+    assert updated.source_context == {}
+    assert "email_forward_summary.email_id" not in updated.metadata
+
+
+@pytest.mark.asyncio
+async def test_explicit_email_reply_preserves_original_message(tmp_path):
+    db = tmp_path / "email.sqlite3"
+    _seed_db(db, telegram_message_id=1013)
+    integration = EmailForwardSummaryIntegration()
+    context = _context(_config(db_path=db))
+    await integration.setup(context)
+    message = _message(text="Who is the new principal?", reply_to="1013")
+    updated = await integration.preprocess_incoming_message(message, context)
+    assert updated.text == "Who is the new principal?"
+    assert (
+        "Professional Community Updates"
+        in updated.source_context["email_forward_summary"]["content"]
+    )

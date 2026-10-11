@@ -115,3 +115,10 @@ all mounted skill directories for `ash-sb skill list` discovery.
 1. Add unit tests for hook behavior.
 2. Add runtime integration tests for ordering and side effects.
 3. Add/update architecture guards when ownership boundaries change.
+
+## Dependency readiness
+
+Integrations may register bounded async health probes with the runtime. `/health`
+is process liveness; `/ready` checks integration failures and registered dependency
+probes, returning HTTP 503 if a required check fails. The RPC lifecycle owns the
+sandbox-to-host socket probe, keeping feature checks out of server wiring.

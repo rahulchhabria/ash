@@ -209,3 +209,123 @@ async def test_todo_rpc_methods_not_registered_when_todo_disabled(
         assert not any(method.startswith("todo.") for method in methods)
 
     assert not any(method.startswith("todo.") for method in calls)
+
+
+@pytest.mark.asyncio
+async def test_mapped_uid_acl_is_narrow_and_reapplied(monkeypatch, tmp_path):
+    from unittest.mock import AsyncMock
+
+    from ash.integrations.rpc import _grant_sandbox_socket_access
+
+    calls = []
+
+    async def spawn(*args, **kwargs):
+        calls.append(args)
+        return SimpleNamespace(
+            returncode=0, communicate=AsyncMock(return_value=(b"", b""))
+        )
+
+    monkeypatch.setenv("ASH_RPC_SANDBOX_HOST_UID", "100999")
+    monkeypatch.setattr("ash.integrations.rpc.asyncio.create_subprocess_exec", spawn)
+    path = tmp_path / "rpc.sock"
+    await _grant_sandbox_socket_access(path)
+    await _grant_sandbox_socket_access(path)
+    expected = [
+        ("setfacl", "-m", "u:100999:--x", str(tmp_path)),
+        ("setfacl", "-m", "u:100999:rw-", str(path)),
+    ]
+    assert calls == expected + expected
+
+
+@pytest.mark.asyncio
+async def test_readiness_reports_dependency_failure():
+    import httpx
+    from fastapi import FastAPI
+
+    from ash.server.routes.health import router
+
+    runtime = IntegrationRuntime([])
+
+    async def broken():
+        return False
+
+    runtime.register_health_probe("sandbox_rpc", broken)
+    app = FastAPI()
+    app.state.integration_runtime = runtime
+    app.include_router(router)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get("/ready")
+        assert response.status_code == 503
+        assert response.json()["checks"]["sandbox_rpc"] is False
+
+        async def working():
+            return True
+
+        runtime.register_health_probe("sandbox_rpc", working)
+        assert (await client.get("/ready")).status_code == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "transport", ["unix", "tcp_missing_unix", "tcp_refused_unix", "broken"]
+)
+async def test_readiness_uses_authenticated_client_transport(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transport: str
+) -> None:
+    import asyncio
+    import os
+    import shlex
+    import socket
+
+    from ash.sandbox.executor import ExecutionResult
+
+    monkeypatch.delenv("ASH_RPC_SANDBOX_HOST_UID", raising=False)
+    monkeypatch.delenv("ASH_RPC_TCP_BIND_HOST", raising=False)
+    if transport.startswith("tcp"):
+        monkeypatch.setenv("ASH_RPC_TCP_BIND_HOST", "127.0.0.1")
+        monkeypatch.setenv("ASH_RPC_DOCKER_HOST_ALIAS", "127.0.0.1")
+    path = tmp_path / "server" / "rpc.sock"
+    client_path = path if transport == "unix" else tmp_path / "missing.sock"
+    if transport == "tcp_refused_unix":
+        # A stale socket exists, but no process is listening to it.
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.bind(str(client_path))
+
+    class LocalExecutor:
+        async def execute(
+            self,
+            command: str,
+            *,
+            timeout: int,  # noqa: ASYNC109 - executor interface
+            reuse_container: bool,
+            environment: dict[str, str],
+        ) -> ExecutionResult:
+            assert reuse_container is False
+            env = {k: v for k, v in os.environ.items() if not k.startswith("ASH_RPC_")}
+            env.update(environment)
+            env["ASH_RPC_SOCKET"] = str(client_path)
+            proc = await asyncio.create_subprocess_exec(
+                *shlex.split(command),
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            return ExecutionResult(
+                proc.returncode or 0, stdout.decode(), stderr.decode()
+            )
+
+    runtime = IntegrationRuntime([])
+    context = IntegrationContext(
+        config=AshConfig(
+            workspace=tmp_path,
+            models={"default": ModelConfig(provider="openai", model="test")},
+        ),
+        components=cast(Any, SimpleNamespace(sandbox_executor=LocalExecutor())),
+        mode="serve",
+    )
+    async with active_rpc_server(runtime=runtime, context=context, socket_path=path):
+        checks = await runtime.check_health()
+        assert checks["sandbox_rpc"] is (transport != "broken")

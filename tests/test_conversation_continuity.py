@@ -691,3 +691,172 @@ def test_memory_debounce_timestamp_is_scoped_per_conversation() -> None:
 
     assert not service._should_extract("Remember this", first_key)
     assert service._should_extract("Remember this", second_key)
+
+
+def test_new_question_waits_while_explicit_correction_steers() -> None:
+    from ash.providers.telegram.handlers.session_handler import SessionLock
+
+    controller = SessionLock()
+    controller.begin_message(
+        IncomingMessage(id="1", chat_id="c", user_id="u", text="Toronto companies")
+    )
+    question = IncomingMessage(
+        id="2", chat_id="c", user_id="u", text="When was my last eye appointment?"
+    )
+    correction = IncomingMessage(
+        id="3",
+        chat_id="c",
+        user_id="u",
+        text="Actually, include only Toronto headquarters",
+        reply_to_message_id="1",
+    )
+    controller.enqueue(question)
+    assert not controller._revision_event.is_set()
+    controller.enqueue(correction)
+    assert controller.take_for_steering() == [correction]
+    assert controller.take_for_next_turn() == [question]
+    assert controller.take_consumed_steering() == [correction]
+
+
+def test_cancel_does_not_discard_separate_queued_question() -> None:
+    from ash.providers.telegram.handlers.session_handler import SessionLock
+
+    controller = SessionLock()
+    controller.begin_message(
+        IncomingMessage(id="1", chat_id="c", user_id="u", text="Toronto companies")
+    )
+    question = IncomingMessage(id="2", chat_id="c", user_id="u", text="What is 2 + 2?")
+    cancel = IncomingMessage(id="3", chat_id="c", user_id="u", text="Stop")
+    controller.enqueue(question)
+    controller.enqueue(cancel)
+    assert controller.cancel_event.is_set()
+    assert controller.take_for_steering() == [cancel]
+    assert controller.take_for_next_turn() == [question]
+
+
+@pytest.mark.parametrize("reply_to", [None, "2"])
+@pytest.mark.parametrize(
+    "correction_text",
+    ["Actually, my dentist appointment", "Instead, my dentist appointment"],
+)
+def test_queued_correction_waits_for_its_request(
+    reply_to: str | None, correction_text: str
+) -> None:
+    from ash.providers.telegram.handlers.session_handler import SessionLock
+
+    controller = SessionLock()
+    controller.begin_message(
+        IncomingMessage(id="1", chat_id="c", user_id="u", text="Toronto companies")
+    )
+    question = IncomingMessage(
+        id="2", chat_id="c", user_id="u", text="When was my last eye appointment?"
+    )
+    correction = IncomingMessage(
+        id="3",
+        chat_id="c",
+        user_id="u",
+        text=correction_text,
+        reply_to_message_id=reply_to,
+    )
+    controller.enqueue(question)
+    controller.enqueue(correction)
+    assert not controller._revision_event.is_set()
+    assert controller.take_for_steering() == []
+    pending = controller.take_for_next_turn()
+    assert pending == [question, correction]
+    # Mirror the handler's queue transition; the bound target must survive it.
+    controller.enqueue(correction)
+    controller.begin_message(question)
+    assert controller._revision_event.is_set()
+    assert controller.take_for_steering() == [correction]
+    assert controller.take_consumed_steering() == [correction]
+    assert controller.take_for_next_turn() == []
+
+
+def test_cancel_reply_to_queued_request_does_not_cancel_active_work() -> None:
+    from ash.providers.telegram.handlers.session_handler import SessionLock
+
+    controller = SessionLock()
+    controller.begin_message(
+        IncomingMessage(id="1", chat_id="c", user_id="u", text="Toronto companies")
+    )
+    question = IncomingMessage(
+        id="2", chat_id="c", user_id="u", text="Create an appointment"
+    )
+    cancel = IncomingMessage(
+        id="3", chat_id="c", user_id="u", text="Cancel", reply_to_message_id="2"
+    )
+    controller.enqueue(question)
+    controller.enqueue(cancel)
+    assert not controller.cancel_event.is_set()
+    assert controller.take_for_steering() == []
+    controller.take_for_next_turn()
+    controller.enqueue(cancel)
+    controller.begin_message(question)
+    assert controller.cancel_event.is_set()
+    assert controller.take_for_steering() == [cancel]
+
+
+@pytest.mark.asyncio
+async def test_handler_preserves_revision_target_while_waiting_for_capacity() -> None:
+    from ash.providers.telegram.handlers.message_handler import TelegramMessageHandler
+    from ash.providers.telegram.handlers.session_handler import SessionLock
+
+    handler = TelegramMessageHandler.__new__(TelegramMessageHandler)
+    handler._concurrency_semaphore = asyncio.Semaphore(0)
+    seen: list[tuple[str, list[str]]] = []
+
+    async def process(message: IncomingMessage, controller: SessionLock) -> None:
+        seen.append((message.id, [m.id for m in controller.take_for_steering()]))
+
+    handler._process_single_message = AsyncMock(side_effect=process)
+    controller = SessionLock()
+    first = IncomingMessage(id="1", chat_id="c", user_id="u", text="Toronto companies")
+    task = asyncio.create_task(handler._process_message_loop(first, controller))
+    try:
+        await asyncio.sleep(0)
+        assert controller.lock.locked()
+        controller.enqueue(
+            IncomingMessage(id="2", chat_id="c", user_id="u", text="Eye appointment")
+        )
+        controller.enqueue(
+            IncomingMessage(
+                id="3",
+                chat_id="c",
+                user_id="u",
+                text="Actually, dentist",
+                reply_to_message_id="2",
+            )
+        )
+        handler._concurrency_semaphore.release()
+        await asyncio.wait_for(task, timeout=2)
+        assert seen == [("1", []), ("2", ["3"])]
+        assert not controller.lock.locked()
+    finally:
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+
+def test_source_context_cannot_hide_current_request():
+    from ash.core.conversation import original_user_text
+
+    question = "What are some popular tech companies headquartered in Toronto, Canada?"
+    legacy = (
+        "--- Email-forward-summary context (conversation source) ---\nemail_id: 1093\n"
+        + "newsletter " * 1000
+        + "\n--- End email-forward-summary context ---\n\n"
+        + question
+    )
+    assert original_user_text(legacy) == question
+    assert original_user_text("normal user text") == "normal user text"
+    envelope = ConversationEnvelope(
+        conversation_id="c",
+        current_message=question,
+        source_context={"email": "newsletter " * 1000},
+    )
+    restored = ConversationEnvelope.from_dict(envelope.to_dict())
+    assert restored.current_message == question
+    assert restored.source_context == envelope.source_context
+    assert "untrusted source documents" in render_conversation_envelope(restored)

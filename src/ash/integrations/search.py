@@ -111,7 +111,12 @@ class SearchIntegration(IntegrationContributor):
                 "Use `browser` only for interactive, authenticated, or highly dynamic pages, or after search cannot resolve the lookup.",
             ]
         )
-        if registry.has("openai_web_search"):
+        if registry.has("exa_search"):
+            rules.append(
+                "For ordinary current public information, use `exa_search` first; "
+                "use `openai_web_search` as a fallback when available."
+            )
+        elif registry.has("openai_web_search"):
             rules.append(
                 "For ordinary current public information, use hosted `openai_web_search` first."
             )
@@ -120,7 +125,7 @@ class SearchIntegration(IntegrationContributor):
                 "For a named local business, branch, address, phone number, or opening-hours question, use `google_places` before general web search; include city, neighborhood, address, or cross streets in the query when known."
             )
         fallbacks = [
-            name for name in ("web_search", "exa_search") if registry.has(name)
+            name for name in ("exa_search", "web_search") if registry.has(name)
         ]
         if fallbacks:
             rules.append(
@@ -128,7 +133,7 @@ class SearchIntegration(IntegrationContributor):
                 + ", ".join(f"`{name}`" for name in fallbacks)
                 + "."
             )
-            if not registry.has("openai_web_search"):
+            if not registry.has("openai_web_search") and not registry.has("exa_search"):
                 rules.append(
                     f"For ordinary current public information, use `{fallbacks[0]}` first."
                 )

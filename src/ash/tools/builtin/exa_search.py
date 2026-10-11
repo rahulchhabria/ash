@@ -89,7 +89,7 @@ class ExaSearchTool(Tool):
     def description(self) -> str:
         return (
             "Search the public web with Exa and return cited page highlights. "
-            "Use as a fallback or for provider comparison, not for authoritative "
+            "Use for ordinary public web lookups; use Google Places for authoritative "
             "local-business hours when `google_places` is available."
         )
 
@@ -159,7 +159,8 @@ class ExaSearchTool(Tool):
             return ToolResult.error("Exa search timed out")
         output = result.stdout.strip() if result.stdout else ""
         if not output:
-            return ToolResult.error("Exa search returned an empty response")
+            detail = result.stderr.strip() or "empty response"
+            return ToolResult.error(f"Exa search execution failed: {detail}")
         try:
             data = json.loads(output)
         except json.JSONDecodeError as error:

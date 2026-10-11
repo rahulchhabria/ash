@@ -444,3 +444,13 @@ def test_tool_output_handoff_is_sanitized_before_session_write() -> None:
         assert not raw_handoff_pattern.search(text), (
             f"Raw tool result content handed to session in {path.relative_to(ROOT)}"
         )
+
+
+def test_source_context_and_readiness_remain_integration_owned():
+    handler = (
+        ROOT / "src/ash/providers/telegram/handlers/message_handler.py"
+    ).read_text()
+    server = (ROOT / "src/ash/server/routes/health.py").read_text()
+    assert "email_forward_summary" not in handler
+    assert "SandboxExecutor" not in server
+    assert "check_health" in server

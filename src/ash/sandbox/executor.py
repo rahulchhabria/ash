@@ -81,7 +81,10 @@ class SandboxExecutor:
             return ExecutionResult(
                 exit_code=-1,
                 stdout="",
-                stderr="Sandbox not initialized",
+                stderr=(
+                    f"Sandbox image {self._config.image!r} is unavailable. "
+                    "Check Docker and run `ash sandbox build`."
+                ),
             )
 
         try:

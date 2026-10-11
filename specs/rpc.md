@@ -13,7 +13,10 @@ Files: src/ash/rpc/__init__.py, src/ash/rpc/server.py, src/ash/rpc/methods/
 - Run server on host, client in sandbox container
 - Support async server with multiple concurrent connections
 - Implement standard error codes (parse_error, method_not_found, etc.)
-- Set socket permissions to owner-only (0o600)
+- Default socket permissions are owner-only (0o600). For rootless Docker, an
+  explicitly configured `ASH_RPC_SANDBOX_HOST_UID` may receive a named POSIX ACL
+  granting directory traversal and socket access only. Keep other users denied;
+  do not run the sandbox as root or expose the bridge on a public TCP interface.
 - Clean up socket file on server stop
 - Support retry on transient connection errors in client
 - Require `context_token` on all RPC calls; reject missing/invalid tokens
@@ -233,3 +236,9 @@ ash memory search --query "test"
 - Methods callable from sandbox CLI
 - Errors returned as JSON-RPC errors
 - Retry logic handles transient failures
+
+Readiness must probe the socket from the actual unprivileged sandbox and report
+503 on failure. Reapply the configured ACL whenever the socket is recreated.
+The probe calls an authenticated, read-only `health.ping` through the sandbox RPC
+client, including its Unix-first/TCP-fallback behavior and integration transport
+environment. Its short-lived identity is reserved for readiness, not a real user.

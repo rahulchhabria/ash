@@ -12,6 +12,7 @@ import hashlib
 import logging
 import re
 import secrets
+from collections import deque
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -20,9 +21,13 @@ from ash.chats import ChatStateManager, ThreadIndex
 from ash.config.models import ConversationConfig
 from ash.core import SessionState
 from ash.core.agent import CompactionInfo
-from ash.core.conversation import ConversationEnvelope, ConversationTurn
+from ash.core.conversation import (
+    ConversationEnvelope,
+    ConversationTurn,
+    original_user_text,
+)
 from ash.core.prompt import format_gap_duration
-from ash.core.steering import TurnController
+from ash.core.steering import TurnController, is_cancel_steering
 from ash.core.tokens import estimate_tokens
 from ash.providers.base import IncomingMessage
 from ash.sessions import SessionManager
@@ -42,6 +47,81 @@ _CONFIRM_PATTERN = re.compile(
 
 class SessionLock(TurnController[IncomingMessage]):
     """Per-session state for message handling."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._active_message_id: str | None = None
+        self._revision_targets: dict[str, str] = {}
+
+    def begin_message(self, message: IncomingMessage) -> None:
+        self._active_message_id = message.id
+        retained = {message.id, *(item.id for item in self._pending)}
+        self._revision_targets = {
+            key: target
+            for key, target in self._revision_targets.items()
+            if target in retained
+        }
+        self.begin_turn()
+
+    def begin_turn(self) -> None:
+        self.cancel_event.clear()
+        self._signal_active_revisions()
+
+    @staticmethod
+    def _is_revision(message: IncomingMessage) -> bool:
+        return is_cancel_steering(message) or bool(
+            re.match(
+                r"^\s*(?:actually\b|correction\b|instead\b|i meant\b|wait\b|no[,!:])",
+                message.text,
+                re.I,
+            )
+        )
+
+    def enqueue(self, item: IncomingMessage) -> None:
+        # Spec: specs/conversation-context.md. Bind revisions before reordering turns.
+        if self._is_revision(item) and item.id not in self._revision_targets:
+            pending_ids = {message.id for message in self._pending}
+            target = item.reply_to_message_id
+            if target:
+                target = self._revision_targets.get(target, target)
+            elif is_cancel_steering(item):
+                target = self._active_message_id
+            else:
+                target = next(
+                    (
+                        message.id
+                        for message in reversed(self._pending)
+                        if message.id not in self._revision_targets
+                    ),
+                    self._active_message_id,
+                )
+            if target and (target == self._active_message_id or target in pending_ids):
+                self._revision_targets[item.id] = target
+        self._pending.append(item)
+        self._signal_active_revisions()
+
+    def _signal_active_revisions(self) -> None:
+        self._revision_event.clear()
+        for item in self._pending:
+            if self._targets_active(item):
+                self._revision_event.set()
+                if is_cancel_steering(item):
+                    self.cancel_event.set()
+
+    def _targets_active(self, item: IncomingMessage) -> bool:
+        return (
+            self._active_message_id is not None
+            and self._revision_targets.get(item.id) == self._active_message_id
+        )
+
+    def take_for_steering(self) -> list[IncomingMessage]:
+        revisions = [item for item in self._pending if self._targets_active(item)]
+        self._pending = deque(
+            item for item in self._pending if not self._targets_active(item)
+        )
+        self._consumed_as_steering.extend(revisions)
+        self._revision_event.clear()
+        return revisions
 
     def add_pending(self, message: IncomingMessage) -> None:
         self.enqueue(message)
@@ -291,6 +371,7 @@ class SessionHandler:
             conversation_id=session_manager.session_key,
             current_message=message.text,
             current_external_id=message.id,
+            source_context=dict(message.source_context),
             recent_turns=turns[-self._conversation_config.recency_window :],
             durable_summary=compaction.summary if compaction else None,
             working_state=working_state,
@@ -355,6 +436,12 @@ class SessionHandler:
         if gap_minutes is not None:
             session.context.conversation_gap_minutes = gap_minutes
 
+        # Spec: specs/conversation-context.md — normalize legacy wrappers in memory.
+        for restored_message in messages:
+            if restored_message.role.value == "user" and isinstance(
+                restored_message.content, str
+            ):
+                restored_message.content = original_user_text(restored_message.content)
         session.messages.extend(messages)
         session.set_message_ids(message_ids)
 

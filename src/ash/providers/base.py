@@ -33,6 +33,7 @@ class IncomingMessage:
     images: list[ImageAttachment] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     timestamp: datetime | None = None  # When the message was sent
+    source_context: dict[str, Any] = field(default_factory=dict)
 
     @property
     def has_images(self) -> bool:
