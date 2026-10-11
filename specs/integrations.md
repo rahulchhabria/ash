@@ -61,6 +61,31 @@ class ExampleIntegration(IntegrationContributor):
 
 ## Rules
 
+### Conversation observability
+
+`BraintrustIntegration` owns optional post-turn conversation observations and its
+bounded export queue. It is composed in chat and serve modes; eval results use
+explicit Braintrust experiments instead of production logs. Disabled by default.
+Credentials resolve from the host `BRAINTRUST_API_KEY` and must never be projected
+into sandbox environment hooks. Content capture requires `capture_content = true`.
+Captured messages are bounded, scrubbed for common credential patterns and email
+addresses, and marked when truncated; this is not a guarantee of anonymization.
+
+Post-turn observations contain session/conversation ID, tool calls/results, model,
+release and Sentry trace ID when available. They describe retained session state,
+not guaranteed delivered replies or full replays: compaction, steering, exceptions,
+interactive children and provider finalization can change or omit context. Sentry
+remains the source for live timing, LLM spans and exceptions. Mechanical tool-error
+counts must not be called accuracy scores. Export failures must never fail a turn.
+The queue drops new observations when full, with an operational warning; shutdown
+drains with a bounded wait. Observability must not mutate prompts or agent behavior.
+
+`evals run --braintrust-project ash` publishes existing eval judgments as a named
+experiment. Judge errors remain explicitly unknown (no quality score), and fail
+the run. Export failures and zero matched cases fail explicitly requested exports.
+Normal eval runs do not require Braintrust. Neither observations nor an eval pass
+authorize autonomous code changes or establish production recovery.
+
 1. Set stable `name` and `priority`; runtime ordering is `(priority, name)`.
 2. Keep hook behavior local to the integration domain.
 3. Post-turn behavior belongs in `on_message_postprocess`, not provider/core call sites.

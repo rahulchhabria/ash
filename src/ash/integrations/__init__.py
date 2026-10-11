@@ -3,6 +3,7 @@
 Spec contract: specs/subsystems.md (Integration Hooks).
 """
 
+from ash.integrations.braintrust import BraintrustIntegration
 from ash.integrations.browser import BrowserIntegration
 from ash.integrations.capabilities import CapabilitiesIntegration
 from ash.integrations.close_game_alert import CloseGameAlertIntegration
@@ -28,6 +29,7 @@ from ash.integrations.todo import TodoIntegration
 from ash.integrations.vapi_calls import VapiCallsIntegration
 
 __all__ = [
+    "BraintrustIntegration",
     "MemoryIntegration",
     "BrowserIntegration",
     "CapabilitiesIntegration",

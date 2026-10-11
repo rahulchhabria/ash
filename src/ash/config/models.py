@@ -577,6 +577,18 @@ class GooglePlacesConfig(BaseModel):
     max_results: int = Field(default=5, ge=1, le=20)
 
 
+class BraintrustConfig(BaseModel):
+    """Opt-in conversation observations; credentials stay on the host."""
+
+    enabled: bool = False
+    project: str = Field(default="ash", min_length=1)
+    api_key: SecretStr | None = None
+    capture_content: bool = False
+    max_messages: int = Field(default=50, ge=1, le=200)
+    max_content_chars: int = Field(default=4000, ge=100, le=20000)
+    queue_size: int = Field(default=100, ge=1, le=1000)
+
+
 class SentryConfig(BaseModel):
     """Configuration for Sentry error tracking and observability.
 
@@ -770,6 +782,7 @@ class AshConfig(BaseModel):
     exa_search: ExaSearchConfig | None = None
     google_places: GooglePlacesConfig | None = None
     sentry: SentryConfig | None = None
+    braintrust: BraintrustConfig = Field(default_factory=BraintrustConfig)
     # Environment variables from [env] section
     # Loaded into session environment for skills and bash commands
     env: dict[str, str] = Field(default_factory=dict)

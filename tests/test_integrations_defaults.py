@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from ash.integrations import (
+    BraintrustIntegration,
     BrowserIntegration,
     CapabilitiesIntegration,
     CloseGameAlertIntegration,
@@ -27,6 +28,7 @@ def test_create_default_integrations_chat_includes_memory() -> None:
     result = create_default_integrations(mode="chat")
 
     assert [type(item) for item in result.contributors] == [
+        BraintrustIntegration,
         SearchIntegration,
         ImageIntegration,
         BrowserIntegration,
@@ -47,6 +49,7 @@ def test_create_default_integrations_chat_can_disable_memory() -> None:
     result = create_default_integrations(mode="chat", include_memory=False)
 
     assert [type(item) for item in result.contributors] == [
+        BraintrustIntegration,
         SearchIntegration,
         ImageIntegration,
         BrowserIntegration,
@@ -66,6 +69,7 @@ def test_create_default_integrations_chat_can_disable_todo() -> None:
     result = create_default_integrations(mode="chat", include_todo=False)
 
     assert [type(item) for item in result.contributors] == [
+        BraintrustIntegration,
         SearchIntegration,
         ImageIntegration,
         BrowserIntegration,
@@ -94,6 +98,7 @@ def test_create_default_integrations_eval_order() -> None:
 
     assert [type(item) for item in result.contributors] == [
         SchedulingIntegration,
+        BraintrustIntegration,
         SearchIntegration,
         ImageIntegration,
         BrowserIntegration,
@@ -118,6 +123,7 @@ def test_create_default_integrations_eval_can_disable_memory() -> None:
 
     assert [type(item) for item in result.contributors] == [
         SchedulingIntegration,
+        BraintrustIntegration,
         SearchIntegration,
         ImageIntegration,
         BrowserIntegration,
@@ -141,6 +147,7 @@ def test_create_default_integrations_eval_can_disable_todo() -> None:
 
     assert [type(item) for item in result.contributors] == [
         SchedulingIntegration,
+        BraintrustIntegration,
         SearchIntegration,
         ImageIntegration,
         BrowserIntegration,
@@ -170,6 +177,7 @@ def test_create_default_integrations_serve_order() -> None:
 
     assert [type(item) for item in result.contributors] == [
         RuntimeRPCIntegration,
+        BraintrustIntegration,
         SearchIntegration,
         ImageIntegration,
         BrowserIntegration,
@@ -196,6 +204,7 @@ def test_create_default_integrations_serve_can_disable_memory() -> None:
 
     assert [type(item) for item in result.contributors] == [
         RuntimeRPCIntegration,
+        BraintrustIntegration,
         SearchIntegration,
         ImageIntegration,
         BrowserIntegration,
@@ -221,6 +230,7 @@ def test_create_default_integrations_serve_can_disable_todo() -> None:
 
     assert [type(item) for item in result.contributors] == [
         RuntimeRPCIntegration,
+        BraintrustIntegration,
         SearchIntegration,
         ImageIntegration,
         BrowserIntegration,

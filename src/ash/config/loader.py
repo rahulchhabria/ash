@@ -19,6 +19,7 @@ ENV_VAR_MAPPINGS = {
     "exa_search": ("api_key", "EXA_API_KEY"),
     "google_places": ("api_key", "GOOGLE_MAPS_API_KEY"),
     "sentry": ("dsn", "SENTRY_DSN"),
+    "braintrust": ("api_key", "BRAINTRUST_API_KEY"),
     "browser.kernel": ("api_key", "KERNEL_API_KEY"),
     "vapi": ("webhook_secret", "VAPI_WEBHOOK_SECRET"),
     "event_router": ("bearer_token", "ASH_EVENT_ROUTER_TOKEN"),

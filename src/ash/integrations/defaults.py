@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ash.integrations.braintrust import BraintrustIntegration
 from ash.integrations.browser import BrowserIntegration
 from ash.integrations.capabilities import CapabilitiesIntegration
 from ash.integrations.close_game_alert import CloseGameAlertIntegration
@@ -45,6 +46,7 @@ def _create_chat_integrations(
     graph_dir: Path,
 ) -> DefaultIntegrations:
     contributors: list[IntegrationContributor] = []
+    contributors.append(BraintrustIntegration())
     contributors.append(SearchIntegration())
     if include_image:
         contributors.append(ImageIntegration())
@@ -74,6 +76,7 @@ def _create_eval_integrations(
 ) -> DefaultIntegrations:
     scheduling = SchedulingIntegration(graph_dir)
     contributors: list[IntegrationContributor] = [scheduling]
+    contributors.append(BraintrustIntegration())
     contributors.append(SearchIntegration())
     if include_image:
         contributors.append(ImageIntegration())
@@ -120,6 +123,7 @@ def _create_serve_integrations(
     )
 
     contributors: list[IntegrationContributor] = [RuntimeRPCIntegration(logs_path)]
+    contributors.append(BraintrustIntegration())
     contributors.append(SearchIntegration())
     if include_image:
         contributors.append(ImageIntegration())

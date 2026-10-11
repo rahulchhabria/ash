@@ -71,3 +71,52 @@ claude plugin add anthropics/code-simplifier
 ## License
 
 MIT
+
+## Sentry and Braintrust
+
+Sentry monitors exceptions, LLM calls and performance. The optional Braintrust
+integration records post-turn session snapshots for conversation review. Both use
+the Ash session ID as `conversation_id`; Braintrust also records the active Sentry
+trace ID when available. Keep Sentry's existing DSN and set its `release` to the
+actual deployed revision when releasing a change.
+
+Install with `uv sync --all-groups --extra braintrust`. Add to your Ash config:
+
+```toml
+[braintrust]
+enabled = true
+project = "ash"
+capture_content = true
+```
+
+Set `BRAINTRUST_API_KEY` in the host service environment (never in `[env]`, which
+is available to tools). For a user systemd service, use a mode-0600 environment
+file and reference it with `EnvironmentFile=` in an `ash.service` drop-in.
+An exported variable in a terminal alone does not update an already running service.
+Without `capture_content`, only metadata and mechanical tool counts are exported.
+Common credentials and email addresses are filtered, but captured conversations
+are not guaranteed anonymous. Messages and individual text fields are bounded.
+
+Records describe retained session state, not necessarily the final delivered
+reply. Compaction, interactive children, exceptions and delivery formatting can
+omit or change context. This export is not a deterministic replay recorder.
+Tool failures are operational signals, not an accuracy score. Sentry remains the
+source for duration, cost/token telemetry where available, and exceptions.
+
+To publish an explicitly requested behavioral eval run to Braintrust:
+
+```bash
+uv run --extra braintrust evals run system_e2e --braintrust-project ash --experiment baseline
+```
+
+This uses real LLM calls. The existing judge and deterministic assertions still
+control pass/fail. Judge errors have no quality score and fail the run. Compare a
+candidate experiment to a baseline before promoting changes. An export failure
+also fails an explicitly requested export. Production exports are best effort:
+queue overflow drops records with a warning and cannot block replies.
+
+Initial rollout: verify a synthetic trace, review production observations, label
+actual failures, then add them to the eval suites. Configure online Braintrust
+scorers against those labels before trusting their judgments. Automated repair
+and release/rollback gates are separate work; a successful coding-agent exit
+must not be treated as proof that a conversation regression is fixed.

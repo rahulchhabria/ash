@@ -79,9 +79,19 @@ def run(
     filter_str: str | None = typer.Argument(None, help="Suite or suite::case filter"),
     tag: str | None = typer.Option(None, "--tag", "-t", help="Filter cases by tag"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Show debug logs"),
+    braintrust_project: str | None = typer.Option(None, "--braintrust-project"),
+    experiment: str | None = typer.Option(None, "--experiment"),
 ) -> None:
     """Run eval cases."""
-    asyncio.run(_run_async(filter_str=filter_str, tag=tag, verbose=verbose))
+    asyncio.run(
+        _run_async(
+            filter_str=filter_str,
+            tag=tag,
+            verbose=verbose,
+            braintrust_project=braintrust_project,
+            experiment=experiment,
+        )
+    )
 
 
 async def _run_async(
@@ -89,6 +99,8 @@ async def _run_async(
     filter_str: str | None,
     tag: str | None,
     verbose: bool,
+    braintrust_project: str | None = None,
+    experiment: str | None = None,
 ) -> None:
     _load_env()
     configure_eval_logging(verbose)
@@ -103,7 +115,17 @@ async def _run_async(
 
     if not matched:
         console.print("[yellow]No matching eval cases found.[/yellow]")
-        sys.exit(0)
+        sys.exit(1 if braintrust_project else 0)
+
+    exporter = None
+    if experiment and not braintrust_project:
+        raise ValueError("--experiment requires --braintrust-project")
+    if braintrust_project:
+        from evals.braintrust_export import BraintrustExporter
+
+        exporter = await asyncio.to_thread(
+            BraintrustExporter, braintrust_project, experiment
+        )
 
     # Judge LLM — one provider reused across all cases
     from ash.llm import OpenAIProvider
@@ -136,11 +158,16 @@ async def _run_async(
             # Report each result (multi-turn cases produce multiple)
             for result in results:
                 reporter.case_result(stem, result.case.id, result, duration)
-                if not result.passed:
+                if exporter:
+                    await asyncio.to_thread(exporter.log, stem, result)
+                if not result.passed or result.is_judge_error:
                     any_failure = True
 
     total_duration = time.monotonic() - total_start
     reporter.summary(total_duration)
+
+    if exporter:
+        console.print(await asyncio.to_thread(exporter.finish))
 
     if any_failure:
         sys.exit(1)
