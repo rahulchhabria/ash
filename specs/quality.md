@@ -22,6 +22,8 @@ frame locations, release and occurrence metadata enter diagnosis, after scrubbin
 bodies, locals, breadcrumbs and user objects are excluded. Smoke-test events and the
 worker's own quality events cannot feed repairs. Issue + release deduplication bounds repeat
 work. The latest event remains attached as provenance. A new release can generate a new case.
+Incident quotes must match original string values, not JSON serialization or generated
+field labels; the prompt specifies that format explicitly.
 The incident judge distinguishes code defects from configuration problems, provider/network
 failures and insufficient evidence; only high-confidence code defects enter repair.
 

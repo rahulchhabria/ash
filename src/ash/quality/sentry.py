@@ -117,7 +117,12 @@ Distinguish code_defect, configuration (credentials, missing models or images), 
 (network/provider outage), and insufficient_evidence. A timeout or old incident alone is
 not a code defect. Do not propose hiding errors or changing secrets. Use code_defect only
 when the evidence points to application behavior that a source regression test could
-reproduce. Quote exact strings from the evidence. Do not infer a conversation quality
+reproduce. Each evidence item MUST be a verbatim substring of a STRING VALUE in
+this record, such as the title or an exception value. Copy values without adding field
+names, labels, surrounding JSON syntax, or interpretations of empty/missing fields.
+For a title value "Request timeout", use "Request timeout", NEVER 'title: "Request timeout"'.
+Include at least one such quote even when classifying insufficient evidence.
+Do not infer a conversation quality
 failure from an exception. Missing releases require reproduction against current source.
 """,
         input=text,
@@ -126,10 +131,25 @@ failure from an exception. Missing releases require reproduction against current
         store=False,
     )
     diagnosis = result.output_parsed
+
+    def source_strings(value: Any) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, dict):
+            return [s for v in value.values() for s in source_strings(v)]
+        if isinstance(value, list):
+            return [s for v in value for s in source_strings(v)]
+        return []
+
+    # Validate against original values, not their JSON-escaped representation.
+    sources = source_strings(record)
     if (
         diagnosis is None
         or not diagnosis.evidence
-        or any(not q.strip() or q not in text for q in diagnosis.evidence)
+        or any(
+            not q.strip() or not any(q in source for source in sources)
+            for q in diagnosis.evidence
+        )
     ):
         raise ValueError("Incident diagnosis requires source evidence")
     return diagnosis

@@ -269,3 +269,20 @@ def test_read_only_status_supports_pre_migration_database(tmp_path):
         is None
     )
     state.db.close()
+
+
+@pytest.mark.asyncio
+async def test_incident_quotes_use_original_values_not_json_or_labels():
+    from ash.quality.sentry import diagnose
+
+    title = 'Request failed: "bad value"\nretry later'
+    diagnosis = Diagnosis(
+        category="external", confidence=0.99, reason="Timeout", evidence=[title]
+    )
+    parse = AsyncMock(return_value=SimpleNamespace(output_parsed=diagnosis))
+    client = SimpleNamespace(responses=SimpleNamespace(parse=parse))
+    assert await diagnose(client, "test", {"title": title}) == diagnosis
+    for quote in ('title: "Request failed"', '"title":', "invented", "  "):
+        diagnosis.evidence = [quote]
+        with pytest.raises(ValueError, match="requires source evidence"):
+            await diagnose(client, "test", {"title": title})
