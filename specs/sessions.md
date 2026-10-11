@@ -48,6 +48,7 @@ For DMs, Ash uses **hybrid active-thread routing**:
 - Track message metadata including external_id for deduplication
 - Support loading recent messages for LLM context window
 - Preserve tool use/result pairs for context reconstruction
+- Keep main and subagent message-parent chains separate, including after reload. Subagent writes must never advance the main transcript head or another subagent's head; tool uses must reference a message in their own transcript.
 - Persist consequential external-operation state needed to resume user-visible
   background delivery after a process restart
 - Allow retrieval of messages by external_id for reply context

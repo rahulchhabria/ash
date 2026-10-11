@@ -899,6 +899,61 @@ class TestSessionBranching:
 class TestSubagentIsolation:
     """Tests for subagent session isolation — entries route to subagents/ dir."""
 
+    @pytest.mark.asyncio
+    async def test_skill_lookup_preserves_main_reply_history(self, manager):
+        question_id = await manager.add_user_message(
+            "When was my last eye doctor appointment?"
+        )
+        await manager.add_user_message("Search calendar", agent_session_id="google")
+        await manager.add_assistant_message("No matches", agent_session_id="google")
+        answer_id = await manager.add_assistant_message("What is the clinic name?")
+        await manager.add_user_message("Lunettes Optometry")
+
+        messages, ids = await manager.load_messages_for_llm(branch_head_id=answer_id)
+        assert ids == [question_id, answer_id]
+        assert [m.get_text() for m in messages] == [
+            "When was my last eye doctor appointment?",
+            "What is the clinic name?",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_interleaved_subagents_keep_separate_parents_after_reload(
+        self, manager, sessions_path
+    ):
+        main_id = await manager.add_user_message("Main request")
+        first_id = await manager.add_user_message("First child", agent_session_id="one")
+        second_id = await manager.add_user_message(
+            "Second child", agent_session_id="two"
+        )
+        await manager.add_assistant_message("First result", agent_session_id="one")
+
+        restored = SessionManager(provider="cli", sessions_path=sessions_path)
+        await restored.add_assistant_message("Second result", agent_session_id="two")
+        await restored.add_tool_use("child-tool", "bash", {}, agent_session_id="one")
+        await restored.add_tool_use("main-tool", "bash", {})
+        await restored.add_assistant_message("Main answer")
+
+        reader = SessionReader(manager.session_dir)
+        one = await reader.load_subagent_entries("one")
+        two = await reader.load_subagent_entries("two")
+        main = await reader.load_entries()
+        first_user, first_reply, first_tool = one
+        second_user, second_reply = two
+        assert isinstance(first_user, MessageEntry)
+        assert isinstance(first_reply, MessageEntry)
+        assert isinstance(first_tool, ToolUseEntry)
+        assert isinstance(second_user, MessageEntry)
+        assert isinstance(second_reply, MessageEntry)
+        assert first_user.parent_id is None
+        assert first_reply.parent_id == first_id
+        assert first_tool.message_id == first_reply.id
+        assert second_user.parent_id is None
+        assert second_reply.parent_id == second_id
+        main_messages = [e for e in main if isinstance(e, MessageEntry)]
+        assert main_messages[-1].parent_id == main_id
+        main_tool = next(e for e in main if isinstance(e, ToolUseEntry))
+        assert main_tool.message_id == main_id
+
     @pytest.fixture
     def sessions_path(self, tmp_path):
         return tmp_path / "sessions"

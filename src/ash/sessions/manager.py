@@ -60,6 +60,7 @@ class SessionManager:
         self._writer = SessionWriter(self._session_dir)
         self._header: SessionHeader | None = None
         self._current_message_id: str | None = None
+        self._subagent_message_ids: dict[str, str | None] = {}
 
     @property
     def session_key(self) -> str:
@@ -118,6 +119,23 @@ class SessionManager:
             json.dumps(state.model_dump(mode="json"), indent=2, default=str)
         )
 
+    async def _message_head(self, agent_session_id: str | None) -> str | None:
+        # Spec: specs/sessions.md — each transcript owns its parent chain.
+        if agent_session_id is None:
+            return self._current_message_id
+        if agent_session_id not in self._subagent_message_ids:
+            entries = await self._reader.load_subagent_entries(agent_session_id)
+            self._subagent_message_ids[agent_session_id] = next(
+                (e.id for e in reversed(entries) if isinstance(e, MessageEntry)), None
+            )
+        return self._subagent_message_ids[agent_session_id]
+
+    def _set_message_head(self, agent_session_id: str | None, message_id: str) -> None:
+        if agent_session_id is None:
+            self._current_message_id = message_id
+        else:
+            self._subagent_message_ids[agent_session_id] = message_id
+
     async def add_user_message(
         self,
         content: str,
@@ -153,13 +171,13 @@ class SessionManager:
             display_name=display_name,
             metadata=metadata,
             agent_session_id=agent_session_id,
-            parent_id=parent_id or self._current_message_id,
+            parent_id=parent_id or await self._message_head(agent_session_id),
         )
         if agent_session_id is not None:
             await self._writer.write_subagent_entry(agent_session_id, entry.to_dict())
         else:
             await self._writer.write_message(entry)
-        self._current_message_id = entry.id
+        self._set_message_head(agent_session_id, entry.id)
         return entry.id
 
     async def add_assistant_message(
@@ -203,13 +221,13 @@ class SessionManager:
             token_count=token_count,
             metadata=metadata,
             agent_session_id=agent_session_id,
-            parent_id=parent_id or self._current_message_id,
+            parent_id=parent_id or await self._message_head(agent_session_id),
         )
         if agent_session_id is not None:
             await self._writer.write_subagent_entry(agent_session_id, entry.to_dict())
         else:
             await self._writer.write_message(entry)
-        self._current_message_id = entry.id
+        self._set_message_head(agent_session_id, entry.id)
 
         # Auto-extract tool uses from ContentBlock content
         if not isinstance(content, str):
@@ -241,7 +259,7 @@ class SessionManager:
         await self.ensure_session()
         entry = ToolUseEntry.create(
             tool_use_id=tool_use_id,
-            message_id=self._current_message_id or "",
+            message_id=await self._message_head(agent_session_id) or "",
             name=name,
             input_data=input_data,
             agent_session_id=agent_session_id,

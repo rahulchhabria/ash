@@ -15,6 +15,7 @@ Files: src/ash/providers/telegram/handlers.py, src/ash/memory/store.py, src/ash/
 - Calculate gap since last message in conversation
 - Signal conversation gap to LLM when gap exceeds threshold
 - Deduplicate messages when merging reply context with recent messages
+- Interpret short answers, supplied names, corrections, and added search terms against the immediately preceding exchange. When they answer the assistant's clarification, preserve the task and its data source. Prefer this exchange over unrelated older topics; reset the task only for a self-contained new request or explicit topic change.
 
 ### SHOULD
 
