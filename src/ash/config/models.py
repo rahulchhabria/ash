@@ -21,6 +21,7 @@ from ash.config.paths import (
     get_system_timezone,
     get_workspace_path,
 )
+from ash.quality.models import QualityConfig
 
 _SECRET_ENV_NAME_PATTERN = re.compile(
     r"(?i)(?:^|_)(?:api[_-]?key|token|secret|password|passwd|auth)(?:$|_)"
@@ -783,6 +784,7 @@ class AshConfig(BaseModel):
     google_places: GooglePlacesConfig | None = None
     sentry: SentryConfig | None = None
     braintrust: BraintrustConfig = Field(default_factory=BraintrustConfig)
+    quality: QualityConfig = Field(default_factory=QualityConfig)
     # Environment variables from [env] section
     # Loaded into session environment for skills and bash commands
     env: dict[str, str] = Field(default_factory=dict)

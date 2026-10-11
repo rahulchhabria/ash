@@ -69,8 +69,9 @@ Run triggered behavior.
 
 
 def test_bundled_research_command_exposes_hyphenated_triggers() -> None:
-    skill_path = Path(
-        "/home/rahul/GitHub/ash/src/ash/skills/bundled/research-command/SKILL.md"
+    skill_path = (
+        Path(__file__).resolve().parents[1]
+        / "src/ash/skills/bundled/research-command/SKILL.md"
     )
     text = skill_path.read_text()
 

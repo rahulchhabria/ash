@@ -75,6 +75,7 @@ deepagents = [
 [project.scripts]
 pigeon = "ash.cli:app"
 ash = "ash.cli:app"
+ash-quality = "ash.quality.cli:main"
 evals = "ash.evals_cli:main"
 gogcli = "ash.skills.bundled.gog.scripts.gogcli_bridge:main"
 
