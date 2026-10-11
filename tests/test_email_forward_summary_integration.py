@@ -50,7 +50,7 @@ def _seed_db(path: Path, *, telegram_message_id: int = 42) -> None:
                 "Professional Community Updates",
                 "SF Day <m@mail3.veracross.com>",
                 "Tue, 02 Jun 2026 01:02:18 +0000",
-                "Welcome a new principal and several staff changes for next year.",
+                "Welcome Dr. Smith, a new principal, and several staff changes for next year.",
                 json.dumps(
                     {
                         "email_type": "announcement",
@@ -404,6 +404,7 @@ async def test_ambiguous_focus_does_not_choose_arbitrary_email(tmp_path) -> None
         "Summarize my inbox",
         "Email my eye doctor",
         "When was my last eye doctor appointment?",
+        "when was my last eye dr. appointment?",
     ],
 )
 async def test_unrelated_question_in_email_thread_is_not_contaminated(

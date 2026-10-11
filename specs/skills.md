@@ -55,6 +55,11 @@ skills consume those capabilities through stable public surfaces.
 - Support `model` override per skill
 - Support `max_iterations` limit per skill
 - Provide CLI commands for skill management
+- Google skill routing must accept personal appointment, event, and inbox queries
+  even when the raw user message does not name Google Calendar or Gmail. Public
+  lookup words (e.g. address, hours, store) must not veto an explicitly personal
+  calendar/mail request. Route from the raw request when present, not a model's
+  rewritten delegation, and distinguish routing rejection from auth failure.
 
 ### SHOULD
 

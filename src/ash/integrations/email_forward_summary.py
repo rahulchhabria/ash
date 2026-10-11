@@ -376,6 +376,12 @@ _CONTEXTUAL_PRONOUN_RE = re.compile(
 )
 _WORD_RE = re.compile(r"[a-z0-9][a-z0-9'-]*", re.I)
 _STOPWORDS = {
+    # Honorifics are not document subjects (e.g. eye dr. vs a school principal).
+    "dr",
+    "mr",
+    "mrs",
+    "ms",
+    "prof",
     "about",
     "after",
     "again",

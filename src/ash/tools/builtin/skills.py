@@ -44,6 +44,12 @@ GOOGLE_WORKSPACE_ACTION_PATTERN = re.compile(
     r"|\bdo\s+i\s+have\s+(?:any\s+)?(?:events?|meetings?|appointments?)\b",
     re.IGNORECASE,
 )
+# Spec: specs/skills.md. Personal data requests need not name the product.
+GOOGLE_PERSONAL_WORKSPACE_PATTERN = re.compile(
+    r"\b(?:my|our)\s+(?:[\w'-]+[.,]?\s+){0,6}"
+    r"(?:events?|meetings?|appointments?|invites?|agenda|calendar|emails?|gmail|inbox|mail)\b",
+    re.IGNORECASE,
+)
 GOOGLE_PUBLIC_LOOKUP_PATTERN = re.compile(
     r"\b(?:near me|map|maps|business|restaurant|store|shop|address|hours|website|phone|place|pricing|features|documentation|docs)\b",
     re.IGNORECASE,
@@ -582,9 +588,13 @@ class UseSkillTool(Tool):
             public_lookup_intent = bool(
                 GOOGLE_PUBLIC_LOOKUP_PATTERN.search(intent_candidate)
             )
-            workspace_intent = (
-                explicit_workspace_intent or action_workspace_intent
-            ) and not public_lookup_intent
+            personal_workspace_intent = bool(
+                GOOGLE_PERSONAL_WORKSPACE_PATTERN.search(intent_candidate)
+            )
+            workspace_intent = personal_workspace_intent or (
+                (explicit_workspace_intent or action_workspace_intent)
+                and not public_lookup_intent
+            )
             callback_candidate = raw_candidate or message
             auth_continuation = bool(
                 _OAUTH_CALLBACK_URL_PATTERN.search(callback_candidate)
@@ -594,7 +604,9 @@ class UseSkillTool(Tool):
                 return ToolResult.error(
                     "The google skill only supports Gmail and Google Calendar. "
                     "For public information use openai_web_search; for businesses, "
-                    "maps, or opening hours use google_places when available."
+                    "maps, or opening hours use google_places when available. "
+                    "This is a request-routing rejection, not a Google authentication "
+                    "or availability failure."
                 )
 
         if not self._registry.has(skill_name):

@@ -286,11 +286,74 @@ class TestUseSkillToolValidation:
             "check appointments",
             "what's on my agenda",
             "do I have meetings tomorrow?",
+            "when was my last eye dr. appointment?",
+            "When is my next dentist appointment?",
+            "What address is my next appointment at?",
+            "Find my email with the store hours",
+            "What are the hours of my meetings tomorrow?",
         ],
     )
     async def test_google_skill_accepts_calendar_phrases(self, tool, message):
         result = await tool.execute({"skill": "google", "message": message})
         assert "only supports Gmail and Google Calendar" not in result.content
+
+    @pytest.mark.asyncio
+    async def test_public_raw_request_cannot_be_laundered_by_delegation(
+        self, tool
+    ) -> None:
+        result = await tool.execute(
+            {"skill": "google", "message": "Search my calendar for store hours"},
+            context=ToolContext(
+                metadata={"current_user_message": "Find store hours near me"}
+            ),
+        )
+        assert result.is_error
+        assert "request-routing rejection" in result.content
+
+
+@pytest.mark.asyncio
+async def test_recorded_appointment_request_activates_real_google_skill() -> None:
+    from pathlib import Path
+    from unittest.mock import AsyncMock
+
+    from ash.skills import SkillRegistry
+
+    registry = SkillRegistry(skill_config={"google": SkillConfig(enabled=True)})
+    registry.discover(
+        Path(), include_bundled=True, include_installed=False, include_user=False
+    )
+    config = _mock_config(skills={"google": SkillConfig(enabled=True)})
+    tool = UseSkillTool(registry, MagicMock(), config)
+    manager = MagicMock()
+    manager.list_capabilities = AsyncMock(
+        return_value=[
+            {"id": "gog.email", "available": True},
+            {"id": "gog.calendar", "available": True},
+        ]
+    )
+    tool.set_capability_manager(manager)
+    context = ToolContext(
+        user_id="u-1",
+        chat_id="dm-1",
+        metadata={
+            "chat_type": "private",
+            "current_user_message": "when was my last eye dr. appointment?",
+        },
+    )
+    with pytest.raises(ChildActivated) as activated:
+        await tool.execute(
+            {
+                "skill": "google",
+                "message": "Calendar: search events from the past 3 years for keywords eye, optometrist, vision. Return the most recent matching event with time, title, and location.",
+            },
+            context,
+        )
+    frame = activated.value.child_frame
+    assert frame is not None
+    assert frame.agent_name == "skill:google"
+    assert "ash-sb capability" in frame.system_prompt
+    assert "bash" in frame.effective_tools
+    manager.list_capabilities.assert_awaited_once()
 
 
 class TestUseSkillToolErrorHandling:

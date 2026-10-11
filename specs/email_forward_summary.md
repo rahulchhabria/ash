@@ -79,3 +79,5 @@ max_body_chars = 4000
 
 Implicit source continuations use the `source_followup` policy trigger, never
 `explicit`. Operators can disable these while continuing to allow direct replies.
+Honorifics such as Dr., Mr., and Ms. do not establish source relevance; an eye
+doctor question must not inherit a school newsletter solely because it names Dr. Smith.
