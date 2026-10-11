@@ -27,6 +27,7 @@ class State:
           attempts INTEGER NOT NULL DEFAULT 0, judgment TEXT, published INTEGER NOT NULL DEFAULT 0,
           repair TEXT NOT NULL DEFAULT 'ineligible', error TEXT,
           UNIQUE(project,row_id,version));
+        CREATE TABLE IF NOT EXISTS cursors(name TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE IF NOT EXISTS budgets(day TEXT, kind TEXT, used INTEGER, PRIMARY KEY(day,kind));
         """)
         self.db.execute("UPDATE jobs SET repair='interrupted' WHERE repair='running'")
@@ -41,6 +42,25 @@ class State:
         )
         self.db.commit()
         return key
+
+    def cursor(self, name: str) -> str | None:
+        row = self.db.execute(
+            "SELECT value FROM cursors WHERE name=?", (name,)
+        ).fetchone()
+        return row[0] if row else None
+
+    def set_cursor(self, name: str, value: str | None) -> None:
+        self.db.execute("INSERT OR REPLACE INTO cursors VALUES (?,?)", (name, value))
+        self.db.commit()
+
+    def promotable(self) -> list[str]:
+        return [
+            r[0]
+            for r in self.db.execute(
+                "SELECT id FROM jobs WHERE repair IN ('review_ready','push_pending') AND version=? ORDER BY rowid LIMIT 1",
+                (VERSION,),
+            )
+        ]
 
     def reserve(self, kind: str, limit: int) -> bool:
         day = datetime.now(UTC).date().isoformat()
@@ -95,6 +115,16 @@ class State:
         db.row_factory = sqlite3.Row
         try:
             return {
+                "sources": [
+                    dict(r)
+                    for r in db.execute(
+                        "SELECT name,value FROM cursors WHERE name LIKE '%_error'"
+                    )
+                ]
+                if db.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='cursors'"
+                ).fetchone()
+                else [],
                 "jobs": [
                     dict(r)
                     for r in db.execute(

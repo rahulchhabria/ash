@@ -51,6 +51,28 @@ async def create_worker(state: State, repo: Path) -> Worker:
             environment=config.sentry.environment,
             send_default_pii=False,
         )
+    source = None
+    if config.quality.sentry_org or config.quality.sentry_project:
+        from ash.quality.sentry import SentrySource
+
+        token = os.environ.get("SENTRY_AUTH_TOKEN")
+        if (
+            not token
+            or not config.quality.sentry_org
+            or not config.quality.sentry_project
+        ):
+            raise ValueError(
+                "Sentry intake requires org, project and SENTRY_AUTH_TOKEN"
+            )
+        source = SentrySource(
+            token, config.quality.sentry_org, config.quality.sentry_project
+        )
+    if config.quality.auto_push:
+        from ash.quality.promotion import remote_head
+
+        await asyncio.to_thread(
+            remote_head, repo, config.quality.push_remote, config.quality.push_url
+        )
     return Worker(
         state,
         config.quality,
@@ -58,6 +80,7 @@ async def create_worker(state: State, repo: Path) -> Worker:
         AsyncOpenAI(api_key=key.get_secret_value(), timeout=60, max_retries=0),
         repo,
         sentry,
+        source,
     )
 
 
@@ -71,6 +94,9 @@ async def run(args: argparse.Namespace, state: State) -> None:
             "validation_failed",
             "needs_reproduction",
             "interrupted",
+            "review_failed",
+            "review_rejected",
+            "stale_base",
         ):
             raise ValueError("Only failed repair candidates can be retried")
         directory = state.directory / "candidates" / args.case_id
@@ -112,7 +138,7 @@ async def run(args: argparse.Namespace, state: State) -> None:
 def main() -> None:
     os.umask(0o077)
     parser = argparse.ArgumentParser(
-        description="Score Ash evidence and build isolated repair candidates"
+        description="Score Sentry/Braintrust evidence and validate automatic repairs"
     )
     parser.add_argument(
         "--state-dir", type=Path, default=Path.home() / ".ash" / "quality"

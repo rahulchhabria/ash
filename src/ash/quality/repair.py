@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
-from ash.quality.models import Judgment, Proposal
+from ash.quality.models import Diagnosis, Judgment, Proposal
 
 DENIED = (
     "src/ash/quality/",
@@ -32,7 +32,8 @@ regression test. The test must fail by AssertionError on baseline and pass with 
 Do not change tests, monitoring, quality workers, configuration, dependencies or test harness.
 Do not make network requests, run commands, read credentials, or include personal conversation
 content in generated code. If no reproducible source defect exists, return empty edits and
-regression_test and explain why in summary. Passing tests only make a review candidate.
+regression_test and explain why in summary. Passing tests only make a candidate for an independent review. Never suppress errors, weaken
+safety checks, disable functionality, or hide telemetry to make a symptom disappear.
 """
 
 
@@ -94,7 +95,7 @@ async def propose(
     root: Path,
     files: set[str],
     record: dict[str, Any],
-    judgment: Judgment,
+    judgment: Judgment | Diagnosis,
 ) -> Proposal:
     tools = [
         {
@@ -287,6 +288,24 @@ def run_tests(
     return result.returncode, result.stdout[-1000:]
 
 
+def lint_candidate(repo: Path, candidate: Path, paths: list[str]) -> bool:
+    """Use the trusted installed linter in the same credential-free sandbox."""
+    args = sandbox_command(repo, candidate, "unused.xml", [])
+    python = str(repo / ".venv/bin/python")
+    prefix = args[: args.index(python) + 1]
+    for check in (
+        ["check", "--no-cache", *paths],
+        ["format", "--no-cache", "--check", *paths],
+    ):
+        result = command([*prefix, "-m", "ruff", *check], repo, timeout=60)
+        if result.returncode:
+            (candidate / "lint.log").write_text(
+                (result.stdout + result.stderr)[-20000:]
+            )
+            return False
+    return True
+
+
 def one_test(report: Path, failing: bool) -> bool:
     if report.is_symlink() or not report.is_file():
         return False
@@ -353,11 +372,13 @@ def apply_edits(root: Path, files: set[str], proposal: Proposal) -> None:
         path.write_text(original.replace(edit.old, edit.new, 1))
 
 
-def prepare(repo: Path, artifact: Path) -> tuple[str, bytes, Path, set[str]]:
+def prepare(
+    repo: Path, artifact: Path, revision: str | None = None
+) -> tuple[str, bytes, Path, set[str]]:
     if artifact.exists():
         raise ValueError("Candidate already exists; preserve previous artifacts")
     artifact.mkdir(parents=True, mode=0o700)
-    revision = command(["git", "rev-parse", "HEAD"], repo).stdout.strip()
+    revision = revision or command(["git", "rev-parse", "HEAD"], repo).stdout.strip()
     if len(revision) != 40 or command(["git", "status", "--porcelain"], repo).stdout:
         raise ValueError("Repair requires a clean pinned checkout")
     archive = subprocess.run(  # noqa: S603 - fixed git archive argv
@@ -384,6 +405,7 @@ def validate_candidate(
     candidate: Path,
     files: set[str],
     proposal: Proposal,
+    test_path: str = TEST,
 ) -> str:
     report: dict[str, Any] = {
         "base_revision": revision,
@@ -392,13 +414,13 @@ def validate_candidate(
     }
     (artifact / "proposal.json").write_text(proposal.model_dump_json(indent=2))
     if proposal.edits and proposal.regression_test:
-        test = candidate / TEST
+        test = candidate / test_path
         if test.exists():
             raise ValueError("Regression test path already exists")
         test.write_text(proposal.regression_test)
         digest = hashlib.sha256(test.read_bytes()).hexdigest()
         report["test_sha256"] = digest
-        code, _ = run_tests(repo, candidate, "baseline.xml", [TEST])
+        code, _ = run_tests(repo, candidate, "baseline.xml", [test_path])
         if code == 1 and one_test(
             candidate / ".quality-reports" / "baseline.xml", failing=True
         ):
@@ -411,11 +433,13 @@ def validate_candidate(
                 p: hashlib.sha256((candidate / p).read_bytes()).hexdigest()
                 for p in files
             }
-            code, _ = run_tests(repo, candidate, "candidate.xml", [TEST])
+            code, _ = run_tests(repo, candidate, "candidate.xml", [test_path])
             if code == 0 and one_test(
                 candidate / ".quality-reports" / "candidate.xml", failing=False
             ):
-                code, _ = run_tests(repo, candidate, "suite.xml", ["tests/"])
+                code, _ = run_tests(
+                    repo, candidate, "suite.xml", ["tests/", "--ignore=" + test_path]
+                )
                 report["suite_exit_code"] = code
                 unchanged = (
                     all(
@@ -434,8 +458,11 @@ def validate_candidate(
                     if code == 0
                     and suite_passed(candidate / ".quality-reports" / "suite.xml")
                     and unchanged
-                    and command(["git", "rev-parse", "HEAD"], repo).stdout.strip()
-                    == revision
+                    and lint_candidate(
+                        repo,
+                        candidate,
+                        sorted({e.path for e in proposal.edits} | {test_path}),
+                    )
                     else "validation_failed"
                 )
             else:
@@ -444,24 +471,34 @@ def validate_candidate(
         import difflib
 
         patch = []
-        for edit_path in sorted({e.path for e in proposal.edits} | {TEST}):
+        for edit_path in sorted({e.path for e in proposal.edits} | {test_path}):
             path = allowed_file(candidate, edit_path)
             if not path.is_file():
                 continue
             before = (
                 command(["git", "show", f"{revision}:{edit_path}"], repo).stdout
-                if edit_path != TEST
+                if edit_path != test_path
                 else ""
             )
             patch.extend(
                 difflib.unified_diff(
                     before.splitlines(True),
                     path.read_text().splitlines(True),
-                    fromfile=f"a/{edit_path}" if edit_path != TEST else "/dev/null",
+                    fromfile=f"a/{edit_path}"
+                    if edit_path != test_path
+                    else "/dev/null",
                     tofile=f"b/{edit_path}",
                 )
             )
         (artifact / "candidate.patch").write_text("".join(patch))
+    if report["status"] == "review_ready":
+        report["files"] = {
+            p: hashlib.sha256((candidate / p).read_bytes()).hexdigest()
+            for p in sorted({e.path for e in proposal.edits} | {test_path})
+        }
+        report["patch_sha256"] = hashlib.sha256(
+            (artifact / "candidate.patch").read_bytes()
+        ).hexdigest()
     (artifact / "report.json").write_text(json.dumps(report, indent=2))
     return report["status"]
 
@@ -472,22 +509,12 @@ async def build_candidate(
     repo: Path,
     artifact: Path,
     record: dict[str, Any],
-    judgment: Judgment,
+    judgment: Judgment | Diagnosis,
+    revision: str | None = None,
 ) -> str:
     revision, archive, candidate, files = await asyncio.to_thread(
-        prepare, repo, artifact
+        prepare, repo, artifact, revision
     )
-    if (record.get("metadata") or {}).get("release") != revision:
-        (artifact / "report.json").write_text(
-            json.dumps(
-                {
-                    "status": "needs_reproduction",
-                    "reason": "source_release_mismatch",
-                    "base_revision": revision,
-                }
-            )
-        )
-        return "needs_reproduction"
     proposal = await propose(client, model, candidate, files, record, judgment)
     return await asyncio.to_thread(
         validate_candidate,
@@ -498,4 +525,5 @@ async def build_candidate(
         candidate,
         files,
         proposal,
+        f"tests/test_quality_regression_{hashlib.sha256(str(artifact).encode()).hexdigest()[:16]}.py",
     )

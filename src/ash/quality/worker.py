@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 
 from ash.observability.braintrust import scrub
-from ash.quality.models import DIMENSIONS, VERSION, Judgment
+from ash.quality.models import DIMENSIONS, VERSION, Diagnosis, Judgment
 from ash.quality.scoring import evidence, judge_record, repairable, scores
 from ash.quality.state import State
 
@@ -101,12 +101,17 @@ class Worker:
         client: Any,
         repo: Path,
         sentry: Any = None,
+        sentry_source: Any = None,
     ):
         self.state, self.config, self.store = state, config, store
         self.client, self.repo, self.sentry = client, repo, sentry
+        self.sentry_source = sentry_source
 
     async def process(self, key: str) -> None:
         job = self.state.get(key)
+        if job["project"].startswith("sentry:"):
+            await self.process_incident(key)
+            return
         judgment = (
             Judgment.model_validate_json(job["judgment"]) if job["judgment"] else None
         )
@@ -169,6 +174,85 @@ class Worker:
         await self.store.publish(job, judgment)
         self.state.update(key, published=1)
 
+    async def process_incident(self, key: str) -> None:
+        from ash.quality.sentry import diagnose
+
+        job = self.state.get(key)
+        record = json.loads(job["record"])
+        if job["status"] != "pending":
+            self.state.update(key, published=1)
+            return
+        if record["metadata"].get("provider") == "synthetic":
+            self.state.update(key, status="insufficient_evidence", published=1)
+            return
+        if job["attempts"] >= self.config.max_attempts:
+            self.state.update(key, status="judge_error", published=1)
+            return
+        if not self.state.reserve("score", self.config.max_scores_per_day):
+            return
+        self.state.update(key, attempts=job["attempts"] + 1)
+        try:
+            diagnosis = await diagnose(self.client, self.config.judge_model, record)
+        except Exception as exc:
+            self.state.update(key, error=type(exc).__name__)
+            return
+        self.state.update(
+            key,
+            status="scored",
+            judgment=diagnosis.model_dump_json(),
+            published=1,
+            repair="pending"
+            if diagnosis.category == "code_defect"
+            and diagnosis.confidence >= self.config.failure_confidence
+            else "ineligible",
+            error=None,
+        )
+
+    async def promote(self, key: str) -> None:
+        from ash.quality.promotion import promote, review_candidate
+
+        if not self.config.auto_push:
+            return
+        job = self.state.get(key)
+        artifact = self.state.directory / "candidates" / key
+        if job["repair"] == "review_ready":
+            if not self.state.reserve("review", self.config.max_repairs_per_day):
+                return
+            try:
+                approved = await review_candidate(
+                    self.client,
+                    self.config.review_model,
+                    artifact,
+                    json.loads(job["record"]),
+                )
+            except Exception as exc:
+                self.state.update(
+                    key, repair="review_failed", error=type(exc).__name__, published=0
+                )
+                return
+            if not approved:
+                self.state.update(key, repair="review_rejected", published=0)
+                return
+            self.state.update(key, repair="push_pending")
+        elif job["repair"] != "push_pending":
+            raise ValueError("Candidate is not promotable")
+        try:
+            result = await asyncio.to_thread(
+                promote,
+                self.repo,
+                artifact,
+                self.config.push_remote,
+                self.config.push_url,
+                key,
+            )
+        except Exception as exc:
+            # Keep the prepared commit durable; a transient push failure retries
+            # without another model call or a new commit.
+            self.state.update(key, error=type(exc).__name__)
+            return
+        self.state.update(key, repair=result, published=0, error=None)
+        await self.process(key)
+
     async def repair(self, key: str) -> None:
         from ash.quality.repair import build_candidate
 
@@ -179,6 +263,13 @@ class Worker:
             raise ValueError("Repairs are disabled")
         if not self.state.reserve("repair", self.config.max_repairs_per_day):
             return
+        revision = None
+        if self.config.auto_push:
+            from ash.quality.promotion import sync_base
+
+            revision = await asyncio.to_thread(
+                sync_base, self.repo, self.config.push_remote, self.config.push_url
+            )
         self.state.update(key, repair="running")
         try:
             result = await build_candidate(
@@ -187,7 +278,10 @@ class Worker:
                 self.repo,
                 self.state.directory / "candidates" / key,
                 json.loads(job["record"]),
-                Judgment.model_validate_json(job["judgment"]),
+                (
+                    Diagnosis if job["project"].startswith("sentry:") else Judgment
+                ).model_validate_json(job["judgment"]),
+                revision,
             )
         except Exception as exc:
             result = "validation_failed"
@@ -196,10 +290,34 @@ class Worker:
         await self.process(key)
 
     async def once(self) -> None:
-        records = await self.store.fetch(self.config.batch_size)
-        for record in records:
-            self.state.ingest(self.store.project, record)
+        # One vendor outage must not block the other source or queued work.
+        try:
+            records = await self.store.fetch(self.config.batch_size)
+            for record in records:
+                self.state.ingest(self.store.project, record)
+            self.state.set_cursor("braintrust_error", None)
+        except Exception as exc:
+            self.state.set_cursor("braintrust_error", type(exc).__name__)
+        if self.sentry_source:
+            try:
+                records, cursor = await self.sentry_source.fetch(
+                    self.config.batch_size, self.state.cursor("sentry")
+                )
+                for record in records:
+                    self.state.ingest(self.sentry_source.project, record)
+                self.state.set_cursor("sentry", cursor)
+                self.state.set_cursor("sentry_error", None)
+            except Exception as exc:
+                self.state.set_cursor("sentry_error", type(exc).__name__)
         for job in self.state.pending(self.config.batch_size):
-            await self.process(job["id"])
+            try:
+                await self.process(job["id"])
+            except Exception as exc:
+                self.state.update(job["id"], error=type(exc).__name__)
+        if self.config.auto_push:
+            for key in self.state.promotable():
+                await self.promote(key)
         if self.config.repair_enabled and (key := self.state.next_repair()):
             await self.repair(key)
+            if self.state.get(key)["repair"] == "review_ready":
+                await self.promote(key)

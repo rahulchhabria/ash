@@ -38,6 +38,12 @@ class Proposal(StrictModel):
 
 class QualityConfig(BaseModel):
     enabled: bool = False
+    auto_push: bool = False
+    push_remote: str = "origin"
+    push_url: str = ""
+    sentry_org: str = ""
+    sentry_project: str = ""
+    review_model: str = "gpt-5.2"
     judge_model: str = "gpt-5.2"
     repair_model: str = "gpt-5.2"
     poll_seconds: int = Field(default=120, ge=30)
@@ -48,3 +54,20 @@ class QualityConfig(BaseModel):
     failure_confidence: float = Field(default=0.9, ge=0.8, le=1)
     max_attempts: int = Field(default=3, ge=1, le=5)
     max_input_chars: int = Field(default=50000, ge=1000, le=100000)
+
+
+class Diagnosis(StrictModel):
+    category: Literal[
+        "code_defect", "configuration", "external", "insufficient_evidence"
+    ]
+    confidence: float = Field(ge=0, le=1)
+    reason: str
+    evidence: list[str]
+
+
+class Review(StrictModel):
+    approved: bool
+    addresses_evidence: bool
+    regression_is_meaningful: bool
+    preserves_safety: bool
+    reason: str

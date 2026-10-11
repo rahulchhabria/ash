@@ -31,9 +31,7 @@ def test_init_sentry_enables_sentry_logs(monkeypatch) -> None:
     monkeypatch.setattr(observability, "SENTRY_AVAILABLE", True)
     monkeypatch.setattr(observability, "LoggingIntegration", FakeLoggingIntegration)
     monkeypatch.setattr(observability, "AsyncioIntegration", FakeAsyncioIntegration)
-    monkeypatch.setattr(
-        observability, "AnthropicIntegration", FakeAnthropicIntegration
-    )
+    monkeypatch.setattr(observability, "AnthropicIntegration", FakeAnthropicIntegration)
     monkeypatch.setattr(observability, "OpenAIIntegration", FakeOpenAIIntegration)
     monkeypatch.setattr(observability.sentry_sdk, "init", fake_init)
 

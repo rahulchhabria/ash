@@ -225,7 +225,7 @@ def test_real_isolated_candidate_requires_baseline_failure_and_green_suite(
     (repo / "src/ash/example.py").write_text("def answer():\n    return 1\n")
     (repo / "tests").mkdir()
     (repo / "tests/test_existing.py").write_text(
-        "from ash.example import answer\ndef test_existing():\n    assert isinstance(answer(), int)\n"
+        "from ash.example import answer\ndef test_existing():\n    assert isinstance(answer(), int)\ndef test_other():\n    assert callable(answer)\n"
     )
     for args in (
         ["init", "-q"],
@@ -246,26 +246,28 @@ def test_real_isolated_candidate_requires_baseline_failure_and_green_suite(
     revision = subprocess.check_output(
         ["/usr/bin/git", "rev-parse", "HEAD"], cwd=repo, text=True
     ).strip()
-    test = """from ash.example import answer
-from pathlib import Path
-import os
+    test = """import os
 import socket
+from pathlib import Path
+
+from ash.example import answer
+
 
 def test_regression():
-    assert not Path('/home/rahul/.ash/config.toml').exists()
-    assert 'OPENAI_API_KEY' not in os.environ
+    assert not Path("/home/rahul/.ash/config.toml").exists()
+    assert "OPENAI_API_KEY" not in os.environ
     try:
-        Path('src/ash/example.py').write_text('changed')
+        Path("src/ash/example.py").write_text("changed")
     except OSError:
         pass
     else:
-        raise AssertionError('source writable')
+        raise AssertionError("source writable")
     try:
-        socket.create_connection(('1.1.1.1', 443), timeout=1)
+        socket.create_connection(("1.1.1.1", 443), timeout=1)
     except OSError:
         pass
     else:
-        raise AssertionError('network accessible')
+        raise AssertionError("network accessible")
     assert answer() == 2
 """
     proposal = Proposal(
