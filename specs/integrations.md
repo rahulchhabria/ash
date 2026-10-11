@@ -147,3 +147,16 @@ Integrations may register bounded async health probes with the runtime. `/health
 is process liveness; `/ready` checks integration failures and registered dependency
 probes, returning HTTP 503 if a required check fails. The RPC lifecycle owns the
 sandbox-to-host socket probe, keeping feature checks out of server wiring.
+
+## Tracing
+
+Integration contributors may return optional vendor-neutral operation observers.
+The composer installs them on the agent; a context-local observer tree covers the
+whole turn, awaited and streamed LLM calls, and tool execution. Cancellation and
+exceptions close spans without changing application results. Observer failures
+are isolated. Provider SDK integrations supply Sentry LLM spans under an explicit
+`gen_ai.invoke_agent` transaction; tool operations use `gen_ai.execute_tool`.
+Braintrust receives task, llm, and tool spans, actual durations, provider-reported
+token usage, conversation ID, release, and the shared Sentry trace ID. Content
+capture remains opt-in, scrubbed and bounded. Missing usage is never invented.
+Snapshots remain separately identifiable from traces and delivered replies.

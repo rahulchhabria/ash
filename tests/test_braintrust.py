@@ -120,7 +120,7 @@ async def test_export_failure_does_not_break_following_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = Mock()
-    client.log.side_effect = [RuntimeError("offline"), None]
+    client.start_span.side_effect = [RuntimeError("offline"), Mock()]
     init_logger = Mock(return_value=client)
     monkeypatch.setitem(
         sys.modules, "braintrust", SimpleNamespace(init_logger=init_logger)
@@ -133,8 +133,8 @@ async def test_export_failure_does_not_break_following_turn(
             "create reminder", conversation(), "u", ctx
         )
     await integration.on_shutdown(ctx)
-    assert client.log.call_count == 2
-    assert client.flush.call_count == 1
+    assert client.start_span.call_count == 2
+    assert client.flush.call_count == 2
     assert init_logger.call_args.kwargs["set_current"] is False
     assert integration._worker is None
 

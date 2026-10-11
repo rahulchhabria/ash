@@ -104,6 +104,7 @@ async def compose_integrations(
         sandbox_env_augmenters=runtime.sandbox_env_augmenters(context),
         incoming_message_preprocessors=runtime.incoming_message_preprocessors(context),
         message_postprocess_hooks=runtime.message_postprocess_hooks(context),
+        trace_observers=runtime.trace_observers(context),
     )
     _update_subagent_shared_prompt(
         config=config,

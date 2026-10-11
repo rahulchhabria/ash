@@ -21,6 +21,7 @@ from ash.integrations.runtime_rpc import RuntimeRPCIntegration
 from ash.integrations.scheduling import SchedulingIntegration
 from ash.integrations.search import SearchIntegration
 from ash.integrations.todo import TodoIntegration
+from ash.integrations.tracing import TracingIntegration
 from ash.integrations.vapi_calls import VapiCallsIntegration
 
 if TYPE_CHECKING:
@@ -46,6 +47,7 @@ def _create_chat_integrations(
     graph_dir: Path,
 ) -> DefaultIntegrations:
     contributors: list[IntegrationContributor] = []
+    contributors.append(TracingIntegration())
     contributors.append(BraintrustIntegration())
     contributors.append(SearchIntegration())
     if include_image:
@@ -76,6 +78,7 @@ def _create_eval_integrations(
 ) -> DefaultIntegrations:
     scheduling = SchedulingIntegration(graph_dir)
     contributors: list[IntegrationContributor] = [scheduling]
+    contributors.append(TracingIntegration())
     contributors.append(BraintrustIntegration())
     contributors.append(SearchIntegration())
     if include_image:
@@ -123,6 +126,7 @@ def _create_serve_integrations(
     )
 
     contributors: list[IntegrationContributor] = [RuntimeRPCIntegration(logs_path)]
+    contributors.append(TracingIntegration())
     contributors.append(BraintrustIntegration())
     contributors.append(SearchIntegration())
     if include_image:

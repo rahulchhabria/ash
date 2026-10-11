@@ -23,6 +23,7 @@ from ash.llm.types import (
     ToolUse,
     Usage,
 )
+from ash.tracing import record_usage, traced
 
 if TYPE_CHECKING:
     from ash.llm.thinking import ThinkingConfig
@@ -161,6 +162,7 @@ class AnthropicProvider(LLMProvider):
             raw=response.model_dump(),
         )
 
+    @traced("llm")
     async def complete(
         self,
         messages: list[Message],
@@ -207,6 +209,7 @@ class AnthropicProvider(LLMProvider):
         )
         return self._parse_response(response)
 
+    @traced("llm")
     async def stream(
         self,
         messages: list[Message],
@@ -266,6 +269,12 @@ class AnthropicProvider(LLMProvider):
                             current_tool_id = None
 
                     elif isinstance(event, anthropic.types.MessageStopEvent):
+                        final = await stream.get_final_message()
+                        record_usage(
+                            final.usage.input_tokens,
+                            final.usage.output_tokens,
+                            final.model,
+                        )
                         yield StreamChunk(type=StreamEventType.MESSAGE_END)
             logger.debug("Stream complete")
 

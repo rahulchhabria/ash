@@ -423,6 +423,7 @@ async def test_compose_integrations_runs_setup_and_installs_hooks() -> None:
             sandbox_env_augmenters=None,
             incoming_message_preprocessors=None,
             message_postprocess_hooks=None,
+            trace_observers=None,
         ) -> None:
             self.prompt_hooks = prompt_context_augmenters
             self.env_hooks = sandbox_env_augmenters
@@ -468,6 +469,7 @@ async def test_active_integrations_runs_full_lifecycle() -> None:
             sandbox_env_augmenters=None,
             incoming_message_preprocessors=None,
             message_postprocess_hooks=None,
+            trace_observers=None,
         ) -> None:
             _ = (
                 prompt_context_augmenters,
@@ -516,6 +518,7 @@ async def test_memory_and_scheduling_compose_with_single_memory_postprocess(
             sandbox_env_augmenters=None,
             incoming_message_preprocessors=None,
             message_postprocess_hooks=None,
+            trace_observers=None,
         ) -> None:
             _ = (
                 prompt_context_augmenters,
@@ -617,6 +620,7 @@ async def test_compose_integrations_refreshes_subagent_shared_prompt() -> None:
             sandbox_env_augmenters=None,
             incoming_message_preprocessors=None,
             message_postprocess_hooks=None,
+            trace_observers=None,
         ) -> None:
             _ = (
                 prompt_context_augmenters,
@@ -702,6 +706,7 @@ async def test_compose_integrations_wires_skill_instruction_augmenter() -> None:
             sandbox_env_augmenters=None,
             incoming_message_preprocessors=None,
             message_postprocess_hooks=None,
+            trace_observers=None,
         ) -> None:
             _ = (
                 prompt_context_augmenters,

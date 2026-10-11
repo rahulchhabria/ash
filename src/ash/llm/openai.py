@@ -23,6 +23,7 @@ from ash.llm.types import (
     ToolUse,
     Usage,
 )
+from ash.tracing import record_usage, traced
 
 if TYPE_CHECKING:
     from ash.llm.thinking import ThinkingConfig
@@ -295,6 +296,7 @@ class OpenAIProvider(LLMProvider):
             raw=response.model_dump(),
         )
 
+    @traced("llm")
     async def complete(
         self,
         messages: list[Message],
@@ -346,6 +348,7 @@ class OpenAIProvider(LLMProvider):
 
         return self._parse_response(response)
 
+    @traced("llm")
     async def stream(
         self,
         messages: list[Message],
@@ -412,6 +415,11 @@ class OpenAIProvider(LLMProvider):
                     )
 
             elif event_type == "response.completed":
+                usage = getattr(getattr(event, "response", None), "usage", None)
+                if usage:
+                    record_usage(
+                        usage.input_tokens, usage.output_tokens, event.response.model
+                    )
                 suffix = _citation_suffix(citations)
                 if suffix:
                     yield StreamChunk(

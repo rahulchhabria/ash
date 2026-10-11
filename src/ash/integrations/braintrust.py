@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from ash.integrations.runtime import IntegrationContext, IntegrationContributor
 from ash.observability.braintrust import conversation_record
+from ash.observability.tracing import BraintrustObserver
 
 if TYPE_CHECKING:
     from ash.core.session import SessionState
@@ -39,15 +40,50 @@ class BraintrustIntegration(IntegrationContributor):
             async_flush=True,
             set_current=False,
         )
+        # Resolve project metadata off the request thread before creating spans.
+        await asyncio.to_thread(lambda: self._client.id)
         self._queue = asyncio.Queue(maxsize=config.queue_size)
         self._worker = asyncio.create_task(self._export(), name="braintrust-export")
+
+    def trace_observer(self, context: IntegrationContext) -> BraintrustObserver | None:
+        if self._client is None:
+            return None
+        return BraintrustObserver(
+            self._client,
+            context.config.braintrust,
+            {
+                "release": context.config.sentry.release
+                if context.config.sentry
+                else None,
+                "environment": context.config.sentry.environment
+                if context.config.sentry
+                else None,
+                "mode": context.mode,
+            },
+        )
+
+    def _write_record(self, record: dict[str, Any]) -> None:
+        span = self._client.start_span(
+            name="ash.snapshot", type="task", set_current=False, **record
+        )
+        span.end()
 
     async def _export(self) -> None:
         assert self._queue is not None
         while True:
-            record = await self._queue.get()
             try:
-                await asyncio.to_thread(self._client.log, **record)
+                record = await asyncio.wait_for(self._queue.get(), timeout=2)
+            except TimeoutError:
+                try:
+                    await asyncio.to_thread(self._client.flush)
+                except Exception as exc:
+                    logger.warning(
+                        "braintrust_flush_failed",
+                        extra={"error.type": type(exc).__name__},
+                    )
+                continue
+            try:
+                await asyncio.to_thread(self._write_record, record)
                 # Drain the SDK buffer per record so our bounded queue is the buffer.
                 await asyncio.to_thread(self._client.flush)
             except Exception as exc:
@@ -96,5 +132,6 @@ class BraintrustIntegration(IntegrationContributor):
         finally:
             self._worker.cancel()
             await asyncio.gather(self._worker, return_exceptions=True)
+            await asyncio.to_thread(self._client.flush)
             self._worker = None
             self._queue = None

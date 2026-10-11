@@ -9,6 +9,7 @@ from ash.llm.types import ToolDefinition
 from ash.logging import log_context
 from ash.tools.base import Tool, ToolContext, ToolResult
 from ash.tools.registry import ToolRegistry
+from ash.tracing import traced
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class ToolExecutor:
         self._registry = registry
         self._on_execution = on_execution
 
+    @traced("tool")
     async def execute(
         self,
         tool_name: str,

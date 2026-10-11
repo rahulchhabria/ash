@@ -54,6 +54,7 @@ from ash.llm.types import (
 )
 from ash.tools import ToolContext, ToolExecutor, ToolRegistry, ToolResult
 from ash.tools.trust import SanitizedToolResult, sanitize_tool_result_for_model
+from ash.tracing import traced
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -227,8 +228,10 @@ class Agent:
         sandbox_env_augmenters: list[SandboxEnvAugmenter] | None = None,
         incoming_message_preprocessors: list[IncomingMessagePreprocessor] | None = None,
         message_postprocess_hooks: list[MessagePostprocessHook] | None = None,
+        trace_observers: list[Any] | None = None,
     ) -> None:
         """Install integration hooks after agent construction."""
+        self._trace_observers = tuple(trace_observers or [])
         self._prompt_context_augmenters = tuple(prompt_context_augmenters or [])
         self._sandbox_env_augmenters = tuple(sandbox_env_augmenters or [])
         self._incoming_message_preprocessors = tuple(
@@ -1127,6 +1130,7 @@ class Agent:
                 iterations=0,
             )
 
+    @traced("agent")
     async def process_message(
         self,
         user_message: str,
@@ -1295,6 +1299,7 @@ class Agent:
                 checkpoint=_extract_checkpoint(tool_calls),
             )
 
+    @traced("agent")
     async def process_message_streaming(
         self,
         user_message: str,

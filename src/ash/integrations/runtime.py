@@ -10,7 +10,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from ash.core.types import (
     IncomingMessagePreprocessor,
@@ -67,6 +67,10 @@ class IntegrationContributor:
 
     async def setup(self, context: IntegrationContext) -> None:
         """Initialize contributor state."""
+        return None
+
+    def trace_observer(self, context: IntegrationContext) -> Any:
+        """Return an optional operation observer (specs/integrations.md)."""
         return None
 
     async def on_startup(self, context: IntegrationContext) -> None:
@@ -200,6 +204,19 @@ class IntegrationRuntime:
                 continue
             active.append(contributor)
         self._active_contributors = tuple(active)
+
+    def trace_observers(self, context: IntegrationContext) -> list[Any]:
+        observers = []
+        for contributor in self._active_contributors:
+            try:
+                observer = contributor.trace_observer(context)
+                if observer is not None:
+                    observers.append(observer)
+            except Exception:
+                self._log_hook_failure(
+                    hook_name="trace_observer", contributor=contributor
+                )
+        return observers
 
     def health_snapshot(self) -> IntegrationHealthSnapshot:
         return IntegrationHealthSnapshot(

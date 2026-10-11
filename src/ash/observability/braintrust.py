@@ -78,6 +78,8 @@ def conversation_record(
         "metadata": {
             **metadata,
             "conversation_id": session.session_id,
+            "snapshot_version": 2,
+            "turn_truncated": len(turn) > config.max_messages,
             "provider": session.provider,
             "observation_kind": "post_turn_session_snapshot",
             "turn_boundary_found": start is not None,
@@ -93,5 +95,8 @@ def conversation_record(
     }
     if config.capture_content:
         record["input"] = {"request": user_message}
-        record["output"] = {"retained_messages": [asdict(m) for m in retained]}
+        record["output"] = {
+            "retained_messages": [asdict(m) for m in retained],
+            "turn_messages": [asdict(m) for m in turn[-config.max_messages :]],
+        }
     return scrub(record, config.max_content_chars)
